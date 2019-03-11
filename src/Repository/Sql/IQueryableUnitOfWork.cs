@@ -20,7 +20,7 @@ namespace eQuantic.Core.Data.Repository.Sql
         /// </summary>
         /// <typeparam name="TEntity"></typeparam>
         /// <returns></returns>
-        IQueryable<TEntity> CreateSet<TEntity>() where TEntity : class;
+        ISet<TEntity> CreateSet<TEntity>() where TEntity : class, IEntity, new();
 
         /// <summary>
         /// Attach this item into "ObjectStateManager"
