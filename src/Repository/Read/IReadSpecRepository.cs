@@ -1,13 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
-using System.Threading.Tasks;
 using eQuantic.Core.Linq;
 using eQuantic.Core.Linq.Specification;
 
-namespace eQuantic.Core.Data.Repository.Query
+namespace eQuantic.Core.Data.Repository.Read
 {
-    public interface IAsyncQuerySpecRepository<TEntity, TKey> : IAsyncQueryRepository<TEntity, TKey>
+    public interface IReadSpecRepository<TEntity, TKey> : IReadRepository<TEntity, TKey>
         where TEntity : class, IEntity, new()
     {
         /// <summary>
@@ -16,27 +15,43 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="specification">Specification that result meet</param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, params string[] loadProperties);
+        IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="specification"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification,
+        IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification,
             params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Get element by entity key
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="loadProperties"></param>
+        /// <returns></returns>
+        TEntity Get(TKey id, params string[] loadProperties);
+
+        /// <summary>
+        /// Get element by entity key
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="loadProperties"></param>
+        /// <returns></returns>
+        TEntity Get(TKey id, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// Get all elements of type TEntity in repository
         /// </summary>
         /// <returns>List of selected elements</returns>
-        Task<IEnumerable<TEntity>> GetAllAsync(params string[] loadProperties);
+        IEnumerable<TEntity> GetAll(params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetAllAsync(params Expression<Func<TEntity, object>>[] loadProperties);
+        IEnumerable<TEntity> GetAll(params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// Get all elements of type TEntity in repository
@@ -44,31 +59,15 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortingColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetAllAsync(ISorting[] sortingColumns, params string[] loadProperties);
+        IEnumerable<TEntity> GetAll(ISorting[] sortingColumns, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="sortingColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetAllAsync(ISorting[] sortingColumns,
+        IEnumerable<TEntity> GetAll(ISorting[] sortingColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
-
-        /// <summary>
-        /// Get element by entity key
-        /// </summary>
-        /// <param name="id"></param>
-        /// <param name="loadProperties"></param>
-        /// <returns></returns>
-        Task<TEntity> GetAsync(TKey id, params string[] loadProperties);
-
-        /// <summary>
-        /// Get element by entity key
-        /// </summary>
-        /// <param name="id"></param>
-        /// <param name="loadProperties"></param>
-        /// <returns></returns>
-        Task<TEntity> GetAsync(TKey id, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// Get elements of type TEntity in repository
@@ -76,14 +75,14 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="filter">Filter that each element do match</param>
         /// <param name="loadProperties">Load properties from element</param>
         /// <returns>List of selected elements</returns>
-        Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
+        IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter,
+        IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter,
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -92,7 +91,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortColumns,
+        IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter, ISorting[] sortColumns,
             params string[] loadProperties);
 
         /// <summary>
@@ -101,7 +100,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortColumns,
+        IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter, ISorting[] sortColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -110,14 +109,14 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="filter">Filter that each element do match</param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
+        TEntity GetFirst(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter,
+        TEntity GetFirst(Expression<Func<TEntity, bool>> filter,
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -126,13 +125,16 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortingColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params string[] loadProperties);
+        TEntity GetFirst(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params string[] loadProperties);
 
         /// <summary>
-        ///
-        /// </summary> <param name="filter"></param> <param name="sortingColumns"></param> <param
-        /// name="Expression<Func<TEntity"></param> <param name="loadProperties"></param> <returns></returns>
-        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params Expression<Func<TEntity, object>>[] loadProperties);
+        /// </summary>
+        /// <param name="filter"></param>
+        /// <param name="sortingColumns"></param>
+        /// <param name="loadProperties"></param>
+        /// <returns></returns>
+        TEntity GetFirst(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
+            params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// </summary>
@@ -140,7 +142,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(int limit, ISorting[] sortColumns, params string[] loadProperties);
+        IEnumerable<TEntity> GetPaged(int limit, ISorting[] sortColumns, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
@@ -148,7 +150,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(int limit, ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
+        IEnumerable<TEntity> GetPaged(int limit, ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// </summary>
@@ -157,7 +159,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int limit,
+        IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int limit,
             ISorting[] sortColumns, params string[] loadProperties);
 
         /// <summary>
@@ -167,7 +169,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int limit,
+        IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int limit,
             ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -177,7 +179,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int limit,
+        IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int limit,
             ISorting[] sortColumns, params string[] loadProperties);
 
         /// <summary>
@@ -187,7 +189,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int limit,
+        IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int limit,
             ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -197,7 +199,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(int pageIndex, int pageCount, ISorting[] sortColumns,
+        IEnumerable<TEntity> GetPaged(int pageIndex, int pageCount, ISorting[] sortColumns,
             params string[] loadProperties);
 
         /// <summary>
@@ -207,7 +209,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(int pageIndex, int pageCount, ISorting[] sortColumns,
+        IEnumerable<TEntity> GetPaged(int pageIndex, int pageCount, ISorting[] sortColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -219,7 +221,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int pageIndex, int pageCount,
+        IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int pageIndex, int pageCount,
             ISorting[] sortColumns, params string[] loadProperties);
 
         /// <summary>
@@ -230,7 +232,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int pageIndex, int pageCount,
+        IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int pageIndex, int pageCount,
             ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -242,7 +244,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
+        IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
             ISorting[] sortColumns, params string[] loadProperties);
 
         /// <summary>
@@ -253,7 +255,7 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="sortColumns"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
+        IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
             ISorting[] sortColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -262,34 +264,18 @@ namespace eQuantic.Core.Data.Repository.Query
         /// <param name="filter">Filter that each element do match</param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
+        TEntity GetSingle(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
 
         /// <summary>
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter,
-            params Expression<Func<TEntity, object>>[] loadProperties);
-
-        /// <summary>
-        /// </summary>
-        /// <param name="filter"></param>
-        /// <param name="sortingColumns"></param>
-        /// <param name="loadProperties"></param>
-        /// <returns></returns>
-        Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
-            params string[] loadProperties);
-
-        /// <summary>
-        ///
-        /// </summary> <param name="filter"></param> <param name="sortingColumns"></param> <param
-        /// name="Expression<Func<TEntity"></param> <param name="loadProperties"></param> <returns></returns>
-        Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
+        TEntity GetSingle(Expression<Func<TEntity, bool>> filter,
             params Expression<Func<TEntity, object>>[] loadProperties);
     }
 
-    public interface IAsyncQuerySpecRepository<TUnitOfWork, TEntity, TKey> : IAsyncQuerySpecRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
+    public interface IReadSpecRepository<TUnitOfWork, TEntity, TKey> : IReadSpecRepository<TEntity, TKey>, IRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {

@@ -1,12 +1,18 @@
-﻿using eQuantic.Core.Linq.Specification;
-using System;
+﻿using System;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
+using eQuantic.Core.Linq.Specification;
 
-namespace eQuantic.Core.Data.Repository.Command
+namespace eQuantic.Core.Data.Repository.Write
 {
-    public interface IAsyncCommandRepository<TEntity, TKey> : IAsyncRepository
+    public interface IAsyncWriteRepository<TUnitOfWork, TEntity, TKey> : IAsyncWriteRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
+        where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
+    {
+    }
+
+    public interface IAsyncWriteRepository<TEntity, TKey> : IAsyncRepository
+            where TEntity : class, IEntity, new()
     {
         /// <summary>
         /// Delete filtered elements of type TEntity in repository
@@ -37,11 +43,5 @@ namespace eQuantic.Core.Data.Repository.Command
         /// <param name="updateFactory"></param>
         /// <returns></returns>
         Task<int> UpdateManyAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory);
-    }
-
-    public interface IAsyncCommandRepository<TUnitOfWork, TEntity, TKey> : IAsyncCommandRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
-        where TUnitOfWork : IUnitOfWork
-        where TEntity : class, IEntity, new()
-    {
     }
 }

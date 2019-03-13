@@ -4,9 +4,9 @@ using System.Linq.Expressions;
 using eQuantic.Core.Linq;
 using eQuantic.Core.Linq.Specification;
 
-namespace eQuantic.Core.Data.Repository.Query
+namespace eQuantic.Core.Data.Repository.Read
 {
-    public interface IQueryRepository<TEntity, TKey> : IRepository
+    public interface IReadRepository<TEntity, TKey> : IRepository
         where TEntity : class, IEntity, new()
     {
         /// <summary>
@@ -136,7 +136,7 @@ namespace eQuantic.Core.Data.Repository.Query
         TEntity GetSingle(Expression<Func<TEntity, bool>> filter);
     }
 
-    public interface IQueryRepository<TUnitOfWork, TEntity, TKey> : IQueryRepository<TEntity, TKey>, IRepository<TUnitOfWork>
+    public interface IReadRepository<TUnitOfWork, TEntity, TKey> : IReadRepository<TEntity, TKey>, IRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {

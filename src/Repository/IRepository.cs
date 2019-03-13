@@ -1,6 +1,6 @@
 ﻿using System;
-using eQuantic.Core.Data.Repository.Command;
-using eQuantic.Core.Data.Repository.Query;
+using eQuantic.Core.Data.Repository.Read;
+using eQuantic.Core.Data.Repository.Write;
 
 namespace eQuantic.Core.Data.Repository
 {
@@ -26,7 +26,7 @@ namespace eQuantic.Core.Data.Repository
     /// </remarks>
     /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
     /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-    public interface IRepository<TEntity, TKey> : IQueryRepository<TEntity, TKey>, ICommandRepository<TEntity, TKey>
+    public interface IRepository<TEntity, TKey> : IReadRepository<TEntity, TKey>, IWriteRepository<TEntity, TKey>
         where TEntity : class, IEntity, new()
     {
     }
@@ -41,7 +41,7 @@ namespace eQuantic.Core.Data.Repository
     /// </remarks>
     /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
     /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-    public interface IRepository<TUnitOfWork, TEntity, TKey> : IQueryRepository<TUnitOfWork, TEntity, TKey>, ICommandRepository<TUnitOfWork, TEntity, TKey>
+    public interface IRepository<TUnitOfWork, TEntity, TKey> : IReadRepository<TUnitOfWork, TEntity, TKey>, IWriteRepository<TUnitOfWork, TEntity, TKey>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {

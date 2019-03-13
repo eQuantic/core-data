@@ -5,9 +5,9 @@ using System.Threading.Tasks;
 using eQuantic.Core.Linq;
 using eQuantic.Core.Linq.Specification;
 
-namespace eQuantic.Core.Data.Repository.Query
+namespace eQuantic.Core.Data.Repository.Read
 {
-    public interface IAsyncQueryRepository<TEntity, TKey> : IAsyncRepository
+    public interface IAsyncReadRepository<TEntity, TKey> : IAsyncRepository
         where TEntity : class, IEntity, new()
     {
         /// <summary>
@@ -145,7 +145,7 @@ namespace eQuantic.Core.Data.Repository.Query
         Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns);
     }
 
-    public interface IAsyncQueryRepository<TUnitOfWork, TEntity, TKey> : IAsyncQueryRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
+    public interface IAsyncReadRepository<TUnitOfWork, TEntity, TKey> : IAsyncReadRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {
