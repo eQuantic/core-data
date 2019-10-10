@@ -4,7 +4,7 @@
   <PropertyGroup>
     <Description>eQuantic Core Data Class Library</Description>
     <AssemblyTitle>eQuantic.Core.Data</AssemblyTitle>
-    <Version>2.0.0-dev0001</Version>
+    <Version>2.0.0.1</Version>
     <Authors>eQuantic Systems</Authors>
     <TargetFrameworks>net45;net461;net462;netstandard1.6;netstandard2.0</TargetFrameworks>
     <AssemblyName>eQuantic.Core.Data</AssemblyName>
