@@ -15,4 +15,4 @@ jobs:
       - name: Build with dotnet
         run: dotnet build --configuration Release
       - name: Push package
-        run: dotnet nuget push **/*.nupkg -k {{secrets.github_key}} -s https://api.nuget.org/v3/index.json
+        run: dotnet nuget push **/*.nupkg -k ${{secrets.github_key}} -s https://api.nuget.org/v3/index.json
