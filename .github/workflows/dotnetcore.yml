@@ -1,4 +1,4 @@
-name: .NET Core
+name: eQuantic Core Data
 
 on: [push]
 
@@ -12,9 +12,7 @@ jobs:
         uses: actions/setup-dotnet@v1
         with:
           dotnet-version: 2.2.108
-      - name: Build with dotnet
+      - name: Build eQuantic.Core.Data Library
         run: dotnet build --configuration Release
       - name: Push package into Nuget.org
         run: dotnet nuget push **/*.nupkg --skip-duplicate -k ${{secrets.github_key}} -s https://api.nuget.org/v3/index.json
-      - name: Push package into Github
-        run: dotnet nuget push **/*.nupkg --skip-duplicate -s "github"
