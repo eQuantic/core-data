@@ -24,14 +24,14 @@ namespace eQuantic.Core.Data.Repository.Write
         /// </summary>
         /// <param name="filter"></param>
         /// <returns></returns>
-        int DeleteMany(Expression<Func<TEntity, bool>> filter);
+        long DeleteMany(Expression<Func<TEntity, bool>> filter);
 
         /// <summary>
         /// Delete specified elements of type TEntity in repository
         /// </summary>
         /// <param name="specification"></param>
         /// <returns></returns>
-        int DeleteMany(ISpecification<TEntity> specification);
+        long DeleteMany(ISpecification<TEntity> specification);
 
         /// <summary>
         /// Sets modified entity into the repository. When calling Commit() method in UnitOfWork
@@ -66,7 +66,7 @@ namespace eQuantic.Core.Data.Repository.Write
         /// <param name="filter"></param>
         /// <param name="updateFactory"></param>
         /// <returns></returns>
-        int UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory);
+        long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory);
 
         /// <summary>
         /// Update specified elements of type TEntity in repository
@@ -74,6 +74,6 @@ namespace eQuantic.Core.Data.Repository.Write
         /// <param name="specification"></param>
         /// <param name="updateFactory"></param>
         /// <returns></returns>
-        int UpdateMany(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory);
+        long UpdateMany(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory);
     }
 }
