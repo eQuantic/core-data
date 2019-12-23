@@ -14,5 +14,7 @@ jobs:
           dotnet-version: 2.2.108
       - name: Build with dotnet
         run: dotnet build --configuration Release
-      - name: Push package
+      - name: Push package into Nuget.org
         run: dotnet nuget push **/*.nupkg --skip-duplicate -k ${{secrets.github_key}} -s https://api.nuget.org/v3/index.json
+      - name: Push package into Github
+        run: dotnet nuget push **/*.nupkg --skip-duplicate -s "github"
