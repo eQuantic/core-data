@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
 
@@ -12,7 +11,7 @@ namespace eQuantic.Core.Data.Repository.Sql
     /// This contract extend IUnitOfWork for use with EF code
     /// </remarks>
     /// </summary>
-    public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISql
+    public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
     {
         /// <summary>
         /// Apply current values in <paramref name="original"/>

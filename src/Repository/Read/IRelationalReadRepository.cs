@@ -1,12 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
-using eQuantic.Core.Linq;
+using eQuantic.Core.Linq.Sorter;
 using eQuantic.Core.Linq.Specification;
 
 namespace eQuantic.Core.Data.Repository.Read
 {
-    public interface IReadSpecRepository<TEntity, TKey> : IReadRepository<TEntity, TKey>
+    /// <summary>
+    /// The read repository with joins
+    /// </summary>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Read.IReadRepository{TEntity, TKey}" />
+    public interface IRelationalReadRepository<TEntity, TKey> : IReadRepository<TEntity, TKey>
         where TEntity : class, IEntity, new()
     {
         /// <summary>
@@ -18,11 +24,31 @@ namespace eQuantic.Core.Data.Repository.Read
         IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, params string[] loadProperties);
 
         /// <summary>
+        /// Get all elements of type TEntity that matching a Specification <paramref name="specification"/>
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, ISorting[] sortingColumns, params string[] loadProperties);
+
+        /// <summary>
+        /// Get all elements of type TEntity that matching a Specification <paramref name="specification"/>
         /// </summary>
         /// <param name="specification"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
         IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification,
+            params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Get all elements of type TEntity that matching a Specification <paramref name="specification"/>
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, ISorting[] sortingColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
@@ -120,6 +146,22 @@ namespace eQuantic.Core.Data.Repository.Read
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
+        /// Gets the first.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetFirst(ISpecification<TEntity> specification, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the first.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetFirst(ISpecification<TEntity> specification, params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="sortingColumns"></param>
@@ -135,6 +177,24 @@ namespace eQuantic.Core.Data.Repository.Read
         /// <returns></returns>
         TEntity GetFirst(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Gets the first.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetFirst(ISpecification<TEntity> specification, ISorting[] sortingColumns, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the first.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetFirst(ISpecification<TEntity> specification, ISorting[] sortingColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// </summary>
@@ -273,9 +333,69 @@ namespace eQuantic.Core.Data.Repository.Read
         /// <returns></returns>
         TEntity GetSingle(Expression<Func<TEntity, bool>> filter,
             params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(ISpecification<TEntity> specification, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(ISpecification<TEntity> specification, params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="filter">The filter.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="filter">The filter.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
+            params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(ISpecification<TEntity> specification, ISorting[] sortingColumns, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the single.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        TEntity GetSingle(ISpecification<TEntity> specification, ISorting[] sortingColumns, params Expression<Func<TEntity, object>>[] loadProperties);
     }
 
-    public interface IReadSpecRepository<TUnitOfWork, TEntity, TKey> : IReadSpecRepository<TEntity, TKey>, IRepository<TUnitOfWork>
+    /// <summary>
+    /// The read repository with joins
+    /// </summary>
+    /// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Read.IReadRepository{TEntity, TKey}" />
+    public interface IRelationalReadRepository<TUnitOfWork, TEntity, TKey> : IRelationalReadRepository<TEntity, TKey>, IRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {

@@ -4,20 +4,23 @@ using eQuantic.Core.Data.Repository.Write;
 namespace eQuantic.Core.Data.Repository
 {
     /// <summary>
+    /// The asynchronous repository
     /// </summary>
     public interface IAsyncRepository : IRepository
     {
     }
 
     /// <summary>
+    /// The asynchronous repository
     /// </summary>
     /// <typeparam name="TUnitOfWork"></typeparam>
-    public interface IAsyncRepository<TUnitOfWork> : IAsyncRepository, IRepository<TUnitOfWork>
+    public interface IAsyncRepository<out TUnitOfWork> : IAsyncRepository, IRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
     {
     }
 
     /// <summary>
+    /// The asynchronous repository
     /// </summary>
     /// <typeparam name="TEntity"></typeparam>
     /// <typeparam name="TKey"></typeparam>
@@ -27,6 +30,7 @@ namespace eQuantic.Core.Data.Repository
     }
 
     /// <summary>
+    /// The asynchronous repository
     /// </summary>
     /// <typeparam name="TUnitOfWork"></typeparam>
     /// <typeparam name="TEntity"></typeparam>

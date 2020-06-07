@@ -1,8 +1,9 @@
-﻿using System;
-using System.Linq;
-
-namespace eQuantic.Core.Data.Repository
+﻿namespace eQuantic.Core.Data.Repository
 {
+    /// <summary>
+    /// The Queryable Unit of Work interface
+    /// </summary>
+    /// <seealso cref="eQuantic.Core.Data.Repository.IUnitOfWork" />
     public interface IQueryableUnitOfWork : IUnitOfWork
     {
         /// <summary>

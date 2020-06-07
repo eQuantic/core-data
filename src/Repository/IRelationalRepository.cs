@@ -1,6 +1,4 @@
-﻿using System;
-using System.Linq;
-using eQuantic.Core.Data.Repository.Read;
+﻿using eQuantic.Core.Data.Repository.Read;
 using eQuantic.Core.Data.Repository.Write;
 
 namespace eQuantic.Core.Data.Repository
@@ -15,7 +13,7 @@ namespace eQuantic.Core.Data.Repository
     /// </remarks>
     /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
     /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-    public interface ISpecRepository<TEntity, TKey> : IReadSpecRepository<TEntity, TKey>, IWriteRepository<TEntity, TKey>
+    public interface IRelationalRepository<TEntity, TKey> : IRelationalReadRepository<TEntity, TKey>, IWriteRepository<TEntity, TKey>
         where TEntity : class, IEntity, new()
     {
     }
@@ -28,9 +26,10 @@ namespace eQuantic.Core.Data.Repository
     /// Indeed, one might think that IDbSet already a generic repository and therefore would not need
     /// this item. Using this interface allows us to ensure PI principle within our domain model
     /// </remarks>
+    /// <typeparam name="TUnitOfWork">Type of unit of work</typeparam>
     /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
     /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-    public interface ISpecRepository<TUnitOfWork, TEntity, TKey> : IReadSpecRepository<TUnitOfWork, TEntity, TKey>, IWriteRepository<TUnitOfWork, TEntity, TKey>
+    public interface IRelationalRepository<TUnitOfWork, TEntity, TKey> : IRelationalReadRepository<TUnitOfWork, TEntity, TKey>, IWriteRepository<TUnitOfWork, TEntity, TKey>
         where TUnitOfWork : IUnitOfWork
         where TEntity : class, IEntity, new()
     {

@@ -2,12 +2,31 @@
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Threading.Tasks;
-using eQuantic.Core.Linq;
+using eQuantic.Core.Linq.Sorter;
 using eQuantic.Core.Linq.Specification;
 
 namespace eQuantic.Core.Data.Repository.Read
 {
-    public interface IAsyncReadSpecRepository<TEntity, TKey> : IAsyncReadRepository<TEntity, TKey>
+    /// <summary>
+    /// The asynchronous read repository with specification pattern
+    /// </summary>
+    /// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Read.IAsyncReadRepository{TEntity, TKey}" />
+    public interface IAsyncRelationalReadRepository<TUnitOfWork, TEntity, TKey> : IAsyncRelationalReadRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
+        where TUnitOfWork : IUnitOfWork
+        where TEntity : class, IEntity, new()
+    {
+    }
+
+    /// <summary>
+    /// The asynchronous read repository with specification pattern
+    /// </summary>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Read.IAsyncReadRepository{TEntity, TKey}" />
+    public interface IAsyncRelationalReadRepository<TEntity, TKey> : IAsyncReadRepository<TEntity, TKey>
         where TEntity : class, IEntity, new()
     {
         /// <summary>
@@ -105,7 +124,7 @@ namespace eQuantic.Core.Data.Repository.Read
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
-        /// Get first element by criteria
+        /// Get first element by criteria.
         /// </summary>
         /// <param name="filter">Filter that each element do match</param>
         /// <param name="loadProperties"></param>
@@ -113,14 +132,31 @@ namespace eQuantic.Core.Data.Repository.Read
         Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
 
         /// <summary>
+        /// Get first element by specification.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetFirstAsync(ISpecification<TEntity> specification, params string[] loadProperties);
+
+        /// <summary>
+        /// Get first element by specification.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetFirstAsync(ISpecification<TEntity> specification, params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Get first element by criteria.
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="loadProperties"></param>
         /// <returns></returns>
-        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter,
-            params Expression<Func<TEntity, object>>[] loadProperties);
+        Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
+        /// Get first ordered element by criteria.
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="sortingColumns"></param>
@@ -129,10 +165,31 @@ namespace eQuantic.Core.Data.Repository.Read
         Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params string[] loadProperties);
 
         /// <summary>
-        ///
-        /// </summary> <param name="filter"></param> <param name="sortingColumns"></param> <param
-        /// name="Expression<Func<TEntity"></param> <param name="loadProperties"></param> <returns></returns>
+        /// Get first ordered element by criteria.
+        /// </summary>
+        /// <param name="filter"></param>
+        /// <param name="sortingColumns"></param>
+        /// <param name="loadProperties"></param>
+        /// <returns></returns>
         Task<TEntity> GetFirstAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns, params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Get first ordered element by specification.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetFirstAsync(ISpecification<TEntity> specification, ISorting[] sortingColumns, params string[] loadProperties);
+
+        /// <summary>
+        /// Get first ordered element by specification.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetFirstAsync(ISpecification<TEntity> specification, ISorting[] sortingColumns, params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
         /// </summary>
@@ -265,6 +322,7 @@ namespace eQuantic.Core.Data.Repository.Read
         Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, params string[] loadProperties);
 
         /// <summary>
+        /// Get single element asynchronously by criteria
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="loadProperties"></param>
@@ -273,6 +331,23 @@ namespace eQuantic.Core.Data.Repository.Read
             params Expression<Func<TEntity, object>>[] loadProperties);
 
         /// <summary>
+        /// Gets the single asynchronous.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetSingleAsync(ISpecification<TEntity> specification, params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the single asynchronous.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetSingleAsync(ISpecification<TEntity> specification, params Expression<Func<TEntity, object>>[] loadProperties);
+
+        /// <summary>
+        /// Get single element asynchronously by criteria
         /// </summary>
         /// <param name="filter"></param>
         /// <param name="sortingColumns"></param>
@@ -282,16 +357,33 @@ namespace eQuantic.Core.Data.Repository.Read
             params string[] loadProperties);
 
         /// <summary>
-        ///
-        /// </summary> <param name="filter"></param> <param name="sortingColumns"></param> <param
-        /// name="Expression<Func<TEntity"></param> <param name="loadProperties"></param> <returns></returns>
+        /// Get single element asynchronously by criteria
+        /// </summary>
+        /// <param name="filter"></param>
+        /// <param name="sortingColumns"></param>
+        /// <param name="loadProperties"></param>
+        /// <returns></returns>
         Task<TEntity> GetSingleAsync(Expression<Func<TEntity, bool>> filter, ISorting[] sortingColumns,
             params Expression<Func<TEntity, object>>[] loadProperties);
-    }
 
-    public interface IAsyncReadSpecRepository<TUnitOfWork, TEntity, TKey> : IAsyncReadSpecRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
-        where TUnitOfWork : IUnitOfWork
-        where TEntity : class, IEntity, new()
-    {
+        /// <summary>
+        /// Gets the single asynchronous.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetSingleAsync(ISpecification<TEntity> specification, ISorting[] sortingColumns,
+            params string[] loadProperties);
+
+        /// <summary>
+        /// Gets the single asynchronous.
+        /// </summary>
+        /// <param name="specification">The specification.</param>
+        /// <param name="sortingColumns">The sorting columns.</param>
+        /// <param name="loadProperties">The load properties.</param>
+        /// <returns></returns>
+        Task<TEntity> GetSingleAsync(ISpecification<TEntity> specification, ISorting[] sortingColumns,
+            params Expression<Func<TEntity, object>>[] loadProperties);
     }
 }

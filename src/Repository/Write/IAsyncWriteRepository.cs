@@ -5,13 +5,28 @@ using eQuantic.Core.Linq.Specification;
 
 namespace eQuantic.Core.Data.Repository.Write
 {
+    /// <summary>
+    /// The asynchronous write repository
+    /// </summary>
+    /// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Write.IAsyncWriteRepository{TEntity, TKey}" />
+    /// <seealso cref="eQuantic.Core.Data.Repository.IAsyncRepository{TUnitOfWork}" />
     public interface IAsyncWriteRepository<TUnitOfWork, TEntity, TKey> : IAsyncWriteRepository<TEntity, TKey>, IAsyncRepository<TUnitOfWork>
         where TUnitOfWork : IUnitOfWork
-    where TEntity : class, IEntity, new()
+        where TEntity : class, IEntity, new()
     { }
 
+    /// <summary>
+    /// The asynchronous write repository
+    /// </summary>
+    /// <typeparam name="TEntity">The type of the entity.</typeparam>
+    /// <typeparam name="TKey">The type of the key.</typeparam>
+    /// <seealso cref="eQuantic.Core.Data.Repository.Write.IAsyncWriteRepository{TEntity, TKey}" />
+    /// <seealso cref="eQuantic.Core.Data.Repository.IAsyncRepository{TUnitOfWork}" />
     public interface IAsyncWriteRepository<TEntity, TKey> : IAsyncRepository
-    where TEntity : class, IEntity, new()
+        where TEntity : class, IEntity, new()
     {
         /// <summary>
         /// Add item into repository

@@ -6,23 +6,23 @@ namespace eQuantic.Core.Data.Repository.Sql
     /// <summary>
     /// Base contract for support 'dialect specific queries'.
     /// </summary>
-    public interface ISql
+    public interface ISqlExecutor
     {
         /// <summary>
         /// Execute specific query with underliying persistence store
         /// </summary>
         /// <typeparam name="TEntity">Entity type to map query results</typeparam>
         /// <param name="sqlQuery">
-        /// Dialect Query 
+        /// Dialect Query
         /// <example>
         /// SELECT idCustomer,Name FROM dbo.[Customers] WHERE idCustomer > {0}
         /// </example>
         /// </param>
         /// <param name="parameters">A vector of parameters values</param>
         /// <returns>
-        /// Enumerable results 
+        /// Enumerable results
         /// </returns>
-        IEnumerable<TEntity> ExecuteQuery<TEntity>(string sqlQuery, params object[] parameters) where  TEntity : class;
+        IEnumerable<TEntity> ExecuteQuery<TEntity>(string sqlQuery, params object[] parameters) where TEntity : class;
 
         /// <summary>
         /// Execute arbitrary command into underliying persistence store
@@ -46,12 +46,12 @@ namespace eQuantic.Core.Data.Repository.Sql
         Task<int> ExecuteCommandAsync(string sqlCommand, params object[] parameters);
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         void BeginTransaction();
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="name"></param>
         /// <param name="parameters"></param>
@@ -59,7 +59,7 @@ namespace eQuantic.Core.Data.Repository.Sql
         int ExecuteProcedure(string name, params object[] parameters);
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <param name="name"></param>
         /// <param name="parameters"></param>
@@ -67,7 +67,7 @@ namespace eQuantic.Core.Data.Repository.Sql
         Task<int> ExecuteProcedureAsync(string name, params object[] parameters);
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <typeparam name="TResult"></typeparam>
         /// <param name="name"></param>
@@ -76,7 +76,7 @@ namespace eQuantic.Core.Data.Repository.Sql
         TResult ExecuteFunction<TResult>(string name, params object[] parameters) where TResult : class;
 
         /// <summary>
-        /// 
+        ///
         /// </summary>
         /// <typeparam name="TResult"></typeparam>
         /// <param name="name"></param>
