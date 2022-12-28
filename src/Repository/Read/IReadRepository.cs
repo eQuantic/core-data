@@ -96,8 +96,7 @@ public interface IReadRepository<TEntity, TKey> : IRepository
     /// <param name="limit"></param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int limit,
-        params ISorting[] sortColumns);
+    IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int limit, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get paged elements by criteria
@@ -106,39 +105,36 @@ public interface IReadRepository<TEntity, TKey> : IRepository
     /// <param name="limit"></param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int limit,
-        params ISorting[] sortColumns);
+    IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int limit, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get paged elements
     /// </summary>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    IEnumerable<TEntity> GetPaged(int pageIndex, int pageCount, params ISorting[] sortColumns);
+    IEnumerable<TEntity> GetPaged(int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get paged elements by specification
     /// </summary>
     /// <param name="specification"></param>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int pageIndex, int pageCount,
-        params ISorting[] sortColumns);
+    IEnumerable<TEntity> GetPaged(ISpecification<TEntity> specification, int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get paged elements by criteria
     /// </summary>
     /// <param name="filter"></param>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
-        params ISorting[] sortColumns);
+    IEnumerable<TEntity> GetPaged(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get single element by criteria

@@ -53,18 +53,41 @@ public interface IUnitOfWork : IDisposable
     /// <summary>
     /// Gets the entity repository instance
     /// </summary>
-    /// <typeparam name="TRepository"></typeparam>
+    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
     /// <returns></returns>
-    TRepository GetRepository<TRepository>() where TRepository : IRepository;
+    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>() where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
 
     /// <summary>
     /// Gets the entity repository instance
     /// </summary>
-    /// <typeparam name="TRepository"></typeparam>
+    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
     /// <param name="name"></param>
     /// <returns></returns>
-    TRepository GetRepository<TRepository>(string name) where TRepository : IRepository;
+    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>(string name) where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
 
+    /// <summary>
+    /// Gets the asynchronous entity repository instance
+    /// </summary>
+    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <returns></returns>
+    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>() where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
+
+    /// <summary>
+    /// Gets the asynchronous entity repository instance
+    /// </summary>
+    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>(string name) where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
+    
     /// <summary>
     /// Rollback tracked changes. See references of UnitOfWork pattern
     /// </summary>

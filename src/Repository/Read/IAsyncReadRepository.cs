@@ -93,8 +93,7 @@ public interface IAsyncReadRepository<TEntity, TKey> : IAsyncRepository
     /// <param name="limit"></param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int limit,
-        params ISorting[] sortColumns);
+    Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int limit, params ISorting[] sortColumns);
 
     /// <summary>
     /// </summary>
@@ -102,36 +101,33 @@ public interface IAsyncReadRepository<TEntity, TKey> : IAsyncRepository
     /// <param name="limit"></param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int limit,
-        params ISorting[] sortColumns);
+    Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int limit, params ISorting[] sortColumns);
 
     /// <summary>
     /// </summary>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(int pageIndex, int pageCount, params ISorting[] sortColumns);
+    Task<IEnumerable<TEntity>> GetPagedAsync(int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// </summary>
     /// <param name="specification"></param>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int pageIndex, int pageCount,
-        params ISorting[] sortColumns);
+    Task<IEnumerable<TEntity>> GetPagedAsync(ISpecification<TEntity> specification, int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// </summary>
     /// <param name="filter"></param>
     /// <param name="pageIndex"></param>
-    /// <param name="pageCount"></param>
+    /// <param name="pageSize">The page size.</param>
     /// <param name="sortColumns"></param>
     /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageCount,
-        params ISorting[] sortColumns);
+    Task<IEnumerable<TEntity>> GetPagedAsync(Expression<Func<TEntity, bool>> filter, int pageIndex, int pageSize, params ISorting[] sortColumns);
 
     /// <summary>
     /// Get single ordered element by criteria.
