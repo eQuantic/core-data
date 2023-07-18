@@ -9,10 +9,9 @@ namespace eQuantic.Core.Data.Repository.Write;
 /// </summary>
 /// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <typeparam name="TKey">The type of the key.</typeparam>
-/// <seealso cref="eQuantic.Core.Data.Repository.Write.IWriteRepository{TEntity, TKey}" />
-/// <seealso cref="eQuantic.Core.Data.Repository.IRepository{TUnitOfWork}" />
-public interface IWriteRepository<TUnitOfWork, TEntity, TKey> : IWriteRepository<TEntity, TKey>, IRepository<TUnitOfWork>
+/// <seealso cref="IWriteRepository{TEntity}" />
+/// <seealso cref="IRepository{TUnitOfWork}" />
+public interface IWriteRepository<TUnitOfWork, TEntity> : IWriteRepository<TEntity>, IRepository<TUnitOfWork>
     where TUnitOfWork : IUnitOfWork
     where TEntity : class, IEntity, new()
 {
@@ -22,10 +21,9 @@ public interface IWriteRepository<TUnitOfWork, TEntity, TKey> : IWriteRepository
 /// The write repository
 /// </summary>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <typeparam name="TKey">The type of the key.</typeparam>
-/// <seealso cref="eQuantic.Core.Data.Repository.Write.IWriteRepository{TEntity, TKey}" />
-/// <seealso cref="eQuantic.Core.Data.Repository.IRepository{TUnitOfWork}" />
-public interface IWriteRepository<TEntity, TKey> : IRepository
+/// <seealso cref="IWriteRepository{TEntity}" />
+/// <seealso cref="IRepository{TUnitOfWork}" />
+public interface IWriteRepository<TEntity> : IRepository
     where TEntity : class, IEntity, new()
 {
     /// <summary>

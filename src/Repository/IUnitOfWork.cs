@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
+using eQuantic.Core.Data.Repository.Options;
 
 namespace eQuantic.Core.Data.Repository;
 
@@ -24,6 +25,15 @@ public interface IUnitOfWork : IDisposable
     int Commit();
 
     /// <summary>
+    /// Commit all changes made in a container.
+    /// </summary>
+    ///<remarks>
+    /// If the entity have fixed properties and any optimistic concurrency problem exists,
+    /// then an exception is thrown
+    ///</remarks>
+    int Commit(Action<SaveOptions> options);
+
+    /// <summary>
     /// Commit all changes made in  a container.
     /// </summary>
     ///<remarks>
@@ -39,7 +49,25 @@ public interface IUnitOfWork : IDisposable
     /// If the entity have fixed properties and any optimistic concurrency problem exists,
     /// then 'client changes' are refreshed - Client wins
     ///</remarks>
+    int CommitAndRefreshChanges(Action<SaveOptions> options);
+
+    /// <summary>
+    /// Commit all changes made in  a container.
+    /// </summary>
+    ///<remarks>
+    /// If the entity have fixed properties and any optimistic concurrency problem exists,
+    /// then 'client changes' are refreshed - Client wins
+    ///</remarks>
     Task<int> CommitAndRefreshChangesAsync();
+
+    /// <summary>
+    /// Commit all changes made in  a container.
+    /// </summary>
+    ///<remarks>
+    /// If the entity have fixed properties and any optimistic concurrency problem exists,
+    /// then 'client changes' are refreshed - Client wins
+    ///</remarks>
+    Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options);
 
     /// <summary>
     /// Commit all changes made in a container.
@@ -51,45 +79,36 @@ public interface IUnitOfWork : IDisposable
     Task<int> CommitAsync();
 
     /// <summary>
-    /// Gets the entity repository instance
+    /// Commit all changes made in a container.
     /// </summary>
-    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <returns></returns>
-    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>() where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
+    ///<remarks>
+    /// If the entity have fixed properties and any optimistic concurrency problem exists,
+    /// then an exception is thrown
+    ///</remarks>
+    Task<int> CommitAsync(Action<SaveOptions> options);
 
-    /// <summary>
-    /// Gets the entity repository instance
-    /// </summary>
-    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <param name="name"></param>
-    /// <returns></returns>
-    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>(string name) where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
-
-    /// <summary>
-    /// Gets the asynchronous entity repository instance
-    /// </summary>
-    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <returns></returns>
-    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>() where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
-
-    /// <summary>
-    /// Gets the asynchronous entity repository instance
-    /// </summary>
-    /// <typeparam name="TUnitOfWork">The unit of work</typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <param name="name"></param>
-    /// <returns></returns>
-    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>(string name) where TEntity : class, IEntity, new() where TUnitOfWork : IUnitOfWork;
-    
     /// <summary>
     /// Rollback tracked changes. See references of UnitOfWork pattern
     /// </summary>
     void RollbackChanges();
+}
+
+public interface IUnitOfWork<TUnitOfWork> : IUnitOfWork
+    where TUnitOfWork : IUnitOfWork
+{
+    /// <summary>
+    /// Gets the entity repository instance
+    /// </summary>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <returns></returns>
+    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TEntity, TKey>() where TEntity : class, IEntity, new();
+
+    /// <summary>
+    /// Gets the asynchronous entity repository instance
+    /// </summary>
+    /// <typeparam name="TEntity">The entity</typeparam>
+    /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <returns></returns>
+    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TEntity, TKey>() where TEntity : class, IEntity, new();
 }

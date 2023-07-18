@@ -9,8 +9,8 @@ namespace eQuantic.Core.Data.Repository;
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
 /// <typeparam name="TKey">The type of the key.</typeparam>
 /// <seealso cref="IAsyncQueryableReadRepository{TUnitOfWork,TEntity,TKey}" />
-/// <seealso cref="eQuantic.Core.Data.Repository.Write.IAsyncWriteRepository{TEntity, TKey}" />
-public interface IAsyncQueryableRepository<TEntity, TKey> : IAsyncQueryableReadRepository<TEntity, TKey>, IAsyncWriteRepository<TEntity, TKey>
+/// <seealso cref="IAsyncWriteRepository{TEntity,TKey}" />
+public interface IAsyncQueryableRepository<TEntity, TKey> : IAsyncQueryableReadRepository<TEntity, TKey>, IAsyncWriteRepository<TEntity>
     where TEntity : class, IEntity, new()
 {
 }
@@ -22,8 +22,8 @@ public interface IAsyncQueryableRepository<TEntity, TKey> : IAsyncQueryableReadR
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
 /// <typeparam name="TKey">The type of the key.</typeparam>
 /// <seealso cref="IAsyncQueryableReadRepository{TUnitOfWork,TEntity,TKey}" />
-/// <seealso cref="eQuantic.Core.Data.Repository.Write.IAsyncWriteRepository{TEntity, TKey}" />
-public interface IAsyncQueryableRepository<TUnitOfWork, TEntity, TKey> : IAsyncQueryableReadRepository<TUnitOfWork, TEntity, TKey>, IAsyncWriteRepository<TUnitOfWork, TEntity, TKey>
+/// <seealso cref="IAsyncWriteRepository{TEntity,TKey}" />
+public interface IAsyncQueryableRepository<TUnitOfWork, TEntity, TKey> : IAsyncQueryableReadRepository<TUnitOfWork, TEntity, TKey>, IAsyncWriteRepository<TUnitOfWork, TEntity>
     where TUnitOfWork : IUnitOfWork
     where TEntity : class, IEntity, new()
 {

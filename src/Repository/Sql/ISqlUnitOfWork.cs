@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace eQuantic.Core.Data.Repository.Sql;
@@ -11,7 +12,7 @@ namespace eQuantic.Core.Data.Repository.Sql;
 /// This contract extend IUnitOfWork for use with EF code
 /// </remarks>
 /// </summary>
-public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
+public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor, IAsyncSqlExecutor
 {
     /// <summary>
     /// Apply current values in <paramref name="original"/>
@@ -19,14 +20,14 @@ public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
     /// <typeparam name="TEntity">The type of entity</typeparam>
     /// <param name="original">The original entity</param>
     /// <param name="current">The current entity</param>
-    void ApplyCurrentValues<TEntity>(TEntity original, TEntity current) where TEntity : class;
-
+    void ApplyCurrentValues<TEntity>(TEntity original, TEntity current) where TEntity : class, IEntity, new();
+    
     /// <summary>
     /// Attach this item into "ObjectStateManager"
     /// </summary>
     /// <typeparam name="TEntity">The type of entity</typeparam>
     /// <param name="item">The item </param>
-    void Attach<TEntity>(TEntity item) where TEntity : class;
+    void Attach<TEntity>(TEntity item) where TEntity : class, IEntity, new();
 
     /// <summary>
     ///
@@ -69,7 +70,7 @@ public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
     /// <param name="item"></param>
     /// <param name="selector"></param>
     void LoadProperty<TEntity, TComplexProperty>(TEntity item, Expression<Func<TEntity, TComplexProperty>> selector)
-        where TEntity : class
+        where TEntity : class, IEntity, new()
         where TComplexProperty : class;
 
     /// <summary>
@@ -78,27 +79,33 @@ public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
     /// <typeparam name="TEntity"></typeparam>
     /// <param name="item"></param>
     /// <param name="propertyName"></param>
-    void LoadProperty<TEntity>(TEntity item, string propertyName) where TEntity : class;
+    void LoadProperty<TEntity>(TEntity item, string propertyName) 
+        where TEntity : class, IEntity, new();
 
     /// <summary>
-    ///
+    /// 
     /// </summary>
     /// <typeparam name="TEntity"></typeparam>
     /// <typeparam name="TComplexProperty"></typeparam>
     /// <param name="item"></param>
     /// <param name="selector"></param>
+    /// <param name="cancellationToken">The cancellation token</param>
     /// <returns></returns>
     Task LoadPropertyAsync<TEntity, TComplexProperty>(TEntity item,
-        Expression<Func<TEntity, TComplexProperty>> selector) where TEntity : class where TComplexProperty : class;
+        Expression<Func<TEntity, TComplexProperty>> selector, CancellationToken cancellationToken = default) 
+        where TEntity : class, IEntity, new() 
+        where TComplexProperty : class;
 
     /// <summary>
-    ///
+    /// 
     /// </summary>
     /// <typeparam name="TEntity"></typeparam>
     /// <param name="item"></param>
     /// <param name="propertyName"></param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns></returns>
-    Task LoadPropertyAsync<TEntity>(TEntity item, string propertyName) where TEntity : class;
+    Task LoadPropertyAsync<TEntity>(TEntity item, string propertyName, CancellationToken cancellationToken = default) 
+        where TEntity : class, IEntity, new();
 
     /// <summary>
     /// Reload this item ignoring cache
@@ -118,4 +125,10 @@ public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor
     ///
     /// </summary>
     void UpdateDatabase();
+}
+
+public interface ISqlUnitOfWork<TUnitOfWork> : ISqlUnitOfWork, IQueryableUnitOfWork<TUnitOfWork> 
+    where TUnitOfWork : ISqlUnitOfWork
+{
+    
 }

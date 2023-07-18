@@ -1,15 +1,77 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Data.Common;
+using System.Threading;
 using System.Threading.Tasks;
+using eQuantic.Core.Data.Repository.Config;
 
 namespace eQuantic.Core.Data.Repository.Sql;
 
 /// <summary>
 /// Base contract for support 'dialect specific queries'.
 /// </summary>
-public interface ISqlExecutor
+public interface ISqlExecutor<out TConfig> where TConfig : SqlConfiguration
 {
     /// <summary>
-    /// Execute specific query with underliying persistence store
+    /// Begins the transaction.
+    /// </summary>
+    void BeginTransaction();
+
+    /// <summary>
+    /// Commits the transaction.
+    /// </summary>
+    void CommitTransaction();
+
+    /// <summary>
+    /// Executes the raw SQL.
+    /// </summary>
+    /// <typeparam name="T"></typeparam>
+    /// <param name="sql">The SQL.</param>
+    /// <param name="map">The map.</param>
+    /// <param name="config">The configuration.</param>
+    /// <returns></returns>
+    IEnumerable<T> ExecuteRawSql<T>(string sql, Func<DbDataReader, T> map, Action<TConfig> config = null);
+
+    /// <summary>
+    /// Execute arbitrary command into underlying persistence store
+    /// </summary>
+    /// <param name="sqlCommand">
+    /// Command to execute
+    /// <example>
+    /// SELECT idCustomer,Name FROM dbo.[Customers] WHERE idCustomer > {0}
+    /// </example>
+    ///</param>
+    /// <param name="config">The configuration a vector of parameters values</param>
+    /// <returns>The number of affected records</returns>
+    int ExecuteCommand(string sqlCommand, Action<TConfig> config = null);
+
+    /// <summary>
+    /// Executes a SQL statement using the specified sql command
+    /// </summary>
+    /// <param name="sqlCommand">The sql command</param>
+    /// <param name="config"></param>
+    /// <returns>The number of rows affected.</returns>
+    public int ExecuteNonQuery(string sqlCommand, Action<TConfig> config = null);
+    
+    /// <summary>
+    ///
+    /// </summary>
+    /// <typeparam name="TResult"></typeparam>
+    /// <param name="name"></param>
+    /// <param name="config"></param>
+    /// <returns></returns>
+    TResult ExecuteFunction<TResult>(string name, Action<TConfig> config = null) where TResult : class;
+    
+    /// <summary>
+    ///
+    /// </summary>
+    /// <param name="name"></param>
+    /// <param name="config"></param>
+    /// <returns></returns>
+    int ExecuteProcedure(string name, Action<TConfig> config = null);
+    
+    /// <summary>
+    /// Execute specific query with underlying persistence store
     /// </summary>
     /// <typeparam name="TEntity">Entity type to map query results</typeparam>
     /// <param name="sqlQuery">
@@ -18,69 +80,43 @@ public interface ISqlExecutor
     /// SELECT idCustomer,Name FROM dbo.[Customers] WHERE idCustomer > {0}
     /// </example>
     /// </param>
-    /// <param name="parameters">A vector of parameters values</param>
+    /// <param name="config">The configuration with a vector of parameters values</param>
     /// <returns>
     /// Enumerable results
     /// </returns>
-    IEnumerable<TEntity> ExecuteQuery<TEntity>(string sqlQuery, params object[] parameters) where TEntity : class;
+    IEnumerable<TEntity> ExecuteQuery<TEntity>(string sqlQuery, Action<TConfig> config = null) where TEntity : class;
+    
+    /// <summary>
+    /// Executes the transaction.
+    /// </summary>
+    /// <param name="operation">The operation.</param>
+    void ExecuteTransaction(Action<ISqlUnitOfWork> operation);
 
     /// <summary>
-    /// Execute arbitrary command into underliying persistence store
+    /// Executes the transaction async.
     /// </summary>
-    /// <param name="sqlCommand">
-    /// Command to execute
-    /// <example>
-    /// SELECT idCustomer,Name FROM dbo.[Customers] WHERE idCustomer > {0}
-    /// </example>
-    ///</param>
-    /// <param name="parameters">A vector of parameters values</param>
-    /// <returns>The number of affected records</returns>
-    int ExecuteCommand(string sqlCommand, params object[] parameters);
+    /// <param name="operation">The operation.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    Task ExecuteTransactionAsync(Func<ISqlUnitOfWork, Task> operation, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Execute async arbitrary command into underliying persistence store
+    /// Get transaction.
     /// </summary>
-    /// <param name="sqlCommand">Command to execute</param>
-    /// <param name="parameters">A vector of parameters values</param>
-    /// <returns>The number of affected records</returns>
-    Task<int> ExecuteCommandAsync(string sqlCommand, params object[] parameters);
-
-    /// <summary>
-    ///
-    /// </summary>
-    void BeginTransaction();
-
-    /// <summary>
-    ///
-    /// </summary>
-    /// <param name="name"></param>
-    /// <param name="parameters"></param>
     /// <returns></returns>
-    int ExecuteProcedure(string name, params object[] parameters);
+    DbTransaction GetTransaction();
 
     /// <summary>
-    ///
+    /// Rollbacks the transaction.
     /// </summary>
-    /// <param name="name"></param>
-    /// <param name="parameters"></param>
-    /// <returns></returns>
-    Task<int> ExecuteProcedureAsync(string name, params object[] parameters);
+    void RollbackTransaction();
 
     /// <summary>
-    ///
+    /// Use transaction.
     /// </summary>
-    /// <typeparam name="TResult"></typeparam>
-    /// <param name="name"></param>
-    /// <param name="parameters"></param>
-    /// <returns></returns>
-    TResult ExecuteFunction<TResult>(string name, params object[] parameters) where TResult : class;
+    /// <param name="transaction"></param>
+    void UseTransaction(DbTransaction transaction);
+}
 
-    /// <summary>
-    ///
-    /// </summary>
-    /// <typeparam name="TResult"></typeparam>
-    /// <param name="name"></param>
-    /// <param name="parameters"></param>
-    /// <returns></returns>
-    Task<TResult> ExecuteFunctionAsync<TResult>(string name, params object[] parameters) where TResult : class;
+public interface ISqlExecutor : ISqlExecutor<DefaultSqlConfiguration>
+{
 }

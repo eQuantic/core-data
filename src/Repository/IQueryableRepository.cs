@@ -13,7 +13,7 @@ namespace eQuantic.Core.Data.Repository;
 /// </remarks>
 /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
 /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-public interface IQueryableRepository<TEntity, TKey> : IQueryableReadRepository<TEntity, TKey>, IWriteRepository<TEntity, TKey>
+public interface IQueryableRepository<TEntity, in TKey> : IQueryableReadRepository<TEntity, TKey>, IWriteRepository<TEntity>
     where TEntity : class, IEntity, new()
 {
 }
@@ -29,7 +29,7 @@ public interface IQueryableRepository<TEntity, TKey> : IQueryableReadRepository<
 /// <typeparam name="TUnitOfWork">Type of unit of work</typeparam>
 /// <typeparam name="TEntity">Type of entity for this repository</typeparam>
 /// <typeparam name="TKey">Type of primary key for this entity</typeparam>
-public interface IQueryableRepository<TUnitOfWork, TEntity, TKey> : IQueryableReadRepository<TUnitOfWork, TEntity, TKey>, IWriteRepository<TUnitOfWork, TEntity, TKey>
+public interface IQueryableRepository<TUnitOfWork, TEntity, in TKey> : IQueryableReadRepository<TUnitOfWork, TEntity, TKey>, IWriteRepository<TUnitOfWork, TEntity>
     where TUnitOfWork : IUnitOfWork
     where TEntity : class, IEntity, new()
 {
