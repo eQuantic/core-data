@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
 using eQuantic.Core.Data.Repository.Options;
 
@@ -58,7 +59,7 @@ public interface IUnitOfWork : IDisposable
     /// If the entity have fixed properties and any optimistic concurrency problem exists,
     /// then 'client changes' are refreshed - Client wins
     ///</remarks>
-    Task<int> CommitAndRefreshChangesAsync();
+    Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Commit all changes made in  a container.
@@ -67,7 +68,7 @@ public interface IUnitOfWork : IDisposable
     /// If the entity have fixed properties and any optimistic concurrency problem exists,
     /// then 'client changes' are refreshed - Client wins
     ///</remarks>
-    Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options);
+    Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Commit all changes made in a container.
@@ -76,7 +77,7 @@ public interface IUnitOfWork : IDisposable
     /// If the entity have fixed properties and any optimistic concurrency problem exists,
     /// then an exception is thrown
     ///</remarks>
-    Task<int> CommitAsync();
+    Task<int> CommitAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Commit all changes made in a container.
@@ -85,7 +86,7 @@ public interface IUnitOfWork : IDisposable
     /// If the entity have fixed properties and any optimistic concurrency problem exists,
     /// then an exception is thrown
     ///</remarks>
-    Task<int> CommitAsync(Action<SaveOptions> options);
+    Task<int> CommitAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Rollback tracked changes. See references of UnitOfWork pattern
