@@ -4,7 +4,7 @@
   <PropertyGroup>
     <Description>eQuantic Core Data Class Library</Description>
     <AssemblyTitle>eQuantic.Core.Data</AssemblyTitle>
-    <Version>4.0.2.0</Version>
+    <Version>4.0.3.0</Version>
     <Authors>eQuantic Systems</Authors>
     <TargetFrameworks>netstandard2.1;net6.0;net7.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
@@ -26,14 +26,14 @@
     <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
     <RepositoryType>Git</RepositoryType>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
-    <AssemblyVersion>4.0.2.0</AssemblyVersion>
-    <FileVersion>4.0.2.0</FileVersion>
+    <AssemblyVersion>4.0.3.0</AssemblyVersion>
+    <FileVersion>4.0.3.0</FileVersion>
     <PackageIcon>Icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="eQuantic.Core" Version="1.6.0" />
-    <PackageReference Include="eQuantic.Linq" Version="1.1.5" />
+    <PackageReference Include="eQuantic.Linq" Version="1.1.6" />
   </ItemGroup>
 
   <ItemGroup>
