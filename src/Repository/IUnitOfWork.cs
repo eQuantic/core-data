@@ -92,24 +92,26 @@ public interface IUnitOfWork : IDisposable
     /// Rollback tracked changes. See references of UnitOfWork pattern
     /// </summary>
     void RollbackChanges();
-}
 
-public interface IUnitOfWork<TUnitOfWork> : IUnitOfWork
-    where TUnitOfWork : IUnitOfWork
-{
     /// <summary>
     /// Gets the entity repository instance
     /// </summary>
     /// <typeparam name="TEntity">The entity</typeparam>
     /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <typeparam name="TUnitOfWork"></typeparam>
     /// <returns></returns>
-    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TEntity, TKey>() where TEntity : class, IEntity, new();
+    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>() 
+        where TEntity : class, IEntity, new() 
+        where TUnitOfWork : IUnitOfWork;
 
     /// <summary>
     /// Gets the asynchronous entity repository instance
     /// </summary>
     /// <typeparam name="TEntity">The entity</typeparam>
     /// <typeparam name="TKey">The key of entity</typeparam>
+    /// <typeparam name="TUnitOfWork"></typeparam>
     /// <returns></returns>
-    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TEntity, TKey>() where TEntity : class, IEntity, new();
+    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>() 
+        where TEntity : class, IEntity, new() 
+        where TUnitOfWork : IUnitOfWork;
 }

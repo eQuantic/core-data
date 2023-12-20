@@ -126,9 +126,3 @@ public interface ISqlUnitOfWork : IQueryableUnitOfWork, ISqlExecutor, IAsyncSqlE
     /// </summary>
     void UpdateDatabase();
 }
-
-public interface ISqlUnitOfWork<TUnitOfWork> : ISqlUnitOfWork, IQueryableUnitOfWork<TUnitOfWork> 
-    where TUnitOfWork : ISqlUnitOfWork
-{
-    
-}
