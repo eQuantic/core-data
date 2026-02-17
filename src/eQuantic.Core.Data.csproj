@@ -4,9 +4,9 @@
   <PropertyGroup>
     <Description>eQuantic Core Data Class Library</Description>
     <AssemblyTitle>eQuantic.Core.Data</AssemblyTitle>
-    <Version>4.2.3.0</Version>
+    <Version>4.3.0.0</Version>
     <Authors>eQuantic Systems</Authors>
-    <TargetFrameworks>netstandard2.1;net6.0;net7.0;net8.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.1;net6.0;net7.0;net8.0;net10.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <AssemblyName>eQuantic.Core.Data</AssemblyName>
     <PackageId>eQuantic.Core.Data</PackageId>
@@ -26,14 +26,14 @@
     <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
     <RepositoryType>Git</RepositoryType>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
-    <AssemblyVersion>4.2.3.0</AssemblyVersion>
-    <FileVersion>4.2.3.0</FileVersion>
+    <AssemblyVersion>4.3.0.0</AssemblyVersion>
+    <FileVersion>4.3.0.0</FileVersion>
     <PackageIcon>Icon.png</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="eQuantic.Core" Version="1.7.0" />
-    <PackageReference Include="eQuantic.Linq" Version="1.3.4" />
+    <PackageReference Include="eQuantic.Core" Version="1.8.4" />
+    <PackageReference Include="eQuantic.Linq" Version="2.1.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -43,5 +43,5 @@
     <None Include="Icon_list.png" Pack="true" PackagePath="Icon_list.png" />
     <None Include="../LICENSE" Pack="true" PackagePath="" />
   </ItemGroup>
-  
+
 </Project>

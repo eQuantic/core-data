@@ -9,23 +9,11 @@ namespace eQuantic.Core.Data.Repository.Read;
 /// <summary>
 /// The read repository interface
 /// </summary>
-///
-/// <typeparam name="TConfig"></typeparam>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
 /// <typeparam name="TKey">The type of the key.</typeparam>
-/// <seealso cref="IRepository" />
-public interface IReadRepository<out TConfig, TEntity, in TKey> : IRepository
+public interface IReadRepository<TEntity, in TKey> : IRepository
     where TEntity : class, IEntity, new()
-    where TConfig : Configuration<TEntity>
 {
-    /// <summary>
-    /// Get all elements of type TEntity that matching a
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, Action<TConfig> configuration = default);
-
     /// <summary>
     /// Count elements of type TEntity in repository
     /// </summary>
@@ -45,6 +33,27 @@ public interface IReadRepository<out TConfig, TEntity, in TKey> : IRepository
     /// <param name="filter"></param>
     /// <returns></returns>
     long Count(Expression<Func<TEntity, bool>> filter);
+}
+
+/// <summary>
+/// The read repository interface
+/// </summary>
+///
+/// <typeparam name="TConfig"></typeparam>
+/// <typeparam name="TEntity">The type of the entity.</typeparam>
+/// <typeparam name="TKey">The type of the key.</typeparam>
+/// <seealso cref="IRepository" />
+public interface IReadRepository<out TConfig, TEntity, in TKey> : IReadRepository<TEntity, TKey>
+    where TEntity : class, IEntity, new()
+    where TConfig : Configuration<TEntity>
+{
+    /// <summary>
+    /// Get all elements of type TEntity that matching a
+    /// </summary>
+    /// <param name="specification"></param>
+    /// <param name="configuration"></param>
+    /// <returns></returns>
+    IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, Action<TConfig> configuration = default);
 
     /// <summary>
     /// Verify all specified elements of type TEntity in repository

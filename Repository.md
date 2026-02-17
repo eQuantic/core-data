@@ -62,6 +62,7 @@ namespace eQuantic.Core.Web.Examples.Infrastructure.Data
 ```
 
 ## Repository example:
+
 ### Contract
 
 ```csharp
@@ -78,6 +79,7 @@ namespace eQuantic.Core.Web.Examples.Infrastructure.Repositories.Contracts
 ```
 
 ### Implementation
+
 ```csharp
 using System;
 using eQuantic.Core.Data.EntityFramework.Repository;
@@ -175,6 +177,7 @@ namespace eQuantic.Core.Web.Examples.Domain.Services.Contracts
 ```
 
 ### Implementation
+
 ```csharp
 using System;
 using System.Collections.Generic;
@@ -248,3 +251,14 @@ namespace eQuantic.Core.Web.Examples.Domain.Services
     }
 }
 ```
+
+## Resolving Ambiguous Invocations
+
+In version 4.3.0, a new base interface hierarchy was introduced to resolve potential ambiguous invocations of methods like `Count` when implementing multiple repository interfaces.
+
+Instead of defining methods that do not depend on configuration directly in the generic `IReadRepository<TConfig, TEntity, TKey>`, we now have:
+
+- `IReadRepository<TEntity, TKey>`: Contains common methods like `Count`.
+- `IReadRepository<TConfig, TEntity, TKey>`: Inherits from the base and contains configuration-specific methods.
+
+This pattern is also applied to `IAsyncReadRepository`.

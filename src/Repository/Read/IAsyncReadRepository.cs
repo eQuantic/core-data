@@ -11,11 +11,47 @@ namespace eQuantic.Core.Data.Repository.Read;
 /// <summary>
 /// The asynchronous read repository
 /// </summary>
+/// <typeparam name="TEntity">The type of the entity.</typeparam>
+/// <typeparam name="TKey">The type of the key.</typeparam>
+/// <seealso cref="IAsyncRepository" />
+public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
+    where TEntity : class, IEntity, new()
+{
+    /// <summary>
+    /// Count elements of type TEntity in repository
+    /// </summary>
+    /// <returns></returns>
+    Task<long> CountAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Count specified elements of type TEntity in repository
+    /// </summary>
+    /// <param name="specification"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    Task<long> CountAsync(
+        ISpecification<TEntity> specification, 
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Count filtered elements of type TEntity in repository
+    /// </summary>
+    /// <param name="filter"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    Task<long> CountAsync(
+        Expression<Func<TEntity, bool>> filter, 
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// The asynchronous read repository
+/// </summary>
 /// <typeparam name="TConfig">The source configuration.</typeparam>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
 /// <typeparam name="TKey">The type of the key.</typeparam>
 /// <seealso cref="IAsyncRepository" />
-public interface IAsyncReadRepository<out TConfig, TEntity, in TKey> : IAsyncRepository
+public interface IAsyncReadRepository<out TConfig, TEntity, in TKey> : IAsyncReadRepository<TEntity, TKey>
     where TEntity : class, IEntity, new()
     where TConfig : Configuration<TEntity>
 {
@@ -50,32 +86,6 @@ public interface IAsyncReadRepository<out TConfig, TEntity, in TKey> : IAsyncRep
     Task<IEnumerable<TEntity>> AllMatchingAsync(
         ISpecification<TEntity> specification, 
         CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Count elements of type TEntity in repository
-    /// </summary>
-    /// <returns></returns>
-    Task<long> CountAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Count specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<long> CountAsync(
-        ISpecification<TEntity> specification, 
-        CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Count filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<long> CountAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Verify all specified elements of type TEntity in repository
