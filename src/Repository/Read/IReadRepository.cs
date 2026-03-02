@@ -33,6 +33,76 @@ public interface IReadRepository<TEntity, in TKey> : IRepository
     /// <param name="filter"></param>
     /// <returns></returns>
     long Count(Expression<Func<TEntity, bool>> filter);
+
+    /// <summary>
+    /// Computes the sum of the sequence of <see cref="int"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values.</returns>
+    int Sum(Expression<Func<TEntity, int>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of nullable <see cref="int"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
+    int? Sum(Expression<Func<TEntity, int?>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values.</returns>
+    long Sum(Expression<Func<TEntity, long>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of nullable <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
+    long? Sum(Expression<Func<TEntity, long?>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values.</returns>
+    double Sum(Expression<Func<TEntity, double>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of nullable <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
+    double? Sum(Expression<Func<TEntity, double?>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values.</returns>
+    float Sum(Expression<Func<TEntity, float>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of nullable <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
+    float? Sum(Expression<Func<TEntity, float?>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values.</returns>
+    decimal Sum(Expression<Func<TEntity, decimal>> source);
+
+    /// <summary>
+    /// Computes the sum of the sequence of nullable <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
+    /// </summary>
+    /// <param name="source">A projection function to apply to each element.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
+    decimal? Sum(Expression<Func<TEntity, decimal?>> source);
 }
 
 /// <summary>
