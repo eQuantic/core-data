@@ -49,6 +49,8 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values.</returns>
     Task<int> SumAsync(Expression<Func<TEntity, int>> source);
+    Task<int> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, int>> source);
+    Task<int> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, int>> source);
 
     /// <summary>
     /// Computes the sum of the sequence of nullable <see cref="int"/> values obtained by invoking a projection function on each element of the repository.
@@ -56,6 +58,8 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
     Task<int?> SumAsync(Expression<Func<TEntity, int?>> source);
+    Task<int?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, int?>> source);
+    Task<int?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, int?>> source);
 
     /// <summary>
     /// Computes the sum of the sequence of <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
@@ -63,13 +67,17 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values.</returns>
     Task<long> SumAsync(Expression<Func<TEntity, long>> source);
-
+    Task<long> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, long>> source);
+    Task<long> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, long>> source);
+    
     /// <summary>
     /// Computes the sum of the sequence of nullable <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
     /// </summary>
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
     Task<long?> SumAsync(Expression<Func<TEntity, long?>> source);
+    Task<long?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, long?>> source);
+    Task<long?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, long?>> source);
 
     /// <summary>
     /// Computes the sum of the sequence of <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
@@ -77,13 +85,17 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values.</returns>
     Task<double> SumAsync(Expression<Func<TEntity, double>> source);
-
+    Task<double> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, double>> source);
+    Task<double> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, double>> source);
+    
     /// <summary>
     /// Computes the sum of the sequence of nullable <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
     /// </summary>
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
     Task<double?> SumAsync(Expression<Func<TEntity, double?>> source);
+    Task<double?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, double?>> source);
+    Task<double?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, double?>> source);
 
     /// <summary>
     /// Computes the sum of the sequence of <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
@@ -91,6 +103,8 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values.</returns>
     Task<float> SumAsync(Expression<Func<TEntity, float>> source);
+    Task<float> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, float>> source);
+    Task<float> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, float>> source);
 
     /// <summary>
     /// Computes the sum of the sequence of nullable <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
@@ -98,20 +112,26 @@ public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
     Task<float?> SumAsync(Expression<Func<TEntity, float?>> source);
-
+    Task<float?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, float?>> source);
+    Task<float?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, float?>> source);
+    
     /// <summary>
     /// Computes the sum of the sequence of <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
     /// </summary>
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values.</returns>
     Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> source);
-
+    Task<decimal> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, decimal>> source);
+    Task<decimal> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, decimal>> source);
+    
     /// <summary>
     /// Computes the sum of the sequence of nullable <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
     /// </summary>
     /// <param name="source">A projection function to apply to each element.</param>
     /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
     Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> source);
+    Task<decimal?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, decimal?>> source);
+    Task<decimal?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, decimal?>> source);
 }
 
 /// <summary>
