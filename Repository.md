@@ -1,31 +1,23 @@
 # Repository Pattern with Entity Framework
 
+> **Version 5 note.** The contract-level examples below (entities, repository
+> contracts, `QueryOptions`, `PagedResult`, unit-of-work usage) reflect the v5
+> repository contracts shipped by this package. The Entity Framework provider
+> types (`UnitOfWork`, `AsyncRepository`, …) reflect the v5 **target** shape and
+> are being finalized alongside the provider reimplementation.
+
 ## UnitOfWork example:
 
 ```csharp
 using eQuantic.Core.Data.EntityFramework.Repository;
-using eQuantic.Core.Ioc;
 using Microsoft.EntityFrameworkCore;
 
 namespace eQuantic.Core.Web.Examples.Infrastructure
 {
     public class ExampleUnitOfWork : UnitOfWork
     {
-        private readonly IContainer _container;
-
-        public ExampleUnitOfWork(IContainer container, DbContext context) : base(context)
+        public ExampleUnitOfWork(DbContext context) : base(context)
         {
-            _container = container;
-        }
-
-        public override TRepository GetRepository<TRepository>()
-        {
-            return _container.Resolve<TRepository>();
-        }
-
-        public override TRepository GetRepository<TRepository>(string name)
-        {
-            return _container.Resolve<TRepository>(name);
         }
     }
 }
@@ -33,30 +25,39 @@ namespace eQuantic.Core.Web.Examples.Infrastructure
 
 ## Entity data example:
 
+Entities used with the repositories implement `IEntity<TKey>`, which ties an
+entity to the type of its own key.
+
 ```csharp
 using System;
 using eQuantic.Core.Data.Repository;
 
 namespace eQuantic.Core.Web.Examples.Infrastructure.Data
 {
-    public class UserData : IEntity
+    public class UserData : IEntity<Guid>
     {
         public Guid Id { get; set; }
-        public string UserName { get; set; }
-        public string Password { get; set; }
-        public string Email { get; set; }
+        public string UserName { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+
+        public Guid GetKey() => Id;
+        public void SetKey(Guid key) => Id = key;
     }
 }
 
 namespace eQuantic.Core.Web.Examples.Infrastructure.Data
 {
-    public class PersonData : IEntity
+    public class PersonData : IEntity<Guid>
     {
         public Guid Id { get; set; }
-        public string Name { get; set; }
+        public string Name { get; set; } = string.Empty;
         public DateTime BirthDate { get; set; }
-        public string Phone { get; set; }
-        public virtual UserData User { get; set; }
+        public string? Phone { get; set; }
+        public virtual UserData? User { get; set; }
+
+        public Guid GetKey() => Id;
+        public void SetKey(Guid key) => Id = key;
     }
 }
 ```
@@ -65,6 +66,8 @@ namespace eQuantic.Core.Web.Examples.Infrastructure.Data
 
 ### Contract
 
+The `TUnitOfWork` type parameter is no longer part of the repository contract.
+
 ```csharp
 using System;
 using eQuantic.Core.Data.Repository;
@@ -72,7 +75,7 @@ using eQuantic.Core.Web.Examples.Infrastructure.Data;
 
 namespace eQuantic.Core.Web.Examples.Infrastructure.Repositories.Contracts
 {
-    public interface IPersonRepository : IAsyncRepository<ExampleUnitOfWork, PersonData, Guid>
+    public interface IPersonRepository : IAsyncRepository<PersonData, Guid>
     {
     }
 }
@@ -88,10 +91,141 @@ using eQuantic.Core.Web.Examples.Infrastructure.Repositories.Contracts;
 
 namespace eQuantic.Core.Web.Examples.Infrastructure.Repositories
 {
-    public class PersonRepository : AsyncRepository<ExampleUnitOfWork, PersonData, Guid>, IPersonRepository
+    public class PersonRepository : AsyncRepository<PersonData, Guid>, IPersonRepository
     {
-        public PersonRepository(ExampleUnitOfWork unitOfWork) : base(unitOfWork)
+        public PersonRepository(IQueryableUnitOfWork unitOfWork) : base(unitOfWork)
         {
+        }
+    }
+}
+```
+
+## Specification Pattern
+
+```csharp
+using System;
+using System.Linq.Expressions;
+using eQuantic.Core.Web.Examples.Infrastructure.Data;
+using eQuantic.Linq.Specification;
+
+namespace eQuantic.Core.Web.Examples.Domain.Specification
+{
+    public class PersonSpecification : Specification<PersonData>
+    {
+        private readonly string _term;
+
+        public PersonSpecification(string term)
+        {
+            _term = term;
+        }
+
+        public override Expression<Func<PersonData, bool>> SatisfiedBy()
+        {
+            return p => p.Name.StartsWith(_term) || p.User.UserName.StartsWith(_term) || p.User.Email.StartsWith(_term);
+        }
+    }
+}
+```
+
+## Domain Services
+
+### Contract
+
+```csharp
+using System;
+using System.Threading.Tasks;
+using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Web.Examples.Domain.Entities;
+
+namespace eQuantic.Core.Web.Examples.Domain.Services.Contracts
+{
+    public interface IPersonService
+    {
+        Task<Person?> GetAsync(Guid id);
+        Task<bool> CreateAsync(Person person);
+        Task<bool> UpdateAsync(Person person);
+        Task<bool> DeleteAsync(Guid id);
+        Task<PagedResult<Person>> FindAsync(string term, int pageIndex, int pageSize);
+    }
+}
+```
+
+### Implementation
+
+Query shaping is expressed through `QueryOptions<TEntity>`, and paged reads
+return `PagedResult<T>`.
+
+```csharp
+using System;
+using System.Threading.Tasks;
+using AutoMapper;
+using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Linq.Sorter;
+using eQuantic.Core.Web.Examples.Domain.Entities;
+using eQuantic.Core.Web.Examples.Domain.Specification;
+using eQuantic.Core.Web.Examples.Infrastructure;
+using eQuantic.Core.Web.Examples.Infrastructure.Data;
+
+namespace eQuantic.Core.Web.Examples.Domain.Services
+{
+    public class PersonService : IPersonService
+    {
+        public IMapper Mapper { get; }
+        public ExampleUnitOfWork UnitOfWork { get; }
+
+        public PersonService(IMapper mapper, ExampleUnitOfWork unitOfWork)
+        {
+            Mapper = mapper;
+            UnitOfWork = unitOfWork;
+        }
+
+        public async Task<Person?> GetAsync(Guid id)
+        {
+            var repo = UnitOfWork.GetAsyncRepository<PersonData, Guid>();
+            var item = await repo.GetAsync(id, new QueryOptions<PersonData>().Include(nameof(PersonData.User)));
+            return item is null ? null : Mapper.Map<Person>(item);
+        }
+
+        public async Task<bool> CreateAsync(Person person)
+        {
+            var repo = UnitOfWork.GetAsyncRepository<PersonData, Guid>();
+            var item = Mapper.Map<PersonData>(person);
+            await repo.AddAsync(item);
+            return await UnitOfWork.CommitAsync() > 0;
+        }
+
+        public async Task<bool> UpdateAsync(Person person)
+        {
+            var repo = UnitOfWork.GetAsyncRepository<PersonData, Guid>();
+            var item = await repo.GetAsync(person.Id);
+            if (item is null) return false;
+            Mapper.Map(person, item);
+            await repo.ModifyAsync(item);
+            return await UnitOfWork.CommitAsync() > 0;
+        }
+
+        public async Task<bool> DeleteAsync(Guid id)
+        {
+            var repo = UnitOfWork.GetAsyncRepository<PersonData, Guid>();
+            var item = await repo.GetAsync(id);
+            if (item is null) return false;
+            await repo.RemoveAsync(item);
+            return await UnitOfWork.CommitAsync() > 0;
+        }
+
+        public async Task<PagedResult<Person>> FindAsync(string term, int pageIndex, int pageSize)
+        {
+            var repo = UnitOfWork.GetAsyncRepository<PersonData, Guid>();
+            var options = new QueryOptions<PersonData>()
+                .Where(new PersonSpecification(term))
+                .Include(nameof(PersonData.User))
+                .OrderBy(new Sorting<PersonData> { Column = c => c.Name });
+
+            var page = await repo.GetPagedAsync(PageRequest.Of(pageIndex, pageSize), options);
+            var persons = Mapper.Map<IReadOnlyList<Person>>(page.Items);
+
+            return new PagedResult<Person>(persons, page.TotalCount, page.PageIndex, page.PageSize);
         }
     }
 }
@@ -108,10 +242,10 @@ namespace eQuantic.Core.Web.Examples.Domain.Entities
 {
     public class User
     {
-        public ShortGuid Id { get; set; }
-        public string UserName { get; set; }
-        public string Password { get; set; }
-        public string Email { get; set; }
+        public Guid Id { get; set; }
+        public string UserName { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
     }
 }
 
@@ -119,146 +253,11 @@ namespace eQuantic.Core.Web.Examples.Domain.Entities
 {
     public class Person
     {
-        public ShortGuid Id { get; set; }
-        public string Name { get; set; }
+        public Guid Id { get; set; }
+        public string Name { get; set; } = string.Empty;
         public DateTime BirthDate { get; set; }
-        public string Phone { get; set; }
-        public virtual User User { get; set; }
+        public string? Phone { get; set; }
+        public virtual User? User { get; set; }
     }
 }
 ```
-
-## Specification Pattern
-
-```csharp
-using System;
-using System.Linq.Expressions;
-using eQuantic.Core.Web.Examples.Infrastructure.Data;
-using eQuantic.Core.Linq.Specification;
-
-namespace eQuantic.Core.Web.Examples.Domain.Specification
-{
-    public class PersonSpecification : Specification<PersonData>
-    {
-        private readonly string _term;
-
-        public PersonSpecification(string term)
-        {
-            _term = term;
-        }
-        public override Expression<Func<PersonData, bool>> SatisfiedBy()
-        {
-            return p => p.Name.StartsWith(_term) || p.User.UserName.StartsWith(_term) || p.User.Email.StartsWith(_term);
-        }
-    }
-}
-```
-
-## Domain Services
-
-### Contract
-
-```csharp
-using System;
-using eQuantic.Core.Collections;
-using eQuantic.Core.Web.Examples.Domain.Entities;
-
-namespace eQuantic.Core.Web.Examples.Domain.Services.Contracts
-{
-    public interface IPersonService
-    {
-        Person Get(Guid id);
-        bool Create(Person person);
-        bool Update(Person person);
-        bool Delete(Guid id);
-        PagedList<Person> Find(string term, int pageIndex, int pageSize);
-    }
-}
-```
-
-### Implementation
-
-```csharp
-using System;
-using System.Collections.Generic;
-using AutoMapper;
-using eQuantic.Core.Collections;
-using eQuantic.Core.Linq;
-using eQuantic.Core.Web.Examples.Domain.Entities;
-using eQuantic.Core.Web.Examples.Domain.Specification;
-using eQuantic.Core.Web.Examples.Infrastructure;
-using eQuantic.Core.Web.Examples.Infrastructure.Data;
-using eQuantic.Core.Web.Examples.Infrastructure.Repositories.Contracts;
-
-namespace eQuantic.Core.Web.Examples.Domain.Services
-{
-    public class PersonService : IPersonService
-    {
-        public IMapper Mapper { get; }
-        public ExampleUnitOfWork UnitOfWork { get; }
-
-        public PersonService(IMapper mapper, ExampleUnitOfWork unitOfWork)
-        {
-            Mapper = mapper;
-            UnitOfWork = unitOfWork;
-        }
-
-        public Person Get(Guid id)
-        {
-            Person person = null;
-            var repo = UnitOfWork.GetRepository<IPersonRepository>();
-            var item = repo.Get(id, p => p.User);
-            if (item != null) person = Mapper.Map<Person>(item);
-
-            return person;
-        }
-
-        public bool Create(Person person)
-        {
-            var repo = UnitOfWork.GetRepository<IPersonRepository>();
-            var item = Mapper.Map<PersonData>(person);
-            repo.Add(item);
-            return UnitOfWork.Commit() > 0;
-        }
-
-        public bool Update(Person person)
-        {
-            var repo = UnitOfWork.GetRepository<IPersonRepository>();
-            var item = repo.Get(person.Id);
-            Mapper.Map(person, item);
-            repo.Modify(item);
-            return UnitOfWork.Commit() > 0;
-        }
-
-        public bool Delete(Guid id)
-        {
-            var repo = UnitOfWork.GetRepository<IPersonRepository>();
-            var item = repo.Get(id);
-            repo.Remove(item);
-            return UnitOfWork.Commit() > 0;
-        }
-
-        public PagedList<Person> Find(string term, int pageIndex, int pageSize)
-        {
-            var repo = UnitOfWork.GetRepository<IPersonRepository>();
-            var specification = new PersonSpecification(term);
-            var count = repo.Count(specification);
-            var items = repo.GetPaged(specification, pageIndex, pageSize,
-                new[] {new Sorting<PersonData> {Column = c => c.Name}}, p => p.User);
-            var persons = Mapper.Map<IEnumerable<Person>>(items);
-            return new PagedList<Person>(persons, count){ PageIndex = pageIndex, PageSize = pageSize};
-        }
-    }
-}
-```
-
-## Resolving Ambiguous Invocations
-
-In version 4.3.0, a new base interface hierarchy was introduced to resolve potential ambiguous invocations of methods like `Count` when implementing multiple repository interfaces.
-
-Instead of defining methods that do not depend on configuration directly in the generic `IReadRepository<TConfig, TEntity, TKey>`, we now have:
-
-- `IReadRepository<TEntity, TKey>`: Contains common methods like `Count`.
-- `IReadRepository<TConfig, TEntity, TKey>`: Inherits from the base and contains configuration-specific methods.
-
-This pattern is also applied to `IAsyncReadRepository`.
