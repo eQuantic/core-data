@@ -3,7 +3,7 @@
 > Status: **applied** on the `feat/v5-contracts` branch. The foundation (new
 > value types, project settings, dead-dependency removal) and the breaking
 > interface consolidation described below are both implemented. The contracts
-> package builds clean (0 warnings, 0 errors) across net6.0–net10.0. The Entity
+> package builds clean (0 warnings, 0 errors) across net8.0 and net10.0. The Entity
 > Framework provider packages are reimplemented against this surface as a
 > separate follow-up.
 >
@@ -80,13 +80,14 @@ These are additive and already on the branch:
   removal of the **unused** `eQuantic.Core 1.8.4` package reference (confirmed no
   `.cs` file references it).
 - **Dependency migration.** The discontinued monolithic `eQuantic.Linq 2.1.0` is
-  replaced by the refactored collection: `eQuantic.Linq.Specification 3.2.1` (the
-  specification pattern) and `eQuantic.Linq.Web 3.2.1` (the query DSL that
-  provides `QueryFilter`/`QuerySort` string parsing). `eQuantic.Linq.Web` depends
-  only on `eQuantic.Linq.Expressions`, not on ASP.NET. Because that collection
-  ships `netstandard2.0`/`net8.0`/`net10.0` assets, the `net6.0`/`net7.0` targets
-  use the netstandard2.0 asset (System.Text.Json 10.0.0); the resulting TFM
-  advisory is suppressed via `SuppressTfmSupportBuildWarnings`.
+  replaced by the refactored collection: `eQuantic.Linq.Specification 3.7.0` (the
+  specification pattern) and `eQuantic.Linq.Web 3.7.0` (the query DSL that
+  provides `QueryFilter`/`QuerySort` parsing and the typed
+  `QueryFilterBuilder<T>`/`QuerySortBuilder<T>` fluent builders). `eQuantic.Linq.Web`
+  depends only on `eQuantic.Linq.Expressions`, not on ASP.NET.
+- **Target frameworks.** Standardized on `net8.0` and `net10.0`, aligned with the
+  rest of the eQuantic family. The end-of-life `net6.0`/`net7.0` and the
+  out-of-support `net9.0` targets are dropped.
 - **`PageRequest`** — one-based `PageIndex` + `PageSize`, with `Skip`/`Take`.
 - **`PagedResult<T>`** — `Items`, `TotalCount`, `PageIndex`, `PageSize`,
   `PageCount`, `HasPreviousPage`, `HasNextPage`, `Empty(...)`.

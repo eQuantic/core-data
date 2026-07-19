@@ -6,14 +6,10 @@
     <AssemblyTitle>eQuantic.Core.Data</AssemblyTitle>
     <Version>5.0.0.0</Version>
     <Authors>eQuantic Systems</Authors>
-    <TargetFrameworks>net6.0;net7.0;net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <!-- eQuantic.Linq 3.x ships netstandard2.0/net8.0/net10.0 assets; the netstandard2.0
-         asset used by net6.0/net7.0 pulls System.Text.Json 10.0.0, which is compatible but
-         not officially tested on those (EOL) frameworks. The advisory is expected. -->
-    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
     <AssemblyName>eQuantic.Core.Data</AssemblyName>
     <PackageId>eQuantic.Core.Data</PackageId>
     <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern</PackageTags>

@@ -24,11 +24,14 @@ and migration guidance.
 - **Provider-agnostic contracts.** The SQL/relational surface moves to the
   Entity Framework provider layer.
 - **Modern C#.** Nullable reference types and XML documentation are enabled; the
-  package builds with zero warnings on net6.0–net10.0.
+  package builds with zero warnings on net8.0 and net10.0.
+- **Target frameworks.** Standardized on `net8.0` and `net10.0`, aligned with the
+  rest of the eQuantic library family. The end-of-life `net6.0`/`net7.0` and the
+  out-of-support `net9.0` targets are dropped.
 - **Dependencies.** The unused `eQuantic.Core` reference is removed. The
   discontinued monolithic `eQuantic.Linq` is replaced by the refactored package
-  collection — `eQuantic.Linq.Specification 3.2.1` (specifications) and
-  `eQuantic.Linq.Web 3.2.1` (the query DSL used for string-based filtering and
+  collection — `eQuantic.Linq.Specification 3.7.0` (specifications) and
+  `eQuantic.Linq.Web 3.7.0` (the query DSL used for string-based filtering and
   ordering).
 - **String-based querying.** `QueryOptions` now accepts `eQuantic.Linq.Web`
   expressions: `Where("name:eq(John)")` and `OrderBy("total:desc,customer.name")`,
