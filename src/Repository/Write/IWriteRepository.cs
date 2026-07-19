@@ -1,91 +1,83 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.Linq.Expressions;
 using eQuantic.Linq.Specification;
 
 namespace eQuantic.Core.Data.Repository.Write;
 
 /// <summary>
-/// The write repository
-/// </summary>
-/// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
-/// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <seealso cref="IWriteRepository{TEntity}" />
-/// <seealso cref="IRepository{TUnitOfWork}" />
-public interface IWriteRepository<TUnitOfWork, TEntity> : IWriteRepository<TEntity>, IRepository<TUnitOfWork>
-    where TUnitOfWork : IUnitOfWork
-    where TEntity : class, IEntity, new()
-{
-}
-
-/// <summary>
-/// The write repository
+/// The synchronous write repository.
 /// </summary>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <seealso cref="IWriteRepository{TEntity}" />
-/// <seealso cref="IRepository{TUnitOfWork}" />
+/// <seealso cref="IRepository" />
 public interface IWriteRepository<TEntity> : IRepository
-    where TEntity : class, IEntity, new()
+    where TEntity : class, IEntity
 {
     /// <summary>
-    /// Add item into repository
+    /// Adds an item into the repository.
     /// </summary>
-    /// <param name="item">Item to add to repository</param>
+    /// <param name="item">The item to add.</param>
     void Add(TEntity item);
 
     /// <summary>
-    /// Delete filtered elements of type TEntity in repository
+    /// Adds a range of items into the repository.
     /// </summary>
-    /// <param name="filter"></param>
-    /// <returns></returns>
+    /// <param name="items">The items to add.</param>
+    void AddRange(IEnumerable<TEntity> items);
+
+    /// <summary>
+    /// Deletes the elements matching the supplied predicate.
+    /// </summary>
+    /// <param name="filter">The predicate to apply.</param>
+    /// <returns>The number of deleted elements.</returns>
     long DeleteMany(Expression<Func<TEntity, bool>> filter);
 
     /// <summary>
-    /// Delete specified elements of type TEntity in repository
+    /// Deletes the elements matching the supplied specification.
     /// </summary>
-    /// <param name="specification"></param>
-    /// <returns></returns>
+    /// <param name="specification">The specification to apply.</param>
+    /// <returns>The number of deleted elements.</returns>
     long DeleteMany(ISpecification<TEntity> specification);
 
     /// <summary>
-    /// Sets modified entity into the repository. When calling Commit() method in UnitOfWork
-    /// these changes will be saved into the storage
+    /// Sets a modified entity into the repository. Changes are persisted when the
+    /// unit of work is committed.
     /// </summary>
-    /// <param name="persisted">The persisted item</param>
-    /// <param name="current">The current item</param>
+    /// <param name="persisted">The persisted item.</param>
+    /// <param name="current">The current item.</param>
     void Merge(TEntity persisted, TEntity current);
 
     /// <summary>
-    /// Set item as modified
+    /// Marks an item as modified.
     /// </summary>
-    /// <param name="item">Item to modify</param>
+    /// <param name="item">The item to modify.</param>
     void Modify(TEntity item);
 
     /// <summary>
-    /// Delete item
+    /// Removes an item.
     /// </summary>
-    /// <param name="item">Item to delete</param>
+    /// <param name="item">The item to remove.</param>
     void Remove(TEntity item);
 
     /// <summary>
-    ///Track entity into this repository, really in UnitOfWork.
-    ///In EF this can be done with Attach and with Update in NH
+    /// Tracks an item into this repository (through the unit of work).
     /// </summary>
-    /// <param name="item">Item to attach</param>
+    /// <param name="item">The item to track.</param>
     void TrackItem(TEntity item);
 
     /// <summary>
-    /// Update filtered elements of type TEntity in repository
+    /// Updates the elements matching the supplied predicate.
     /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="updateFactory"></param>
-    /// <returns></returns>
+    /// <param name="filter">The predicate to apply.</param>
+    /// <param name="updateFactory">The update expression.</param>
+    /// <returns>The number of updated elements.</returns>
     long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory);
 
     /// <summary>
-    /// Update specified elements of type TEntity in repository
+    /// Updates the elements matching the supplied specification.
     /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="updateFactory"></param>
-    /// <returns></returns>
+    /// <param name="specification">The specification to apply.</param>
+    /// <param name="updateFactory">The update expression.</param>
+    /// <returns>The number of updated elements.</returns>
     long UpdateMany(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory);
 }

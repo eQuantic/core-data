@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using eQuantic.Core.Data.Repository.Options;
@@ -6,112 +6,89 @@ using eQuantic.Core.Data.Repository.Options;
 namespace eQuantic.Core.Data.Repository;
 
 /// <summary>
-/// Contract for ‘UnitOfWork pattern’. For more
-/// related info see http://martinfowler.com/eaaCatalog/unitOfWork.html or
-/// http://msdn.microsoft.com/en-us/magazine/dd882510.aspx
-/// In this solution, the Unit Of Work is implemented using the out-of-box
-/// Entity Framework Context (EF 6.0 DbContext) persistence engine. But in order to
-/// comply the PI (Persistence Ignorant) principle in our Domain, we implement this interface/contract.
-/// This interface/contract should be complied by any UoW implementation to be used with this Domain.
+/// Contract for the 'Unit Of Work' pattern. For more related info see
+/// http://martinfowler.com/eaaCatalog/unitOfWork.html. To comply with the
+/// Persistence Ignorance principle in the domain, this contract abstracts the
+/// underlying persistence engine.
 /// </summary>
 public interface IUnitOfWork : IDisposable
 {
     /// <summary>
-    /// Commit all changes made in a container.
+    /// Commits all changes made in the container.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then an exception is thrown
-    ///</remarks>
+    /// <returns>The number of affected entries.</returns>
     int Commit();
 
     /// <summary>
-    /// Commit all changes made in a container.
+    /// Commits all changes made in the container.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then an exception is thrown
-    ///</remarks>
+    /// <param name="options">The save options.</param>
+    /// <returns>The number of affected entries.</returns>
     int Commit(Action<SaveOptions> options);
 
     /// <summary>
-    /// Commit all changes made in  a container.
+    /// Commits all changes made in the container, refreshing client changes on conflict.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then 'client changes' are refreshed - Client wins
-    ///</remarks>
+    /// <returns>The number of affected entries.</returns>
     int CommitAndRefreshChanges();
 
     /// <summary>
-    /// Commit all changes made in  a container.
+    /// Commits all changes made in the container, refreshing client changes on conflict.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then 'client changes' are refreshed - Client wins
-    ///</remarks>
+    /// <param name="options">The save options.</param>
+    /// <returns>The number of affected entries.</returns>
     int CommitAndRefreshChanges(Action<SaveOptions> options);
 
     /// <summary>
-    /// Commit all changes made in  a container.
+    /// Commits all changes made in the container, refreshing client changes on conflict.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then 'client changes' are refreshed - Client wins
-    ///</remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of affected entries.</returns>
     Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Commit all changes made in  a container.
+    /// Commits all changes made in the container, refreshing client changes on conflict.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then 'client changes' are refreshed - Client wins
-    ///</remarks>
+    /// <param name="options">The save options.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of affected entries.</returns>
     Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Commit all changes made in a container.
+    /// Commits all changes made in the container.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then an exception is thrown
-    ///</remarks>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of affected entries.</returns>
     Task<int> CommitAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Commit all changes made in a container.
+    /// Commits all changes made in the container.
     /// </summary>
-    ///<remarks>
-    /// If the entity have fixed properties and any optimistic concurrency problem exists,
-    /// then an exception is thrown
-    ///</remarks>
+    /// <param name="options">The save options.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of affected entries.</returns>
     Task<int> CommitAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Rollback tracked changes. See references of UnitOfWork pattern
+    /// Rolls back tracked changes.
     /// </summary>
     void RollbackChanges();
 
     /// <summary>
-    /// Gets the entity repository instance
+    /// Gets the entity repository instance.
     /// </summary>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <typeparam name="TUnitOfWork"></typeparam>
-    /// <returns></returns>
-    IRepository<TUnitOfWork, TEntity, TKey> GetRepository<TUnitOfWork, TEntity, TKey>() 
-        where TEntity : class, IEntity, new() 
-        where TUnitOfWork : IUnitOfWork;
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The type of the entity key.</typeparam>
+    /// <returns>The repository.</returns>
+    IRepository<TEntity, TKey> GetRepository<TEntity, TKey>()
+        where TEntity : class, IEntity<TKey>;
 
     /// <summary>
-    /// Gets the asynchronous entity repository instance
+    /// Gets the asynchronous entity repository instance.
     /// </summary>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <typeparam name="TUnitOfWork"></typeparam>
-    /// <returns></returns>
-    IAsyncRepository<TUnitOfWork, TEntity, TKey> GetAsyncRepository<TUnitOfWork, TEntity, TKey>() 
-        where TEntity : class, IEntity, new() 
-        where TUnitOfWork : IUnitOfWork;
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The type of the entity key.</typeparam>
+    /// <returns>The asynchronous repository.</returns>
+    IAsyncRepository<TEntity, TKey> GetAsyncRepository<TEntity, TKey>()
+        where TEntity : class, IEntity<TKey>;
 }

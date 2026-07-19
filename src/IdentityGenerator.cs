@@ -2,14 +2,22 @@ using System;
 
 namespace eQuantic.Core.Data;
 
+/// <summary>
+/// Generates identity values, such as sequential GUIDs suitable for use as
+/// database primary keys.
+/// </summary>
 public static class IdentityGenerator
 {
+    /// <summary>
+    /// A regular expression that matches a GUID, with or without surrounding braces.
+    /// </summary>
     public const string GuidRegex = @"^(\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1}$";
 
     /// <summary>
-    /// This algorithm generates secuential GUIDs across system boundaries, ideal for databases 
+    /// Generates a sequential GUID across system boundaries, minimizing index
+    /// fragmentation and making it ideal for use as a database key.
     /// </summary>
-    /// <returns></returns>
+    /// <returns>A newly generated sequential <see cref="Guid"/>.</returns>
     public static Guid NewSequentialGuid()
     {
         byte[] uid = Guid.NewGuid().ToByteArray();

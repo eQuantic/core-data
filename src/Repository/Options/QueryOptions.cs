@@ -25,6 +25,18 @@ public class QueryOptions<TEntity>
     private readonly List<ISorting<TEntity>> _sortings = new();
 
     /// <summary>
+    /// Gets the transformation applied to the query before filtering, or
+    /// <c>null</c> when none was supplied.
+    /// </summary>
+    public Func<IQueryable<TEntity>, IQueryable<TEntity>>? BeforeCustomization { get; private set; }
+
+    /// <summary>
+    /// Gets the transformation applied to the query after filtering and sorting,
+    /// or <c>null</c> when none was supplied.
+    /// </summary>
+    public Func<IQueryable<TEntity>, IQueryable<TEntity>>? AfterCustomization { get; private set; }
+
+    /// <summary>
     /// Gets the specification used to filter the query, or <c>null</c> when no
     /// specification was supplied.
     /// </summary>
@@ -148,6 +160,30 @@ public class QueryOptions<TEntity>
     public QueryOptions<TEntity> WithTag(string tag)
     {
         Tag = tag ?? throw new ArgumentNullException(nameof(tag));
+        return this;
+    }
+
+    /// <summary>
+    /// Applies a custom transformation to the query before filtering is applied.
+    /// </summary>
+    /// <param name="customize">The transformation to apply.</param>
+    /// <returns>The same <see cref="QueryOptions{TEntity}"/> instance for chaining.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="customize"/> is <c>null</c>.</exception>
+    public QueryOptions<TEntity> WithBeforeCustomization(Func<IQueryable<TEntity>, IQueryable<TEntity>> customize)
+    {
+        BeforeCustomization = customize ?? throw new ArgumentNullException(nameof(customize));
+        return this;
+    }
+
+    /// <summary>
+    /// Applies a custom transformation to the query after filtering and sorting are applied.
+    /// </summary>
+    /// <param name="customize">The transformation to apply.</param>
+    /// <returns>The same <see cref="QueryOptions{TEntity}"/> instance for chaining.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="customize"/> is <c>null</c>.</exception>
+    public QueryOptions<TEntity> WithAfterCustomization(Func<IQueryable<TEntity>, IQueryable<TEntity>> customize)
+    {
+        AfterCustomization = customize ?? throw new ArgumentNullException(nameof(customize));
         return this;
     }
 }

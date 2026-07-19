@@ -1,10 +1,16 @@
 # eQuantic.Core.Data v5 — Contracts Redesign
 
-> Status: **proposal for review**. The foundation (new value types, project
-> settings, dead-dependency removal) is already implemented on the
-> `feat/v5-contracts` branch. The breaking interface consolidation described in
-> sections 4–7 is **not yet applied** and is presented here for approval before
-> the published contract surface is changed.
+> Status: **applied** on the `feat/v5-contracts` branch. The foundation (new
+> value types, project settings, dead-dependency removal) and the breaking
+> interface consolidation described below are both implemented. The contracts
+> package builds clean (0 warnings, 0 errors) across net6.0–net10.0. The Entity
+> Framework provider packages are reimplemented against this surface as a
+> separate follow-up.
+>
+> Decisions taken during review (see §8): keep a slimmed **synchronous mirror**;
+> **move the SQL/relational surface out** of the contracts package; **keep the
+> familiar method names** (`GetAllAsync`, `GetFirstAsync`, `GetPagedAsync`, …);
+> keep the per-numeric-type `Sum`/`SumAsync` overloads.
 
 ## 1. Why v5
 
@@ -83,100 +89,116 @@ These are additive and already on the branch:
   in `IdentityGenerator`; added `[AttributeUsage]` and fixed a parameter-name
   typo on `MigrationAttribute`.
 
-## 4. Proposed consolidated read interface
+## 4. Consolidated read interface (as implemented)
+
+Familiar names are retained; each operation is a single method that takes an
+optional `QueryOptions<TEntity>` (filtering, sorting, includes, tracking) and a
+trailing `CancellationToken`. Paged reads return `PagedResult<T>`.
 
 ```csharp
-public interface IReadRepository<TEntity, TKey>
+public interface IAsyncReadRepository<TEntity, TKey> : IAsyncRepository
     where TEntity : class, IEntity<TKey>
 {
-    Task<TEntity?> GetByKeyAsync(TKey key, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-    Task<TEntity?> FirstOrDefaultAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
-    Task<TEntity?> SingleOrDefaultAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
-
-    Task<IReadOnlyList<TEntity>> ListAsync(QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-    Task<IReadOnlyList<TResult>> ListAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-
+    Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
+    Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken ct = default);
+    Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
     Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-    Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-
+    Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
     Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken ct = default);
     Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken ct = default);
-    Task<bool> AllAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
-
-    Task<TResult> SumAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    // SumAsync: one overload per numeric type (int, int?, long, long?, double, double?, float, float?, decimal, decimal?)
+    Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken ct = default);
+    // ...
 }
 ```
 
-This is **~12 members** replacing ~108. The filter/specification axis collapses
-into `QueryOptions.Where(...)`; the config axis collapses into the options
-object; the paging axis collapses into `PageRequest` + `PagedResult<T>`; the
-numeric `Sum` explosion collapses into a single generic `SumAsync<TResult>`.
+The filter/specification axis collapses into `QueryOptions.Where(...)`; the
+config axis collapses into the options object; the paging axis collapses into
+`PageRequest` + `PagedResult<T>`. `IAsyncReadRepository` drops from ~108 members
+to ~23 (13 read operations + 10 `Sum` overloads).
 
 ### Sync surface
 
-Two options, to decide during review:
+A **slimmed synchronous mirror** (`IReadRepository<TEntity, TKey>`) is retained
+with the same shape, minus the `CancellationToken` axis.
 
-- **(A) Async-only.** Drop the synchronous `IReadRepository`/`IWriteRepository`
-  mirror entirely. Cleanest, but removes sync callers' entry point.
-- **(B) Keep a slimmed sync mirror** with the same consolidated shape.
+## 5. Write interface (as implemented)
 
-Recommendation: **(A)** for modern EF Core (which is async-first), unless there
-are known synchronous consumers.
-
-## 5. Proposed write interface
+The familiar write operations are retained; `AddRange`/`AddRangeAsync` are added.
+Bulk operations keep their `filter` / `specification` overloads (two per
+operation — no overload explosion). The `TUnitOfWork` arity is removed.
 
 ```csharp
-public interface IWriteRepository<TEntity, TKey>
-    where TEntity : class, IEntity<TKey>
+public interface IAsyncWriteRepository<TEntity> : IAsyncRepository
+    where TEntity : class, IEntity
 {
     Task AddAsync(TEntity item, CancellationToken ct = default);
     Task AddRangeAsync(IEnumerable<TEntity> items, CancellationToken ct = default);
-    void Update(TEntity item);
-    void Remove(TEntity item);
-    Task<long> UpdateManyAsync(QueryOptions<TEntity> options, Expression<Func<TEntity, TEntity>> update, CancellationToken ct = default);
-    Task<long> RemoveManyAsync(QueryOptions<TEntity> options, CancellationToken ct = default);
+    Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken ct = default);
+    Task<long> DeleteManyAsync(ISpecification<TEntity> specification, CancellationToken ct = default);
+    Task MergeAsync(TEntity persisted, TEntity current);
+    Task ModifyAsync(TEntity item);
+    Task RemoveAsync(TEntity item);
+    Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory, CancellationToken ct = default);
+    Task<long> UpdateManyAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory, CancellationToken ct = default);
 }
 ```
 
-`Merge`, `Modify`, `TrackItem`, `Attach` collapse into `Update`; bulk operations
-take `QueryOptions` for a uniform predicate.
+The synchronous `IWriteRepository<TEntity>` mirrors this and additionally exposes
+`TrackItem`.
 
-## 6. Entity, UnitOfWork and SQL surface
+## 6. Entity, UnitOfWork and SQL surface (as implemented)
 
-- **`IEntity<TKey>`** becomes the repository constraint. `IEntity` (marker) is
-  kept for non-keyed scenarios and for backwards source-compatibility of the
-  namespace.
+- **`IEntity<TKey>`** is now the repository constraint. `IEntity` (marker) is
+  kept for the write side and non-keyed scenarios.
 - **`new()` constraint removed** — entity construction becomes the provider's
   responsibility.
-- **`IUnitOfWork`** keeps `Commit`/`CommitAsync`/`Rollback` but its
-  `GetRepository<TUnitOfWork, …>()` generic methods drop the `TUnitOfWork`
-  parameter: `GetRepository<TEntity, TKey>()`.
-- **`ISqlUnitOfWork` and the relational/EF-only members** are candidates to move
-  out of the agnostic contracts into the EF package (or a dedicated
-  `eQuantic.Core.Data.Relational.Abstractions`). Decision needed in review.
+- **`IUnitOfWork`** keeps `Commit`/`CommitAsync`/`RollbackChanges`; its
+  `GetRepository`/`GetAsyncRepository` generic methods drop the `TUnitOfWork`
+  parameter: `GetRepository<TEntity, TKey>()`. `IQueryableUnitOfWork` does the
+  same for `GetQueryableRepository`/`GetAsyncQueryableRepository` and
+  `CreateSet<TEntity>()`.
+- **SQL/relational surface moved out.** `ISqlUnitOfWork`, `ISqlExecutor`,
+  `IAsyncSqlExecutor`, `ISqlRepository`, `ParamValue` and the `SqlConfiguration`
+  hierarchy were removed from this package. They will be re-homed in the EF
+  provider layer during its reimplementation, keeping the contracts
+  provider-agnostic.
+- **`Configuration`/`QueryableConfiguration`** are removed; `QueryOptions<TEntity>`
+  replaces them (it also absorbed `WithBeforeCustomization`/`WithAfterCustomization`).
 
 ## 7. Breaking-change summary (what consumers must change)
 
 | v4 | v5 |
 |----|----|
-| `repo.GetAllAsync(c => c.WithNoTracking())` | `repo.ListAsync(new QueryOptions<T>().NoTracking())` |
-| `repo.GetFilteredAsync(f, c => …)` | `repo.ListAsync(new QueryOptions<T>().Where(f)…)` |
+| `repo.GetAllAsync(c => c.WithNoTracking())` | `repo.GetAllAsync(new QueryOptions<T>().NoTracking())` |
+| `repo.GetFilteredAsync(f, c => …)` | `repo.GetFilteredAsync(f, new QueryOptions<T>()…)` |
+| `repo.GetFirstAsync(f)` | `repo.GetFirstAsync(new QueryOptions<T>().Where(f))` |
 | `repo.GetPagedAsync(i, size)` → `IEnumerable<T>` | `repo.GetPagedAsync(PageRequest.Of(i, size))` → `PagedResult<T>` |
 | `repo.CountAsync(spec)` | `repo.CountAsync(new QueryOptions<T>().Where(spec))` |
 | `IRepository<TUnitOfWork, TEntity, TKey>` | `IRepository<TEntity, TKey>` |
 | `where TEntity : class, IEntity, new()` | `where TEntity : class, IEntity<TKey>` |
-| `Sum(x => x.Amount)` (per-numeric-type overloads) | `SumAsync(x => x.Amount)` (generic) |
+| `uow.GetRepository<TUoW, T, TKey>()` | `uow.GetRepository<T, TKey>()` |
+| `ISqlUnitOfWork` (from contracts) | provided by the EF provider layer |
 
-## 8. Open decisions for review
+## 8. Decisions taken during review
 
-1. **Sync mirror:** drop entirely (A) or keep slimmed (B)?
-2. **SQL/relational surface:** move `ISqlUnitOfWork` out of the contracts
-   package, or keep it here behind the agnostic core?
-3. **Method naming:** `ListAsync` vs. `GetAllAsync`/`FindAsync`;
-   `FirstOrDefaultAsync` vs. `GetFirstAsync`. Keeping familiar names lowers the
-   migration cost even in a major version.
-4. **`IEntity` marker:** keep for compatibility, or require `IEntity<TKey>`
-   everywhere?
+1. **Sync mirror:** kept, slimmed to the consolidated shape.
+2. **SQL/relational surface:** moved out of the contracts package (to the EF
+   provider layer).
+3. **Method naming:** familiar names kept (`GetAllAsync`, `GetFirstAsync`,
+   `GetSingleAsync`, `GetPagedAsync`, `GetMappedAsync`, `CountAsync`, `AnyAsync`,
+   `AllAsync`, `SumAsync`).
+4. **`Sum` overloads:** the per-numeric-type overloads are kept (consolidated to
+   a single `QueryOptions` argument), as EF Core translates them directly.
+5. **`IEntity` marker:** kept for the write side; `IEntity<TKey>` is required by
+   the keyed read/repository interfaces.
 
-Once these are settled, the consolidation is applied to the interfaces here and
-the EF package is reimplemented against the new surface.
+The contracts consolidation is implemented on `feat/v5-contracts`. The remaining
+follow-up is reimplementing the Entity Framework provider packages against this
+surface (and re-homing the SQL/relational abstractions there).

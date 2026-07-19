@@ -1,55 +1,22 @@
-﻿using eQuantic.Core.Data.Repository.Config;
 using eQuantic.Core.Data.Repository.Read;
 using eQuantic.Core.Data.Repository.Write;
 
 namespace eQuantic.Core.Data.Repository;
 
 /// <summary>
-/// The asynchronous repository
+/// The asynchronous repository marker interface.
 /// </summary>
+/// <seealso cref="IRepository" />
 public interface IAsyncRepository : IRepository
 {
 }
 
 /// <summary>
-/// The asynchronous repository
+/// The asynchronous repository, composed of the asynchronous read and write repositories.
 /// </summary>
-/// <typeparam name="TUnitOfWork"></typeparam>
-public interface IAsyncRepository<out TUnitOfWork> : IAsyncRepository, IRepository<TUnitOfWork>
-    where TUnitOfWork : IUnitOfWork
+/// <typeparam name="TEntity">The type of the entity.</typeparam>
+/// <typeparam name="TKey">The type of the key.</typeparam>
+public interface IAsyncRepository<TEntity, TKey> : IAsyncReadRepository<TEntity, TKey>, IAsyncWriteRepository<TEntity>
+    where TEntity : class, IEntity<TKey>
 {
 }
-
-/// <summary>
-/// The asynchronous repository
-/// </summary>
-/// <typeparam name="TEntity"></typeparam>
-/// <typeparam name="TKey"></typeparam>
-public interface IAsyncRepository<TEntity, TKey> : IAsyncReadRepository<Configuration<TEntity>, TEntity, TKey>, IAsyncWriteRepository<TEntity>
-    where TEntity : class, IEntity, new()
-{
-}
-
-/// <summary>
-/// The asynchronous repository
-/// </summary>
-/// <typeparam name="TUnitOfWork"></typeparam>
-/// <typeparam name="TEntity"></typeparam>
-/// <typeparam name="TKey"></typeparam>
-public interface IAsyncRepository<out TUnitOfWork, TEntity, TKey> : IAsyncReadRepository<TUnitOfWork, Configuration<TEntity>, TEntity, TKey>, IAsyncWriteRepository<TUnitOfWork, TEntity>
-    where TUnitOfWork : IUnitOfWork
-    where TEntity : class, IEntity, new()
-{ }
-
-/// <summary>
-/// The asynchronous repository
-/// </summary>
-/// <typeparam name="TUnitOfWork"></typeparam>
-/// <typeparam name="TConfig"></typeparam>
-/// <typeparam name="TEntity"></typeparam>
-/// <typeparam name="TKey"></typeparam>
-public interface IAsyncRepository<out TUnitOfWork, out TConfig, TEntity, TKey> : IAsyncReadRepository<TUnitOfWork, TConfig, TEntity, TKey>, IAsyncWriteRepository<TUnitOfWork, TEntity>
-    where TUnitOfWork : IUnitOfWork
-    where TEntity : class, IEntity, new()
-    where TConfig : Configuration<TEntity>
-{ }
