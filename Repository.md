@@ -230,6 +230,26 @@ namespace eQuantic.Core.Web.Examples.Domain.Services
 }
 ```
 
+## Fluent, typed filtering and ordering
+
+Filters and sorts are best written typed and fluent. `Where`/`And`/`Or` take a member selector
+(or a path string for dynamic columns), an operator and a value, and fold left to right
+(`Where(a).And(b).Or(c)` is `(a AND b) OR c`); ordering mirrors LINQ with
+`OrderBy`/`OrderByDescending`/`ThenBy`/`ThenByDescending`:
+
+```csharp
+var options = new QueryOptions<PersonData>()
+    .Where(p => p.Age, FilterOperator.GreaterThanOrEqual, 18)
+    .And(p => p.Name, FilterOperator.Contains, term)
+    .Or(p => p.IsVip, FilterOperator.Equal, true)      // (age >= 18 AND name contains term) OR vip
+    .OrderByDescending(p => p.CreatedAt)
+    .ThenBy("name");                                    // string path when the column is dynamic
+```
+
+A filter can also be supplied as a serialized `ExpressionModel<T>` (built in code or received over
+the wire) via `Where(model)`. The raw `Where("age:gte(18),name:ct(term)")` string form is meant for
+the boundary where a filter arrives as a query string — prefer the typed form in code.
+
 # DDD Pattern
 
 ## Domain Entity example:
