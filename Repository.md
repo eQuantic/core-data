@@ -161,7 +161,6 @@ using System.Threading.Tasks;
 using AutoMapper;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
-using eQuantic.Linq.Sorter;
 using eQuantic.Core.Web.Examples.Domain.Entities;
 using eQuantic.Core.Web.Examples.Domain.Specification;
 using eQuantic.Core.Web.Examples.Infrastructure;
@@ -220,7 +219,7 @@ namespace eQuantic.Core.Web.Examples.Domain.Services
             var options = new QueryOptions<PersonData>()
                 .Where(new PersonSpecification(term))
                 .Include(nameof(PersonData.User))
-                .OrderBy(new Sorting<PersonData> { Column = c => c.Name });
+                .OrderBy("name");
 
             var page = await repo.GetPagedAsync(PageRequest.Of(pageIndex, pageSize), options);
             var persons = Mapper.Map<IReadOnlyList<Person>>(page.Items);

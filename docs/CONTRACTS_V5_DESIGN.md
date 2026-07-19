@@ -79,12 +79,22 @@ These are additive and already on the branch:
   `<Nullable>enable</Nullable>`, `<GenerateDocumentationFile>true</…>`, and the
   removal of the **unused** `eQuantic.Core 1.8.4` package reference (confirmed no
   `.cs` file references it).
+- **Dependency migration.** The discontinued monolithic `eQuantic.Linq 2.1.0` is
+  replaced by the refactored collection: `eQuantic.Linq.Specification 3.2.1` (the
+  specification pattern) and `eQuantic.Linq.Web 3.2.1` (the query DSL that
+  provides `QueryFilter`/`QuerySort` string parsing). `eQuantic.Linq.Web` depends
+  only on `eQuantic.Linq.Expressions`, not on ASP.NET. Because that collection
+  ships `netstandard2.0`/`net8.0`/`net10.0` assets, the `net6.0`/`net7.0` targets
+  use the netstandard2.0 asset (System.Text.Json 10.0.0); the resulting TFM
+  advisory is suppressed via `SuppressTfmSupportBuildWarnings`.
 - **`PageRequest`** — one-based `PageIndex` + `PageSize`, with `Skip`/`Take`.
 - **`PagedResult<T>`** — `Items`, `TotalCount`, `PageIndex`, `PageSize`,
   `PageCount`, `HasPreviousPage`, `HasNextPage`, `Empty(...)`.
 - **`QueryOptions<TEntity>`** — fluent, replaces `Action<Configuration<TEntity>>`:
-  `Where(spec)` / `Where(predicate)`, `Include(paths)`, `OrderBy(sortings)`,
-  `NoTracking()`, `IgnoringQueryFilters()`, `WithTag(tag)`.
+  `Where(spec)` / `Where(predicate)` / `Where("name:eq(John)")` (string filter via
+  `eQuantic.Linq.Web`), `Include(paths)`, `OrderBy("total:desc,customer.name")`
+  (string ordering) / `OrderBy(params QuerySort<TEntity>[])`, `NoTracking()`,
+  `IgnoringQueryFilters()`, `WithTag(tag)`, `WithBeforeCustomization`/`WithAfterCustomization`.
 - **Housekeeping fixes (K7):** removed zero-width characters from the GUID regex
   in `IdentityGenerator`; added `[AttributeUsage]` and fixed a parameter-name
   typo on `MigrationAttribute`.

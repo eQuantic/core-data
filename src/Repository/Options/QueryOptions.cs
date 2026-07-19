@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
-using eQuantic.Linq.Sorter;
 using eQuantic.Linq.Specification;
+using eQuantic.Linq.Web;
 
 namespace eQuantic.Core.Data.Repository.Options;
 
@@ -22,7 +22,7 @@ public class QueryOptions<TEntity>
     where TEntity : class
 {
     private readonly HashSet<string> _includePaths = new();
-    private readonly List<ISorting<TEntity>> _sortings = new();
+    private readonly List<QuerySort<TEntity>> _sortings = new();
 
     /// <summary>
     /// Gets the transformation applied to the query before filtering, or
@@ -56,7 +56,7 @@ public class QueryOptions<TEntity>
     /// <summary>
     /// Gets the ordered set of sortings applied to the query.
     /// </summary>
-    public IReadOnlyList<ISorting<TEntity>> Sortings => _sortings;
+    public IReadOnlyList<QuerySort<TEntity>> Sortings => _sortings;
 
     /// <summary>
     /// Gets a value indicating whether the query is executed without change tracking.
@@ -98,6 +98,26 @@ public class QueryOptions<TEntity>
     }
 
     /// <summary>
+    /// Filters the query using an <c>eQuantic.Linq.Web</c> filter expression, e.g.
+    /// <c>name:eq(John),age:gt(18)</c>. The expression is parsed into a typed
+    /// predicate through <see cref="QueryFilter"/>.
+    /// </summary>
+    /// <param name="filter">The filter expression to parse and apply.</param>
+    /// <param name="options">Optional query-string parsing options.</param>
+    /// <returns>The same <see cref="QueryOptions{TEntity}"/> instance for chaining.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="filter"/> is <c>null</c>.</exception>
+    public QueryOptions<TEntity> Where(string filter, QueryStringOptions? options = null)
+    {
+        if (filter == null)
+        {
+            throw new ArgumentNullException(nameof(filter));
+        }
+
+        Filter = QueryFilter.Parse<TEntity>(filter, options);
+        return this;
+    }
+
+    /// <summary>
     /// Eagerly loads the supplied related property paths with the query.
     /// </summary>
     /// <param name="paths">The property paths to include.</param>
@@ -115,12 +135,32 @@ public class QueryOptions<TEntity>
     }
 
     /// <summary>
+    /// Appends the sortings parsed from an <c>eQuantic.Linq.Web</c> ordering
+    /// expression, e.g. <c>total:desc,customer.name</c> (direction defaults to
+    /// ascending), preserving their order.
+    /// </summary>
+    /// <param name="orderBy">The ordering expression to parse and apply.</param>
+    /// <param name="options">Optional query-string parsing options.</param>
+    /// <returns>The same <see cref="QueryOptions{TEntity}"/> instance for chaining.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="orderBy"/> is <c>null</c>.</exception>
+    public QueryOptions<TEntity> OrderBy(string orderBy, QueryStringOptions? options = null)
+    {
+        if (orderBy == null)
+        {
+            throw new ArgumentNullException(nameof(orderBy));
+        }
+
+        _sortings.AddRange(QuerySort<TEntity>.Parse(orderBy, options));
+        return this;
+    }
+
+    /// <summary>
     /// Appends the supplied sortings to the query, preserving their order.
     /// </summary>
     /// <param name="sortings">The sortings to apply.</param>
     /// <returns>The same <see cref="QueryOptions{TEntity}"/> instance for chaining.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="sortings"/> is <c>null</c>.</exception>
-    public QueryOptions<TEntity> OrderBy(params ISorting<TEntity>[] sortings)
+    public QueryOptions<TEntity> OrderBy(params QuerySort<TEntity>[] sortings)
     {
         if (sortings == null)
         {

@@ -25,8 +25,14 @@ and migration guidance.
   Entity Framework provider layer.
 - **Modern C#.** Nullable reference types and XML documentation are enabled; the
   package builds with zero warnings on net6.0–net10.0.
-- **Dependencies.** The unused `eQuantic.Core` reference is removed; `eQuantic.Linq`
-  remains at 2.1.0.
+- **Dependencies.** The unused `eQuantic.Core` reference is removed. The
+  discontinued monolithic `eQuantic.Linq` is replaced by the refactored package
+  collection — `eQuantic.Linq.Specification 3.2.1` (specifications) and
+  `eQuantic.Linq.Web 3.2.1` (the query DSL used for string-based filtering and
+  ordering).
+- **String-based querying.** `QueryOptions` now accepts `eQuantic.Linq.Web`
+  expressions: `Where("name:eq(John)")` and `OrderBy("total:desc,customer.name")`,
+  alongside the specification- and predicate-based overloads.
 
 ## Installation
 
