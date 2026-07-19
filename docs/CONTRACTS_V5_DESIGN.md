@@ -91,11 +91,20 @@ These are additive and already on the branch:
 - **`PageRequest`** — one-based `PageIndex` + `PageSize`, with `Skip`/`Take`.
 - **`PagedResult<T>`** — `Items`, `TotalCount`, `PageIndex`, `PageSize`,
   `PageCount`, `HasPreviousPage`, `HasNextPage`, `Empty(...)`.
-- **`QueryOptions<TEntity>`** — fluent, replaces `Action<Configuration<TEntity>>`:
-  `Where(spec)` / `Where(predicate)` / `Where("name:eq(John)")` (string filter via
-  `eQuantic.Linq.Web`), `Include(paths)`, `OrderBy("total:desc,customer.name")`
-  (string ordering) / `OrderBy(params QuerySort<TEntity>[])`, `NoTracking()`,
-  `IgnoringQueryFilters()`, `WithTag(tag)`, `WithBeforeCustomization`/`WithAfterCustomization`.
+- **`QueryOptions<TEntity>`** — fluent, replaces `Action<Configuration<TEntity>>`.
+  Filters and sorts are authored **typed and fluent**, mirroring the
+  `eQuantic.Linq.Web` builders as a thin delegation:
+  - Filtering (primary, in-code): `Where`/`And`/`Or(selector, FilterOperator, value)`
+    (or a path string for dynamic columns), folding left to right —
+    `Where(a).And(b).Or(c)` is `(a AND b) OR c`, consecutive AND clauses flatten.
+  - Filtering (whole filters): `Where(ISpecification<TEntity>)`,
+    `Where(Expression<Func<TEntity,bool>>)`, `Where(ExpressionModel<TEntity>)`
+    (serialized model, in-code or over the wire), and `Where(string)` — kept for the
+    **boundary** where a filter arrives as a query string.
+  - Ordering: `OrderBy`/`OrderByDescending`/`ThenBy`/`ThenByDescending(selector)`
+    (or path string), plus `OrderBy(string)` / `OrderBy(params QuerySort<TEntity>[])`.
+  - Shaping/behaviour: `Include(paths)`, `NoTracking()`, `IgnoringQueryFilters()`,
+    `WithTag(tag)`, `WithBeforeCustomization`/`WithAfterCustomization`.
 - **Housekeeping fixes (K7):** removed zero-width characters from the GUID regex
   in `IdentityGenerator`; added `[AttributeUsage]` and fixed a parameter-name
   typo on `MigrationAttribute`.
@@ -209,6 +218,12 @@ The synchronous `IWriteRepository<TEntity>` mirrors this and additionally expose
    a single `QueryOptions` argument), as EF Core translates them directly.
 5. **`IEntity` marker:** kept for the write side; `IEntity<TKey>` is required by
    the keyed read/repository interfaces.
+6. **Filtering/ordering API:** the typed fluent surface (`Where`/`And`/`Or` with
+   selector + `FilterOperator` + value, and `OrderBy`/`ThenBy`) is the primary
+   in-code path, delegating to the `eQuantic.Linq.Web` builders. `Where(string)`
+   is kept only for the query-string boundary. This gives one builder with a
+   well-defined left-to-right fold, so the multi-property `Where` precedence
+   question does not arise.
 
 The contracts consolidation is implemented on `feat/v5-contracts`. The remaining
 follow-up is reimplementing the Entity Framework provider packages against this

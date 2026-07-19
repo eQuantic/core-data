@@ -31,11 +31,13 @@ and migration guidance.
 - **Dependencies.** The unused `eQuantic.Core` reference is removed. The
   discontinued monolithic `eQuantic.Linq` is replaced by the refactored package
   collection — `eQuantic.Linq.Specification 3.7.0` (specifications) and
-  `eQuantic.Linq.Web 3.7.0` (the query DSL used for string-based filtering and
-  ordering).
-- **String-based querying.** `QueryOptions` now accepts `eQuantic.Linq.Web`
-  expressions: `Where("name:eq(John)")` and `OrderBy("total:desc,customer.name")`,
-  alongside the specification- and predicate-based overloads.
+  `eQuantic.Linq.Web 3.7.0` (the query DSL and typed query builders).
+- **Fluent, typed querying.** `QueryOptions` mirrors the `eQuantic.Linq.Web`
+  builders, so filters and sorts are authored typed and fluent:
+  `Where(o => o.Total, FilterOperator.GreaterThan, 100m).And(...).Or(...)` and
+  `OrderByDescending(o => o.Total).ThenBy(o => o.Name)`. Specification, predicate,
+  `ExpressionModel<T>` and raw query-string (`Where("name:eq(John)")`, for the
+  query-string boundary) forms are also supported.
 
 ## Installation
 
