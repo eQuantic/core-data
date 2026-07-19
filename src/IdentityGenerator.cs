@@ -1,10 +1,10 @@
-﻿using System;
+using System;
 
 namespace eQuantic.Core.Data;
 
 public static class IdentityGenerator
 {
-    public const string GuidRegex = @"^(\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9‌​a-fA-F]{12}(\}){0,1}$";
+    public const string GuidRegex = @"^(\{){0,1}[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}(\}){0,1}$";
 
     /// <summary>
     /// This algorithm generates secuential GUIDs across system boundaries, ideal for databases 
