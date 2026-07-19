@@ -1,33 +1,32 @@
-﻿namespace eQuantic.Core.Data.Repository;
+namespace eQuantic.Core.Data.Repository;
 
+/// <summary>
+/// A unit of work whose repositories are backed by an <see cref="System.Linq.IQueryable{T}"/> data source.
+/// </summary>
 public interface IQueryableUnitOfWork : IUnitOfWork
 {
     /// <summary>
-    /// Returns a IQueryable instance for access to entities of the given type in the context
+    /// Returns an <see cref="ISet{TEntity}"/> for accessing entities of the given type in the context.
     /// </summary>
-    /// <typeparam name="TEntity"></typeparam>
-    /// <returns></returns>
-    ISet<TEntity> CreateSet<TEntity>() where TEntity : class, IEntity, new();
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <returns>The entity set.</returns>
+    ISet<TEntity> CreateSet<TEntity>() where TEntity : class, IEntity;
 
     /// <summary>
-    /// Gets the queryable entity repository instance
+    /// Gets the queryable entity repository instance.
     /// </summary>
-    /// <typeparam name="TUnitOfWork"></typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <returns></returns>
-    IQueryableRepository<TUnitOfWork, TEntity, TKey> GetQueryableRepository<TUnitOfWork, TEntity, TKey>() 
-        where TEntity : class, IEntity, new() 
-        where TUnitOfWork : IQueryableUnitOfWork;
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The type of the entity key.</typeparam>
+    /// <returns>The queryable repository.</returns>
+    IQueryableRepository<TEntity, TKey> GetQueryableRepository<TEntity, TKey>()
+        where TEntity : class, IEntity<TKey>;
 
     /// <summary>
-    /// Gets the asynchronous queryable entity repository instance
+    /// Gets the asynchronous queryable entity repository instance.
     /// </summary>
-    /// <typeparam name="TUnitOfWork"></typeparam>
-    /// <typeparam name="TEntity">The entity</typeparam>
-    /// <typeparam name="TKey">The key of entity</typeparam>
-    /// <returns></returns>
-    IAsyncQueryableRepository<TUnitOfWork, TEntity, TKey> GetAsyncQueryableRepository<TUnitOfWork, TEntity, TKey>() 
-        where TEntity : class, IEntity, new() 
-        where TUnitOfWork : IQueryableUnitOfWork;
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The type of the entity key.</typeparam>
+    /// <returns>The asynchronous queryable repository.</returns>
+    IAsyncQueryableRepository<TEntity, TKey> GetAsyncQueryableRepository<TEntity, TKey>()
+        where TEntity : class, IEntity<TKey>;
 }

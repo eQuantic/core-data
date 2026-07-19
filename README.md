@@ -1,25 +1,105 @@
-# eQuantic Core Data Library
+# eQuantic.Core.Data
 
-The **eQuantic Data Core** provides a robust implementation of the **Repository Pattern**, supporting both synchronous and asynchronous operations.
+**A provider-agnostic Repository + Unit of Work for .NET, where filtering, sorting and paging are
+authored typed and fluent — not as stringly-typed configuration.**
 
-## Version 4.3.0
+```csharp
+var repo = unitOfWork.GetAsyncRepository<OrderData, Guid>();
 
-### Key Features and Improvements (v4.3.0)
+var page = await repo.GetPagedAsync(
+    PageRequest.Of(pageIndex: 1, pageSize: 20),
+    new QueryOptions<OrderData>()
+        .Where(o => o.Total, FilterOperator.GreaterThan, 100m)
+        .And(o => o.Customer.Name, FilterOperator.Contains, term)
+        .OrderByDescending(o => o.CreatedAt)
+        .Include(nameof(OrderData.Customer))
+        .NoTracking());
 
-- **Resolved Ambiguous Invocation Error**: Refactored `IReadRepository` and `IAsyncReadRepository` by introducing non-configuration-dependent base interfaces (`IReadRepository<TEntity, TKey>` and `IAsyncReadRepository<TEntity, TKey>`). This centralizes methods like `Count`, `CountAsync`, etc., ensuring clear method resolution when multiple repository interfaces are inherited.
-- **Improved ExpressionConverter**: Enhanced reflection-based method lookup for EF Core providers (SqlServer, PostgreSql, MySql) for better robustness and .NET 10 compatibility.
-- **Dependency Updates**: Updated `eQuantic.Core` to 1.8.4 and `eQuantic.Linq` to 2.1.0.
-
-## Installation
-
-To install **eQuantic.Core.Data**, run the following command in the [Package Manager Console](https://docs.nuget.org/docs/start-here/using-the-package-manager-console):
-
-```powershell
-Install-Package eQuantic.Core.Data
+// page is a PagedResult<OrderData>: Items + TotalCount + PageIndex/PageSize/PageCount + Has*Page
 ```
 
-## Usage Examples
+## Why
 
-The following are examples of implementing the repository pattern:
+The Repository pattern keeps your domain ignorant of the persistence engine — you code against
+`IRepository<TEntity, TKey>`, and the Entity Framework (or other) provider supplies the
+implementation. What usually rots is the *query surface*: dozens of `GetPaged`/`GetFiltered`
+overloads and `Action<Configuration>` callbacks, with filters and sorts passed as magic strings.
 
-- [Repository Pattern Implementation](Repository.md)
+`eQuantic.Core.Data` v5 collapses that: **one method per operation**, each taking a single
+`QueryOptions<TEntity>` that you compose fluently and typed, backed by the
+[eQuantic.Linq](https://github.com/eQuantic/core-linq) query engine.
+
+## How you query
+
+`QueryOptions<TEntity>` mirrors the eQuantic.Linq query builders, so filters read like code and
+fail at compile time — not at runtime:
+
+```csharp
+new QueryOptions<OrderData>()
+    .Where(o => o.Total, FilterOperator.GreaterThanOrEqual, 100m)   // typed member selector
+    .And(o => o.Status, FilterOperator.Equal, OrderStatus.Paid)     // clauses fold left to right:
+    .Or(o => o.Customer.IsVip, FilterOperator.Equal, true)          //   (total>=100 AND paid) OR vip
+    .OrderByDescending(o => o.CreatedAt)
+    .ThenBy("customer.name");                                        // string path for dynamic columns
+```
+
+You reach for whichever filter form fits — all end up as one predicate the provider translates:
+
+| Form | When |
+|------|------|
+| `Where(selector, op, value)` / `And` / `Or` | **Primary** — typed, fluent, compile-checked. |
+| `Where(string path, op, value)` | Dynamic column names; operator and value stay typed. |
+| `Where(ISpecification<T>)` | A reusable domain rule ([specification pattern](Repository.md)). |
+| `Where(Expression<Func<T, bool>>)` | An arbitrary predicate you already hold. |
+| `Where(ExpressionModel<T>)` | A serialized filter — built in code or received over the wire. |
+| `Where("total:gt(100)")` | The boundary where a filter arrives **as a query string** (e.g. a `filterBy` parameter). Prefer the typed form in code. |
+
+The query-string grammar behind the string forms (`total:gt(100),status:eq(Paid)`) is documented in
+the [eQuantic.Linq query-string reference](https://github.com/eQuantic/core-linq/blob/main/docs/query-string-syntax.md).
+
+## Paging that tells you what you got
+
+```csharp
+PagedResult<OrderData> page = await repo.GetPagedAsync(PageRequest.Of(2, 20), options);
+// page.Items, page.TotalCount, page.PageIndex, page.PageSize, page.PageCount,
+// page.HasPreviousPage, page.HasNextPage
+```
+
+`PageRequest` is one-based (`Skip`/`Take` derived); `PagedResult<T>` carries the items *and* the
+totals — no second count call, no bare `IEnumerable<T>`.
+
+## Provider-agnostic by design
+
+This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`, `PageRequest`,
+`PagedResult`, specifications). The persistence engine is kept out of the type signatures —
+`IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
+implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
+
+## Install
+
+```bash
+dotnet add package eQuantic.Core.Data
+```
+
+Targets `net8.0` and `net10.0`. Depends only on the framework-free
+[eQuantic.Linq.Web](https://www.nuget.org/packages/eQuantic.Linq.Web) and
+[eQuantic.Linq.Specification](https://www.nuget.org/packages/eQuantic.Linq.Specification).
+
+## Learn more
+
+- [Repository Pattern walkthrough](Repository.md) — a full example: data entities, unit of work,
+  repository, specifications and domain services.
+- [v5 contracts design](docs/CONTRACTS_V5_DESIGN.md) — the rationale, the consolidated interface and
+  the breaking-change/migration summary.
+- [Releasing](docs/releasing.md) — the automated release flow (maintainers).
+
+## Upgrading to v5
+
+v5 is a deliberate breaking redesign: one `QueryOptions` argument per read (not
+`Action<Configuration>` + overloads), `PagedResult<T>` paging, the unit-of-work type parameter
+removed from `IRepository`/`GetRepository`, an `IEntity<TKey>` constraint (no `new()`), the
+SQL/relational surface moved to the provider layer, and the monolithic `eQuantic.Linq` dependency
+replaced by `eQuantic.Linq.Web` + `eQuantic.Linq.Specification`. The full before/after is in the
+[design doc](docs/CONTRACTS_V5_DESIGN.md#7-breaking-change-summary-what-consumers-must-change).
+
+MIT © eQuantic Tech

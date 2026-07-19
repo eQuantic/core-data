@@ -1,917 +1,208 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Threading;
 using System.Threading.Tasks;
-using eQuantic.Core.Data.Repository.Config;
+using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Linq.Specification;
 
 namespace eQuantic.Core.Data.Repository.Read;
 
 /// <summary>
-/// The asynchronous read repository
+/// The asynchronous read repository. Query shaping (filtering, sorting, includes,
+/// tracking) is expressed through a single <see cref="QueryOptions{TEntity}"/>
+/// argument, and paged reads return a <see cref="PagedResult{T}"/>.
 /// </summary>
 /// <typeparam name="TEntity">The type of the entity.</typeparam>
 /// <typeparam name="TKey">The type of the key.</typeparam>
 /// <seealso cref="IAsyncRepository" />
-public interface IAsyncReadRepository<TEntity, in TKey> : IAsyncRepository
-    where TEntity : class, IEntity, new()
+public interface IAsyncReadRepository<TEntity, TKey> : IAsyncRepository
+    where TEntity : class, IEntity<TKey>
 {
     /// <summary>
-    /// Count elements of type TEntity in repository
+    /// Gets the element identified by its key.
     /// </summary>
-    /// <returns></returns>
-    Task<long> CountAsync(CancellationToken cancellationToken = default);
+    /// <param name="id">The entity key.</param>
+    /// <param name="options">Optional query shaping.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The entity, or <c>null</c> when not found.</returns>
+    Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Count specified elements of type TEntity in repository
+    /// Gets all elements, optionally shaped by <paramref name="options"/>.
     /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<long> CountAsync(
-        ISpecification<TEntity> specification, 
-        CancellationToken cancellationToken = default);
+    /// <param name="options">Optional query shaping (filter, sorting, includes, tracking).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The matching entities.</returns>
+    Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Count filtered elements of type TEntity in repository
+    /// Gets all elements matching the supplied predicate.
     /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<long> CountAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        CancellationToken cancellationToken = default);
-    
+    /// <param name="filter">The predicate to apply.</param>
+    /// <param name="options">Optional additional query shaping.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The matching entities.</returns>
+    Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
     /// <summary>
-    /// Computes the sum of the sequence of <see cref="int"/> values obtained by invoking a projection function on each element of the repository.
+    /// Gets all elements matching the supplied specification.
     /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
+    /// <param name="specification">The specification to apply.</param>
+    /// <param name="options">Optional additional query shaping.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The matching entities.</returns>
+    Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets all elements projected to <typeparamref name="TResult"/>.
+    /// </summary>
+    /// <typeparam name="TResult">The projection result type.</typeparam>
+    /// <param name="map">The projection to apply.</param>
+    /// <param name="options">Optional query shaping (filter, sorting, includes, tracking).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The projected results.</returns>
+    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets the first element matching the supplied options, or <c>null</c> when none match.
+    /// </summary>
+    /// <param name="options">The query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The first matching entity, or <c>null</c>.</returns>
+    Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets the first element matching the supplied options, projected to <typeparamref name="TResult"/>.
+    /// </summary>
+    /// <typeparam name="TResult">The projection result type.</typeparam>
+    /// <param name="map">The projection to apply.</param>
+    /// <param name="options">The query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The first projected result, or the default when none match.</returns>
+    Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets the single element matching the supplied options, or <c>null</c> when none match.
+    /// </summary>
+    /// <param name="options">The query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The single matching entity, or <c>null</c>.</returns>
+    Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets a page of elements together with the total number of matching items.
+    /// </summary>
+    /// <param name="page">The page to retrieve.</param>
+    /// <param name="options">Optional query shaping (filter, sorting, includes, tracking).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The requested page of entities.</returns>
+    Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets a page of elements projected to <typeparamref name="TResult"/> together
+    /// with the total number of matching items.
+    /// </summary>
+    /// <typeparam name="TResult">The projection result type.</typeparam>
+    /// <param name="page">The page to retrieve.</param>
+    /// <param name="map">The projection to apply.</param>
+    /// <param name="options">Optional query shaping (filter, sorting, includes, tracking).</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The requested page of projected results.</returns>
+    Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Counts the elements matching the supplied options.
+    /// </summary>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of matching elements.</returns>
+    Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Determines whether any element matches the supplied options.
+    /// </summary>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns><c>true</c> when at least one element matches; otherwise <c>false</c>.</returns>
+    Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Determines whether all elements matching the supplied options satisfy the predicate.
+    /// </summary>
+    /// <param name="predicate">The predicate that every element must satisfy.</param>
+    /// <param name="options">Optional query shaping, including a scope filter to apply first.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns><c>true</c> when every matching element satisfies the predicate; otherwise <c>false</c>.</returns>
+    Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Computes the sum of a projected <see cref="int"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The sum of the projected values.</returns>
-    Task<int> SumAsync(Expression<Func<TEntity, int>> source);
-    Task<int> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, int>> source);
-    Task<int> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, int>> source);
+    Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Computes the sum of the sequence of nullable <see cref="int"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
-    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
-    Task<int?> SumAsync(Expression<Func<TEntity, int?>> source);
-    Task<int?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, int?>> source);
-    Task<int?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, int?>> source);
+    /// <summary>Computes the sum of a projected nullable <see cref="int"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> when the sequence is empty.</returns>
+    Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Computes the sum of the sequence of <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
+    /// <summary>Computes the sum of a projected <see cref="long"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The sum of the projected values.</returns>
-    Task<long> SumAsync(Expression<Func<TEntity, long>> source);
-    Task<long> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, long>> source);
-    Task<long> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, long>> source);
-    
-    /// <summary>
-    /// Computes the sum of the sequence of nullable <see cref="long"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
-    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
-    Task<long?> SumAsync(Expression<Func<TEntity, long?>> source);
-    Task<long?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, long?>> source);
-    Task<long?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, long?>> source);
+    Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Computes the sum of the sequence of <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
+    /// <summary>Computes the sum of a projected nullable <see cref="long"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> when the sequence is empty.</returns>
+    Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Computes the sum of a projected <see cref="double"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The sum of the projected values.</returns>
-    Task<double> SumAsync(Expression<Func<TEntity, double>> source);
-    Task<double> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, double>> source);
-    Task<double> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, double>> source);
-    
-    /// <summary>
-    /// Computes the sum of the sequence of nullable <see cref="double"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
-    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
-    Task<double?> SumAsync(Expression<Func<TEntity, double?>> source);
-    Task<double?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, double?>> source);
-    Task<double?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, double?>> source);
+    Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Computes the sum of the sequence of <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
+    /// <summary>Computes the sum of a projected nullable <see cref="double"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> when the sequence is empty.</returns>
+    Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Computes the sum of a projected <see cref="float"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The sum of the projected values.</returns>
-    Task<float> SumAsync(Expression<Func<TEntity, float>> source);
-    Task<float> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, float>> source);
-    Task<float> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, float>> source);
+    Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Computes the sum of the sequence of nullable <see cref="float"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
-    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
-    Task<float?> SumAsync(Expression<Func<TEntity, float?>> source);
-    Task<float?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, float?>> source);
-    Task<float?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, float?>> source);
-    
-    /// <summary>
-    /// Computes the sum of the sequence of <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
+    /// <summary>Computes the sum of a projected nullable <see cref="float"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> when the sequence is empty.</returns>
+    Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Computes the sum of a projected <see cref="decimal"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The sum of the projected values.</returns>
-    Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> source);
-    Task<decimal> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, decimal>> source);
-    Task<decimal> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, decimal>> source);
-    
-    /// <summary>
-    /// Computes the sum of the sequence of nullable <see cref="decimal"/> values obtained by invoking a projection function on each element of the repository.
-    /// </summary>
-    /// <param name="source">A projection function to apply to each element.</param>
-    /// <returns>The sum of the projected values, or <c>null</c> if the sequence is empty or contains only <c>null</c> values.</returns>
-    Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> source);
-    Task<decimal?> SumAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, decimal?>> source);
-    Task<decimal?> SumAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, decimal?>> source);
-}
+    Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 
-/// <summary>
-/// The asynchronous read repository
-/// </summary>
-/// <typeparam name="TConfig">The source configuration.</typeparam>
-/// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <typeparam name="TKey">The type of the key.</typeparam>
-/// <seealso cref="IAsyncRepository" />
-public interface IAsyncReadRepository<out TConfig, TEntity, in TKey> : IAsyncReadRepository<TEntity, TKey>
-    where TEntity : class, IEntity, new()
-    where TConfig : Configuration<TEntity>
-{
-    /// <summary>
-    /// Get all elements of type TEntity that matching a
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> AllMatchingAsync(
-        ISpecification<TEntity> specification,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get all elements of type TEntity that matching a
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken">The cancellation token</param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> AllMatchingAsync(
-        ISpecification<TEntity> specification,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get all elements of type TEntity that matching a
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="cancellationToken">The cancellation token</param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> AllMatchingAsync(
-        ISpecification<TEntity> specification, 
-        CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Verify all specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Verify all specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify all specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        ISpecification<TEntity> specification,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify all filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Verify all filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify all filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AllAsync(
-        Expression<Func<TEntity, bool>> filter,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify any elements of type TEntity in repository
-    /// </summary>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        Action<TConfig> configuration = default, 
-        CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Verify any specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Verify any specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify any specified elements of type TEntity in repository
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        ISpecification<TEntity> specification,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify any filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Verify any filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Verify any filtered elements of type TEntity in repository
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<bool> AnyAsync(
-        Expression<Func<TEntity, bool>> filter,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get all elements of type TEntity in repository
-    /// </summary>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetAllAsync(
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get all elements of type TEntity in repository
-    /// </summary>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetAllAsync(
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get all elements of type TEntity in repository
-    /// </summary>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetAllAsync(
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get element by entity key
-    /// </summary>
-    /// <param name="id"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TEntity> GetAsync(
-        TKey id, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get element by entity key
-    /// </summary>
-    /// <param name="id"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetAsync(
-        TKey id, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get element by entity key
-    /// </summary>
-    /// <param name="id"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetAsync(
-        TKey id,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get mapped elements from TEntity type by criteria
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get mapped elements from TEntity type by criteria
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get mapped elements from TEntity type by criteria
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="map"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get mapped elements from TEntity type by specification
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get mapped elements from TEntity type by specification
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get mapped elements from TEntity type by specification
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="map"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TResult>> GetMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetFilteredAsync(
-        Expression<Func<TEntity, bool>> filter,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetFilteredAsync(
-        Expression<Func<TEntity, bool>> filter,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetFilteredAsync(
-        Expression<Func<TEntity, bool>> filter,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        Expression<Func<TEntity, bool>> filter,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetFirstAsync(
-        ISpecification<TEntity> specification,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by criteria.
-    /// </summary>
-    /// <param name="filter">The filter.</param>
-    /// <param name="map"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TResult>> map,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="map"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get first ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="map"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TResult> GetFirstMappedAsync<TResult>(
-        ISpecification<TEntity> specification,
-        Expression<Func<TEntity, TResult>> map,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int limit, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int limit, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="limit"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int limit,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int limit,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int limit,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="limit"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int limit,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int limit,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="limit"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int limit,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="limit"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int limit,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int pageIndex, 
-        int pageSize, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int pageIndex, 
-        int pageSize, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        int pageIndex, 
-        int pageSize,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int pageIndex, 
-        int pageSize,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int pageIndex, 
-        int pageSize,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="specification"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        ISpecification<TEntity> specification, 
-        int pageIndex, 
-        int pageSize,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int pageIndex, 
-        int pageSize,
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int pageIndex, 
-        int pageSize,
-        Action<TConfig> configuration, 
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="pageIndex"></param>
-    /// <param name="pageSize">The page size.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<IEnumerable<TEntity>> GetPagedAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        int pageIndex, 
-        int pageSize,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get single ordered element by criteria.
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration = default);
-
-    /// <summary>
-    /// Get single ordered element by criteria.
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        Expression<Func<TEntity, bool>> filter, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get single ordered element by criteria.
-    /// </summary>
-    /// <param name="filter"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        Expression<Func<TEntity, bool>> filter,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get single ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="configuration"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration = default);
-    
-    /// <summary>
-    /// Get single ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="configuration"></param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        ISpecification<TEntity> specification, 
-        Action<TConfig> configuration,
-        CancellationToken cancellationToken);
-    
-    /// <summary>
-    /// Get single ordered element by specification.
-    /// </summary>
-    /// <param name="specification">The specification.</param>
-    /// <param name="cancellationToken"></param>
-    /// <returns></returns>
-    Task<TEntity> GetSingleAsync(
-        ISpecification<TEntity> specification,
-        CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// The asynchronous read repository
-/// </summary>
-/// <typeparam name="TUnitOfWork">The type of the unit of work.</typeparam>
-/// <typeparam name="TConfig">The source configuration.</typeparam>
-/// <typeparam name="TEntity">The type of the entity.</typeparam>
-/// <typeparam name="TKey">The type of the key.</typeparam>
-/// <seealso cref="IAsyncRepository" />
-public interface
-    IAsyncReadRepository<out TUnitOfWork, out TConfig, TEntity, in TKey> : IAsyncReadRepository<TConfig, TEntity, TKey>,
-        IAsyncRepository<TUnitOfWork>
-    where TUnitOfWork : IUnitOfWork
-    where TEntity : class, IEntity, new()
-    where TConfig : Configuration<TEntity>
-{
+    /// <summary>Computes the sum of a projected nullable <see cref="decimal"/> value over the matching elements.</summary>
+    /// <param name="selector">A projection function applied to each element.</param>
+    /// <param name="options">Optional query shaping, including the filter to apply.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The sum of the projected values, or <c>null</c> when the sequence is empty.</returns>
+    Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default);
 }
