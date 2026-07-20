@@ -13,7 +13,7 @@
     <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern</PackageTags>
     <PackageReleaseNotes>Entity ignorant persistance with Repository Pattern</PackageReleaseNotes>
     <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
-    <PackageOutputPath>../artifacts/</PackageOutputPath>
+    <PackageOutputPath>../../artifacts/</PackageOutputPath>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <GenerateAssemblyTitleAttribute>false</GenerateAssemblyTitleAttribute>
@@ -39,8 +39,8 @@
     <None Include="Icon_details.png" Pack="true" PackagePath="Icon_details.png" />
     <None Include="Icon_dialog.png" Pack="true" PackagePath="Icon_dialog.png" />
     <None Include="Icon_list.png" Pack="true" PackagePath="Icon_list.png" />
-    <None Include="../LICENSE" Pack="true" PackagePath="" />
-    <None Include="../README.md" Pack="true" PackagePath="" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="" />
+    <None Include="../../README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
 </Project>
