@@ -28,6 +28,7 @@
     <ItemGroup>
         <PackageReference Include="MongoDB.Driver" Version="3.10.0" />
         <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.0" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     </ItemGroup>
 
     <ItemGroup>
