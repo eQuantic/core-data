@@ -19,6 +19,12 @@ public class MigrationAttribute : Attribute
     public DateTime Date { get; private set; }
 
     /// <summary>
+    /// Gets the stable, ordered identifier of the migration — the timestamp (for ordering and uniqueness)
+    /// joined with the title. This is what the migration history records.
+    /// </summary>
+    public string Id => $"{Date:yyyyMMddHHmmss}_{Title}";
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="MigrationAttribute"/> class.
     /// </summary>
     /// <param name="title">The migration title.</param>
