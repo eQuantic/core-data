@@ -182,6 +182,28 @@ internal static class CassandraTypes
     public static string Cql(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;
+
+        if (underlying.IsGenericType)
+        {
+            var definition = underlying.GetGenericTypeDefinition();
+            var arguments = underlying.GetGenericArguments();
+            if (definition == typeof(List<>) || definition == typeof(IList<>) || definition == typeof(IReadOnlyList<>)
+                || definition == typeof(ICollection<>) || definition == typeof(IEnumerable<>))
+            {
+                return $"list<{Cql(arguments[0])}>";
+            }
+
+            if (definition == typeof(HashSet<>) || definition == typeof(ISet<>))
+            {
+                return $"set<{Cql(arguments[0])}>";
+            }
+
+            if (definition == typeof(Dictionary<,>) || definition == typeof(IDictionary<,>) || definition == typeof(IReadOnlyDictionary<,>))
+            {
+                return $"map<{Cql(arguments[0])}, {Cql(arguments[1])}>";
+            }
+        }
+
         return underlying switch
         {
             _ when underlying == typeof(string) => "text",

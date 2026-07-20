@@ -13,7 +13,11 @@ public sealed class OrderData : IEntity<Guid>
 
     public decimal Total { get; set; }
 
+    public bool IsPaid { get; set; }
+
     public string Status { get; set; } = "";
+
+    public List<string> Tags { get; set; } = [];
 
     public Guid GetKey() => Id;
 

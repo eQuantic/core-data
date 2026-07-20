@@ -19,8 +19,11 @@ public static class FilterInterpreter
     /// <summary>Interprets a predicate into the filter model.</summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="predicate">The predicate.</param>
-    public static QueryFilter Interpret<TEntity>(Expression<Func<TEntity, bool>> predicate) =>
-        Visit(predicate.Body, predicate.Parameters[0]);
+    public static QueryFilter Interpret<TEntity>(Expression<Func<TEntity, bool>> predicate) => Interpret((LambdaExpression)predicate);
+
+    /// <summary>Interprets a predicate lambda into the filter model (untyped overload, for reflected predicates).</summary>
+    /// <param name="predicate">The predicate lambda (its first parameter is the entity).</param>
+    public static QueryFilter Interpret(LambdaExpression predicate) => Visit(predicate.Body, predicate.Parameters[0]);
 
     private static QueryFilter Visit(Expression expression, ParameterExpression parameter)
     {
