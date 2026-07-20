@@ -30,6 +30,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.0" />
     <PackageReference Include="eQuantic.Linq.Specification" Version="3.7.0" />
     <PackageReference Include="eQuantic.Linq.Web" Version="3.7.0" />
   </ItemGroup>
