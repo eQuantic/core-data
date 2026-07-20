@@ -29,6 +29,34 @@ overloads and `Action<Configuration>` callbacks, with filters and sorts passed a
 `QueryOptions<TEntity>` that you compose fluently and typed, backed by the
 [eQuantic.Linq](https://github.com/eQuantic/core-linq) query engine.
 
+## Getting started
+
+This package is the **contracts** — pair it with a provider that supplies the engine:
+
+```bash
+dotnet add package eQuantic.Core.Data
+dotnet add package eQuantic.Core.Data.EntityFramework.SqlServer   # or PostgreSql / MySql / MongoDb / CosmosDb
+```
+
+Give your entities a key via `IEntity<TKey>` (the key is exposed through `GetKey`/`SetKey` — no mandated
+`Id` property):
+
+```csharp
+using eQuantic.Core.Data.Repository;
+
+public class OrderData : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+    public decimal Total { get; set; }
+    public Guid GetKey() => Id;
+    public void SetKey(Guid key) => Id = key;
+}
+```
+
+Register the provider's unit of work and repositories — the wiring is provider-specific (see the
+[Entity Framework Core provider](https://github.com/eQuantic/core-data-entityframework)) — then inject
+`IUnitOfWork`, ask it for a repository, and query with a `QueryOptions` (the snippet at the top).
+
 ## How you query
 
 `QueryOptions<TEntity>` mirrors the eQuantic.Linq query builders, so filters read like code and
