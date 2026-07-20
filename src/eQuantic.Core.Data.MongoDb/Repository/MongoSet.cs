@@ -71,14 +71,24 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         return result.DeletedCount;
     }
 
-    public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression) =>
-        throw new NotSupportedException(
-            "Set-based UpdateMany for MongoDB is not yet implemented — it needs a member-init expression → " +
-            "$set translator (planned via eQuantic.Linq.Expressions). Load the documents and Modify them, or use DeleteMany.");
+    public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression)
+    {
+        var update = MongoUpdate.BuildSet(updateExpression);
+        var session = _unitOfWork.Session;
+        var result = session is null
+            ? _collection.UpdateMany(filter, update)
+            : _collection.UpdateMany(session, filter, update);
+        return result.ModifiedCount;
+    }
 
-    public Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException(
-            "Set-based UpdateMany for MongoDB is not yet implemented — it needs a member-init expression → " +
-            "$set translator (planned via eQuantic.Linq.Expressions). Load the documents and Modify them, or use DeleteMany.");
+    public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
+        Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
+    {
+        var update = MongoUpdate.BuildSet(updateExpression);
+        var session = _unitOfWork.Session;
+        var result = session is null
+            ? await _collection.UpdateManyAsync(filter, update, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await _collection.UpdateManyAsync(session, filter, update, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.ModifiedCount;
+    }
 }

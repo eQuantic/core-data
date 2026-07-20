@@ -3,7 +3,6 @@ using System.Reflection;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Linq.Expressions;
 using MongoDB.Bson;
-using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 
 namespace eQuantic.Core.Data.MongoDb.Migration;
@@ -91,7 +90,7 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
         var keys = new BsonDocument();
         foreach (var key in operation.Keys)
         {
-            keys.Add(ResolveElementName(operation.EntityType, key.Selector), key.Descending ? -1 : 1);
+            keys.Add(MongoFieldNames.Resolve(operation.EntityType, key.Selector), key.Descending ? -1 : 1);
         }
 
         var options = new CreateIndexOptions { Unique = operation.Unique };
@@ -112,7 +111,7 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
     private async Task ConvertFieldAsync(ConvertFieldOperation operation, CancellationToken cancellationToken)
     {
         var collection = Collection(operation.EntityType);
-        var field = ResolveElementName(operation.EntityType, operation.Field);
+        var field = MongoFieldNames.Resolve(operation.EntityType, operation.Field);
 
         var convert = new BsonDocument("$convert", new BsonDocument
         {
@@ -135,7 +134,7 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
     private async Task RenameFieldAsync(RenameFieldOperation operation, CancellationToken cancellationToken)
     {
         var collection = Collection(operation.EntityType);
-        var field = ResolveElementName(operation.EntityType, operation.Field);
+        var field = MongoFieldNames.Resolve(operation.EntityType, operation.Field);
         var update = Builders<BsonDocument>.Update.Rename(field, operation.NewName);
         await collection.UpdateManyAsync(FilterDefinition<BsonDocument>.Empty, update, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
@@ -150,8 +149,8 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
         foreach (var assignment in operation.Sets)
         {
             set.Add(
-                ResolveElementName(typeof(TEntity), assignment.Field),
-                assignment.Value is null ? BsonNull.Value : BsonValue.Create(assignment.Value));
+                MongoFieldNames.Resolve(typeof(TEntity), assignment.Field),
+                MongoFieldNames.Serialize(typeof(TEntity), assignment.Field.GetMember(), assignment.Value));
         }
 
         var update = new BsonDocumentUpdateDefinition<TEntity>(new BsonDocument("$set", set));
@@ -162,39 +161,6 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
 
     private IMongoCollection<BsonDocument> Collection(Type entityType) =>
         _database.GetCollection<BsonDocument>(_collectionName(entityType));
-
-    /// <summary>
-    ///     Resolves a member selector to its stored BSON element path — the CLR path from the selector
-    ///     (via <see cref="MemberPathExtensions.GetMemberPath" />), then each segment mapped to its BSON element
-    ///     name through the registered class map so <c>[BsonElement]</c>/<c>[BsonId]</c> overrides are honoured.
-    /// </summary>
-    private static string ResolveElementName(Type entityType, LambdaExpression selector)
-    {
-        var parts = selector.GetMemberPath().Split('.');
-        var names = new List<string>(parts.Length);
-        var currentType = entityType;
-
-        foreach (var part in parts)
-        {
-            var memberMap = BsonClassMap.LookupClassMap(currentType).AllMemberMaps
-                .FirstOrDefault(map => map.MemberName == part);
-
-            if (memberMap is not null)
-            {
-                names.Add(memberMap.ElementName);
-                currentType = memberMap.MemberType;
-            }
-            else
-            {
-                names.Add(part);
-                currentType = currentType.GetProperty(part)?.PropertyType
-                              ?? currentType.GetField(part)?.FieldType
-                              ?? typeof(object);
-            }
-        }
-
-        return string.Join(".", names);
-    }
 
     private static string ToConvertTypeName(MigrationFieldType type) => type switch
     {
