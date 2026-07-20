@@ -8,6 +8,8 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- Interface-implementing members inherit their docs from the contracts; revisit with <inheritdoc/> as the provider matures. -->
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
         <AssemblyName>eQuantic.Core.Data.MongoDb</AssemblyName>
         <PackageId>eQuantic.Core.Data.MongoDb</PackageId>
         <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;MongoDB;Native</PackageTags>
