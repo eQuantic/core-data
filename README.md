@@ -75,6 +75,35 @@ This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`,
 `IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
 implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
 
+## Native document-store provider (MongoDB)
+
+`eQuantic.Core.Data.MongoDb` implements the same contracts **directly on the MongoDB driver — no
+Entity Framework**. The write model is lean: `Add`/`Modify`/`Remove` buffer typed write models and a
+single ordered bulk write runs on `Commit` (no change tracking or snapshotting); explicit multi-document
+transactions are opt-in. It also brings what EF's document support cannot — **fluent, typed migrations**
+for a document store, authored with member selectors instead of field strings:
+
+```csharp
+services.AddMongoRepositories("mongodb://localhost:27017", "shop");
+services.AddMongoMigrations(typeof(AddProductIndexes).Assembly);
+
+[Migration("Product indexes", 2026, 7, 20, 14, 0, 0)]
+public sealed class AddProductIndexes : Migration
+{
+    public override void Up(IMigrationBuilder migration) =>
+        migration.For<Product>(product => product
+            .EnsureCollection()
+            .Index(x => x.Category)
+            .CompositeIndex(keys => keys.Descending(x => x.Price).Ascending(x => x.Name)));
+}
+
+// on startup: apply pending migrations, once each
+await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
+```
+
+Targets `net10.0`. Set-based `UpdateMany(filter, x => new Product { Status = "Closed" })` translates the
+member-init to a `$set`, honouring `[BsonElement]`/`[BsonRepresentation]` and custom serializers.
+
 ## Install
 
 ```bash
