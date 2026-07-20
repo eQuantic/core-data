@@ -1,5 +1,19 @@
 # Changelog
 
+## [5.3.0](https://github.com/eQuantic/core-data/compare/v5.2.0...v5.3.0) (2026-07-20)
+
+### Features
+
+* **cosmosdb:** lean write model (UnitOfWork, Set) + $set→patch ([0205931](https://github.com/eQuantic/core-data/commit/02059311caa9d64eb55089287af1fc9e35dd44ce))
+* **cosmosdb:** migration engine + DI ([3f2bd99](https://github.com/eQuantic/core-data/commit/3f2bd99d83325b6afa9ee45d8839035cb185562e))
+* **cosmosdb:** partition-key inference + ToSelector via eQuantic.Linq.Expressions ([0073468](https://github.com/eQuantic/core-data/commit/007346836d1fdd45a0c431f523fd8434886fd69c))
+* **cosmosdb:** repository read/write surface + query shaping ([7fb44f8](https://github.com/eQuantic/core-data/commit/7fb44f8664489b030778f1c25ed328d284d5dc9f))
+* **cosmosdb:** scaffold the native provider + partition-key model ([8bc9431](https://github.com/eQuantic/core-data/commit/8bc9431b775aa1404e4160552a7c3cc674a5f0ec))
+
+### Performance Improvements
+
+* **cosmosdb:** server-side Sum via the SDK LINQ aggregate ([03dcc5b](https://github.com/eQuantic/core-data/commit/03dcc5bed8886afce484a3a4cd8a5cf277cdb550))
+
 ## [5.2.0](https://github.com/eQuantic/core-data/compare/v5.1.0...v5.2.0) (2026-07-20)
 
 ### Features
