@@ -17,9 +17,9 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "eQuantic.Core.Data", "src\e
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "eQuantic.Core.Data.MongoDb", "src\eQuantic.Core.Data.MongoDb\eQuantic.Core.Data.MongoDb.csproj", "{5CD06703-8195-4205-8C4D-63A42F45E401}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{0C88DD14-F956-CE84-757C-A364CCF449FC}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05-4346-4AA6-1389-037BE0695223}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "eQuantic.Core.Data.MongoDb.Tests", "test\eQuantic.Core.Data.MongoDb.Tests\eQuantic.Core.Data.MongoDb.Tests.csproj", "{F82A691E-720A-4A87-B05C-4DD574CB4C1C}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "eQuantic.Core.Data.MongoDb.Tests", "tests\eQuantic.Core.Data.MongoDb.Tests\eQuantic.Core.Data.MongoDb.Tests.csproj", "{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -55,18 +55,18 @@ Global
 		{5CD06703-8195-4205-8C4D-63A42F45E401}.Release|x64.Build.0 = Release|Any CPU
 		{5CD06703-8195-4205-8C4D-63A42F45E401}.Release|x86.ActiveCfg = Release|Any CPU
 		{5CD06703-8195-4205-8C4D-63A42F45E401}.Release|x86.Build.0 = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|x64.Build.0 = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Debug|x86.Build.0 = Debug|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|Any CPU.Build.0 = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|x64.ActiveCfg = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|x64.Build.0 = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|x86.ActiveCfg = Release|Any CPU
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C}.Release|x86.Build.0 = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|x64.Build.0 = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Debug|x86.Build.0 = Debug|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|x64.ActiveCfg = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|x64.Build.0 = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|x86.ActiveCfg = Release|Any CPU
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -74,7 +74,7 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{CB16F7E3-5CCA-4346-89F0-6E1CDEB81DFC} = {0CA2F610-6D57-4D1F-92E3-EDCCEDAD8297}
 		{5CD06703-8195-4205-8C4D-63A42F45E401} = {0CA2F610-6D57-4D1F-92E3-EDCCEDAD8297}
-		{F82A691E-720A-4A87-B05C-4DD574CB4C1C} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
+		{6BD9B78A-6061-4E30-8229-9482CB3D5DB5} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {078A17B1-EA82-4456-81BD-A5714F83ADFC}
