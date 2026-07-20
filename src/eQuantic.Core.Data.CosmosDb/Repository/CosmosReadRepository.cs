@@ -1,8 +1,8 @@
 using System.Linq.Expressions;
-using System.Reflection;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
+using eQuantic.Linq.Expressions;
 using eQuantic.Linq.Specification;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Linq;
@@ -28,7 +28,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     /// <summary>The entity's container.</summary>
     protected readonly Container Container;
 
-    private readonly PropertyInfo _idProperty;
+    private readonly LambdaExpression _idSelector;
+    private readonly string _partitionKeyPath;
 
     /// <summary>Initializes the repository over a unit of work.</summary>
     /// <param name="unitOfWork">The queryable unit of work (a <see cref="CosmosUnitOfWork" />).</param>
@@ -36,9 +37,10 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     {
         UnitOfWork = unitOfWork as CosmosUnitOfWork
                      ?? throw new ArgumentException($"The unit of work must be a {nameof(CosmosUnitOfWork)}.", nameof(unitOfWork));
+        var configuration = UnitOfWork.Configuration<TEntity>();
         Container = UnitOfWork.GetContainer<TEntity>();
-        _idProperty = typeof(TEntity).GetProperty("Id")
-                      ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has no 'Id' property required for point lookups.");
+        _partitionKeyPath = configuration.PartitionKeyPath;
+        _idSelector = MemberPathExtensions.ToSelector<TEntity>("Id");
     }
 
     // ---------------------------------------------------------------- synchronous reads
@@ -247,8 +249,25 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     /// <returns>The shaped query.</returns>
     protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
     {
-        var query = Container.GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true).ApplyQueryOptions(options);
+        var query = Container
+            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options))
+            .ApplyQueryOptions(options);
         return extra is null ? query : extra(query);
+    }
+
+    /// <summary>
+    ///     Scopes the query to a single partition when the filter pins the partition key, otherwise lets it run
+    ///     cross-partition. Automatic — a filter such as <c>x =&gt; x.Category == "Books"</c> already scopes it.
+    /// </summary>
+    private QueryRequestOptions? RequestOptions(QueryOptions<TEntity>? options)
+    {
+        if (options is null)
+        {
+            return null;
+        }
+
+        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options.Filter, options.Specification?.SatisfiedBy());
+        return partitionKey is null ? null : new QueryRequestOptions { PartitionKey = partitionKey };
     }
 
     private IQueryable<TEntity> Ordered(IQueryable<TEntity> query, QueryOptions<TEntity>? options)
@@ -258,22 +277,19 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
             return query;
         }
 
-        var parameter = Expression.Parameter(typeof(TEntity), "e");
-        var selector = Expression.Lambda(Expression.Property(parameter, _idProperty), parameter);
         var call = Expression.Call(
             typeof(Queryable),
             nameof(Queryable.OrderBy),
-            [typeof(TEntity), _idProperty.PropertyType],
+            [typeof(TEntity), _idSelector.Body.Type],
             query.Expression,
-            Expression.Quote(selector));
+            Expression.Quote(_idSelector));
         return query.Provider.CreateQuery<TEntity>(call);
     }
 
     private Expression<Func<TEntity, bool>> IdPredicate(TKey id)
     {
-        var parameter = Expression.Parameter(typeof(TEntity), "e");
-        var body = Expression.Equal(Expression.Property(parameter, _idProperty), Expression.Constant(id, _idProperty.PropertyType));
-        return Expression.Lambda<Func<TEntity, bool>>(body, parameter);
+        var body = Expression.Equal(_idSelector.Body, Expression.Constant(id, _idSelector.Body.Type));
+        return Expression.Lambda<Func<TEntity, bool>>(body, _idSelector.Parameters);
     }
 
     private static async Task<List<T>> MaterializeAsync<T>(IQueryable<T> query, CancellationToken cancellationToken)
