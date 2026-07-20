@@ -1,5 +1,7 @@
 using System.Reflection;
 using eQuantic.Core.Data.MongoDb.Extensions;
+using eQuantic.Core.Data.MongoDb.Repository;
+using eQuantic.Core.Data.Repository;
 using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Driver;
 using Testcontainers.MongoDb;
@@ -68,11 +70,27 @@ public sealed class MongoTestServer
         new(Client, "test_" + Guid.NewGuid().ToString("N"), migrationAssemblies);
 }
 
-/// <summary>Base class that skips a test when the MongoDB container is unavailable.</summary>
+/// <summary>Base class that skips a test when the MongoDB container is unavailable, with shared helpers.</summary>
 public abstract class MongoIntegrationTest
 {
     [SetUp]
     public void RequireDocker() => MongoTestServer.EnsureAvailable();
+
+    protected static MongoTestDatabase NewDatabase(params Assembly[] migrationAssemblies) =>
+        MongoTestServer.NewDatabase(migrationAssemblies);
+
+    protected static IAsyncRepository<Product, string> AsyncRepo(MongoTestDatabase db) =>
+        db.Resolve<IAsyncRepository<Product, string>>();
+
+    protected static IRepository<Product, string> SyncRepo(MongoTestDatabase db) =>
+        db.Resolve<IRepository<Product, string>>();
+
+    protected static MongoDefaultUnitOfWork Uow(MongoTestDatabase db) =>
+        db.Resolve<MongoDefaultUnitOfWork>();
+
+    /// <summary>Inserts documents straight through the driver (independent of the repository under test).</summary>
+    protected static Task Seed(MongoTestDatabase db, params Product[] products) =>
+        db.Database.GetCollection<Product>("Product").InsertManyAsync(products);
 }
 
 /// <summary>A single test's database, with the provider's services registered and a resolution scope open.</summary>
