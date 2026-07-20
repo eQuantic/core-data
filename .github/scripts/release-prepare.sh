@@ -10,7 +10,7 @@ version="$1"
 sed -i "s|<Version>[^<]*</Version>|<Version>${version}</Version>|" src/Directory.Build.props
 
 rm -rf artifacts/packages
-for project in src/*.csproj; do
+for project in src/*/*.csproj; do
   dotnet pack "$project" -c Release \
     -p:Version="${version}" \
     -p:ContinuousIntegrationBuild=true \

@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Description>Native MongoDB implementation of the eQuantic.Core.Data contracts — the MongoDB Driver directly, no Entity Framework, with first-class document-store migrations.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.MongoDb</AssemblyTitle>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- Interface-implementing members inherit their docs from the contracts; revisit with <inheritdoc/> as the provider matures. -->
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <AssemblyName>eQuantic.Core.Data.MongoDb</AssemblyName>
+        <PackageId>eQuantic.Core.Data.MongoDb</PackageId>
+        <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;MongoDB;Native</PackageTags>
+        <PackageReleaseNotes>Native MongoDB Driver implementation of the eQuantic.Core.Data contracts</PackageReleaseNotes>
+        <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
+        <PackageOutputPath>../../artifacts/</PackageOutputPath>
+        <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
+        <RepositoryType>Git</RepositoryType>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageIcon>Icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="MongoDB.Driver" Version="3.10.0" />
+        <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.0" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="Icon.png" Pack="true" PackagePath="Icon.png" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="" />
+        <None Include="../../README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>$(AssemblyName).Tests</_Parameter1>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+</Project>
