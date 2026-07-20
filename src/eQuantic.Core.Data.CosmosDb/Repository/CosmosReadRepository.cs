@@ -188,43 +188,43 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(selector)), cancellationToken).ConfigureAwait(false)).Sum();
+        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     // ---------------------------------------------------------------- dispose
 
