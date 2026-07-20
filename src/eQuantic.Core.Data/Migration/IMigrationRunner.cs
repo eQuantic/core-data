@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 namespace eQuantic.Core.Data.Migration;
 
 /// <summary>
-/// Discovers the <see cref="IMigration" /> types marked with <see cref="MigrationAttribute" />, orders them
+/// Discovers the <see cref="Migration" /> types marked with <see cref="MigrationAttribute" />, orders them
 /// by their timestamp, skips the ones already recorded in the <see cref="IMigrationHistory" />, applies the
 /// rest in order (recording each as it succeeds) and reports how many ran.
 /// </summary>
