@@ -38,6 +38,14 @@ public abstract class CosmosEntityConfiguration
     /// <summary>Reads the Cosmos document id (always a string) from an entity instance.</summary>
     /// <param name="entity">The entity.</param>
     public abstract string GetId(object entity);
+
+    /// <summary>
+    ///     Reads the concurrency token (the document's <c>_etag</c>) from an entity instance, or <c>null</c> when
+    ///     the entity declares none / carries none. When present, a <c>Modify</c>/<c>Merge</c> stages a
+    ///     conditional replace (<c>If-Match</c>) instead of an unconditional upsert.
+    /// </summary>
+    /// <param name="entity">The entity.</param>
+    public virtual string? GetETag(object entity) => null;
 }
 
 /// <summary>The typed Cosmos mapping for <typeparamref name="TEntity" />.</summary>
@@ -47,13 +55,16 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
 {
     private readonly Func<TEntity, PartitionKey> _partitionKey;
     private readonly Func<TEntity, string> _id;
+    private readonly Func<TEntity, string?>? _etag;
 
     internal CosmosEntityConfiguration(string containerName, string partitionKeyPath,
-        Func<TEntity, PartitionKey> partitionKey, Func<TEntity, string> id, int? ttlSeconds)
+        Func<TEntity, PartitionKey> partitionKey, Func<TEntity, string> id, int? ttlSeconds,
+        Func<TEntity, string?>? etag = null)
         : base(typeof(TEntity), containerName, partitionKeyPath)
     {
         _partitionKey = partitionKey;
         _id = id;
+        _etag = etag;
         DefaultTimeToLiveSeconds = ttlSeconds;
     }
 
@@ -62,6 +73,13 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
 
     /// <inheritdoc />
     public override string GetId(object entity) => _id((TEntity)entity);
+
+    /// <inheritdoc />
+    public override string? GetETag(object entity)
+    {
+        var etag = _etag?.Invoke((TEntity)entity);
+        return string.IsNullOrEmpty(etag) ? null : etag;
+    }
 }
 
 /// <summary>The registered Cosmos mappings, keyed by entity type.</summary>
@@ -111,6 +129,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     private string? _partitionKeyPath;
     private Func<TEntity, PartitionKey>? _partitionKey;
     private Func<TEntity, string>? _id;
+    private Func<TEntity, string?>? _etag;
     private int? _ttlSeconds;
 
     /// <summary>Sets the container name (defaults to the entity type name).</summary>
@@ -157,6 +176,20 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Declares the member holding the document's <c>_etag</c> (map it with
+    ///     <c>[JsonPropertyName("_etag")]</c> so reads populate it). When the member carries a value, a
+    ///     <c>Modify</c>/<c>Merge</c> stages a conditional replace (<c>If-Match</c>): a concurrent change makes the
+    ///     commit fail with a <c>PreconditionFailed</c> <see cref="CosmosException" /> instead of silently winning.
+    ///     Entities without a token (or with it unset) keep the unconditional last-write-wins upsert.
+    /// </summary>
+    /// <param name="selector">The concurrency token member selector (e.g. <c>x =&gt; x.ETag</c>).</param>
+    public CosmosEntityBuilder<TEntity> ConcurrencyToken(Expression<Func<TEntity, string?>> selector)
+    {
+        _etag = selector.Compile();
+        return this;
+    }
+
     internal CosmosEntityConfiguration<TEntity> Build()
     {
         if (_partitionKey is null || _partitionKeyPath is null)
@@ -166,7 +199,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
         }
 
         return new CosmosEntityConfiguration<TEntity>(
-            _container ?? typeof(TEntity).Name, _partitionKeyPath, _partitionKey, _id ?? DefaultId(), _ttlSeconds);
+            _container ?? typeof(TEntity).Name, _partitionKeyPath, _partitionKey, _id ?? DefaultId(), _ttlSeconds, _etag);
     }
 
     private static Func<TEntity, string> DefaultId()

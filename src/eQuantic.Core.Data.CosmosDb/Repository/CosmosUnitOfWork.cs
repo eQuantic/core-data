@@ -52,6 +52,21 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     {
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
+
+        // An entity carrying its concurrency token stages a conditional replace: a concurrent change makes the
+        // commit fail with a PreconditionFailed CosmosException instead of silently winning.
+        if (configuration.GetETag(item) is { } etag)
+        {
+            var id = configuration.GetId(item);
+            _pending.Add(new CosmosPendingWrite(
+                configuration.ContainerName,
+                partitionKey,
+                (container, cancellationToken) => container.ReplaceItemAsync(item, id, partitionKey,
+                    new ItemRequestOptions { IfMatchEtag = etag }, cancellationToken),
+                batch => batch.ReplaceItem(id, item, new TransactionalBatchItemRequestOptions { IfMatchEtag = etag })));
+            return;
+        }
+
         _pending.Add(new CosmosPendingWrite(
             configuration.ContainerName,
             partitionKey,

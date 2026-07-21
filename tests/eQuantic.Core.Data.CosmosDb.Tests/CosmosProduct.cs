@@ -16,6 +16,9 @@ public sealed class CosmosProduct : IEntity<string>
 
     public decimal Price { get; set; }
 
+    [System.Text.Json.Serialization.JsonPropertyName("_etag")]
+    public string? ETag { get; set; }
+
     public string GetKey() => Id;
 
     public void SetKey(string key) => Id = key;
