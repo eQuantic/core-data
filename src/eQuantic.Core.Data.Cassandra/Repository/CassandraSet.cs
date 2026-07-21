@@ -1,0 +1,110 @@
+using System.Collections;
+using System.Linq.Expressions;
+using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Options;
+using global::Cassandra;
+
+namespace eQuantic.Core.Data.Cassandra.Repository;
+
+/// <summary>
+///     A native Apache Cassandra entity set. Entity inserts are staged on the <see cref="CassandraUnitOfWork" />
+///     and applied on commit; set-based writes run immediately as CQL. Cassandra <c>DELETE</c>/<c>UPDATE</c> need
+///     the primary key in their <c>WHERE</c>, so those reject non-key filters; enumerating the set is a full-table
+///     scan — prefer the repository with a key-scoped <c>QueryOptions</c>.
+/// </summary>
+/// <typeparam name="TEntity">The entity type.</typeparam>
+public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where TEntity : class, IEntity
+{
+    private readonly CassandraUnitOfWork _unitOfWork;
+    private readonly ISession _session;
+    private readonly CassandraEntityConfiguration _configuration;
+
+    internal CassandraSet(CassandraUnitOfWork unitOfWork, ISession session)
+    {
+        _unitOfWork = unitOfWork;
+        _session = session;
+        _configuration = unitOfWork.Configuration<TEntity>();
+    }
+
+    // ---------------------------------------------------------------- IQueryable (Cassandra has no arbitrary LINQ)
+    public Type ElementType => typeof(TEntity);
+
+    public Expression Expression =>
+        throw new NotSupportedException("Cassandra does not support arbitrary LINQ; query through the repository with a QueryOptions.");
+
+    public IQueryProvider Provider =>
+        throw new NotSupportedException("Cassandra does not support arbitrary LINQ; query through the repository with a QueryOptions.");
+
+    public IEnumerator<TEntity> GetEnumerator() => Execute().GetEnumerator();
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    // ---------------------------------------------------------------- reads
+    public IEnumerable<TEntity> Execute() => ExecuteAsync().GetAwaiter().GetResult();
+
+    private async Task<List<TEntity>> ExecuteAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = await _session.ExecuteAsync(new SimpleStatement($"SELECT * FROM {_configuration.TableName}")).ConfigureAwait(false);
+        return rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row)).ToList();
+    }
+
+    public TEntity? Find<TKey>(TKey key) => FindAsync(key).GetAwaiter().GetResult();
+
+    public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
+    {
+        var statement = new SimpleStatement($"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", key);
+        var rows = await _session.ExecuteAsync(statement).ConfigureAwait(false);
+        var row = rows.FirstOrDefault();
+        return row is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, row);
+    }
+
+    // ---------------------------------------------------------------- entity writes (staged → commit)
+    public void Insert(TEntity item) => _unitOfWork.StageUpsert(item);
+
+    public Task InsertAsync(TEntity item, CancellationToken cancellationToken = default)
+    {
+        _unitOfWork.StageUpsert(item);
+        return Task.CompletedTask;
+    }
+
+    // ---------------------------------------------------------------- set-based writes (immediate)
+    public long DeleteMany(Expression<Func<TEntity, bool>> filter) => DeleteManyAsync(filter).GetAwaiter().GetResult();
+
+    public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
+    {
+        var (where, values, requiresFiltering) = CassandraCql.Where(_configuration, new QueryOptions<TEntity>().Where(filter));
+        if (requiresFiltering)
+        {
+            throw new NotSupportedException("Cassandra DELETE requires the partition key; it cannot filter on non-key columns.");
+        }
+
+        var count = await CountAsync(where, values, cancellationToken).ConfigureAwait(false);
+        await _session.ExecuteAsync(new SimpleStatement($"DELETE FROM {_configuration.TableName} WHERE {where}", values)).ConfigureAwait(false);
+        return count;
+    }
+
+    public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression) =>
+        UpdateManyAsync(filter, updateExpression).GetAwaiter().GetResult();
+
+    public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
+        Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
+    {
+        var (where, whereValues, requiresFiltering) = CassandraCql.Where(_configuration, new QueryOptions<TEntity>().Where(filter));
+        if (requiresFiltering)
+        {
+            throw new NotSupportedException("Cassandra UPDATE requires the primary key; it cannot filter on non-key columns.");
+        }
+
+        var (set, setValues) = CassandraUpdate.BuildSet(updateExpression);
+        var count = await CountAsync(where, whereValues, cancellationToken).ConfigureAwait(false);
+        var statement = new SimpleStatement($"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray());
+        await _session.ExecuteAsync(statement).ConfigureAwait(false);
+        return count;
+    }
+
+    private async Task<long> CountAsync(string where, object?[] values, CancellationToken cancellationToken)
+    {
+        var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}" + (where.Length > 0 ? $" WHERE {where}" : string.Empty);
+        var rows = await _session.ExecuteAsync(new SimpleStatement(cql, values)).ConfigureAwait(false);
+        return rows.First().GetValue<long>(0);
+    }
+}

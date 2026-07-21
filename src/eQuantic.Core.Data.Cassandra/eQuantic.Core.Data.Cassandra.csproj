@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <Description>Native Azure Cosmos DB implementation of the eQuantic.Core.Data contracts — the Cosmos SDK directly, no Entity Framework, with first-class container migrations and partition-key-aware writes.</Description>
-        <AssemblyTitle>eQuantic.Core.Data.CosmosDb</AssemblyTitle>
+        <Description>Native Apache Cassandra implementation of the eQuantic.Core.Data contracts — the DataStax driver directly, no Entity Framework, with CQL-DDL migrations and partition/clustering-key-aware queries translated from typed filters.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.Cassandra</AssemblyTitle>
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>latest</LangVersion>
         <Nullable>enable</Nullable>
@@ -10,10 +10,10 @@
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
         <!-- Interface-implementing members inherit their docs from the contracts; revisit with <inheritdoc/> as the provider matures. -->
         <NoWarn>$(NoWarn);CS1591</NoWarn>
-        <AssemblyName>eQuantic.Core.Data.CosmosDb</AssemblyName>
-        <PackageId>eQuantic.Core.Data.CosmosDb</PackageId>
-        <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;CosmosDB;Azure;Native</PackageTags>
-        <PackageReleaseNotes>Native Azure Cosmos DB SDK implementation of the eQuantic.Core.Data contracts</PackageReleaseNotes>
+        <AssemblyName>eQuantic.Core.Data.Cassandra</AssemblyName>
+        <PackageId>eQuantic.Core.Data.Cassandra</PackageId>
+        <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;Cassandra;CQL;Native</PackageTags>
+        <PackageReleaseNotes>Native Apache Cassandra (DataStax driver) implementation of the eQuantic.Core.Data contracts</PackageReleaseNotes>
         <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
         <PackageOutputPath>../../artifacts/</PackageOutputPath>
         <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
@@ -26,7 +26,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.46.0" />
+        <PackageReference Include="CassandraCSharpDriver" Version="3.22.0" />
+        <!-- Override the driver's vulnerable transitive Newtonsoft.Json 9.0.1 (NU1903). -->
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
         <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
