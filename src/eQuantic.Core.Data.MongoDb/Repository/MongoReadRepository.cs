@@ -20,7 +20,9 @@ namespace eQuantic.Core.Data.MongoDb.Repository;
 public abstract class MongoReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
     IAsyncQueryableReadRepository<TEntity, TKey>,
-    IExplainableRepository<TEntity>
+    IExplainableRepository<TEntity>,
+    IStreamingReadRepository<TEntity>,
+    IContinuationReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -247,6 +249,94 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         Query(options).SumAsync(NotNull(selector), cancellationToken);
+
+    // ---------------------------------------------------------------- continuation paging (keyset by id)
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     MongoDB has no server continuation token for queries, so this pages by <b>keyset</b>: ordered by the id,
+    ///     each page filters <c>id &gt; last</c> — both evaluated server-side under the same BSON ordering, so deep
+    ///     pages cost one index seek instead of a skip. Custom sortings are not supported (the keyset is the id).
+    /// </remarks>
+    public async Task<ContinuedResult<TEntity>> GetPageAsync(int pageSize, string? continuationToken = null,
+        QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        if (pageSize < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), pageSize, "The page size must be at least 1.");
+        }
+
+        if (options is { Sortings.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Keyset paging orders by the id; custom sortings are not supported — use GetPagedAsync, or sort each page client-side.");
+        }
+
+        var query = Query(options);
+        if (continuationToken is not null)
+        {
+            query = query.Where(IdAfter(ReadToken(continuationToken)));
+        }
+
+        var items = await Ordered(query, options).Take(pageSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var token = items.Count < pageSize ? null : WriteToken(IdValue(items[^1]));
+        return new ContinuedResult<TEntity>(items, token);
+    }
+
+    private object? IdValue(TEntity entity) => _idMember is PropertyInfo property
+        ? property.GetValue(entity)
+        : ((FieldInfo)_idMember).GetValue(entity);
+
+    private string WriteToken(object? id) => id switch
+    {
+        null => throw new InvalidOperationException($"'{typeof(TEntity).Name}' produced a null id; keyset paging needs one."),
+        MongoDB.Bson.ObjectId objectId => objectId.ToString(),
+        _ => System.Text.Json.JsonSerializer.Serialize(id, _idType),
+    };
+
+    private object? ReadToken(string token) => _idType == typeof(MongoDB.Bson.ObjectId)
+        ? MongoDB.Bson.ObjectId.Parse(token)
+        : System.Text.Json.JsonSerializer.Deserialize(token, _idType);
+
+    /// <summary>Builds <c>e =&gt; e.Id &gt; id</c> (or the <c>CompareTo</c> form for types without the operator).</summary>
+    private Expression<Func<TEntity, bool>> IdAfter(object? id)
+    {
+        var parameter = Expression.Parameter(typeof(TEntity), "e");
+        var member = Expression.MakeMemberAccess(parameter, _idMember);
+        var value = Expression.Constant(id, _idType);
+
+        Expression body;
+        try
+        {
+            body = Expression.GreaterThan(member, value);
+        }
+        catch (InvalidOperationException)
+        {
+            // string/Guid have no '>' operator; the driver translates CompareTo to the same server-side ordering.
+            var compare = Expression.Call(member, _idType.GetMethod(nameof(IComparable.CompareTo), [_idType])!, value);
+            body = Expression.GreaterThan(compare, Expression.Constant(0));
+        }
+
+        return Expression.Lambda<Func<TEntity, bool>>(body, parameter);
+    }
+
+    // ---------------------------------------------------------------- streaming
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<TEntity> GetStreamAsync(QueryOptions<TEntity>? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Streams through the driver cursor: one batch in memory at a time.
+        var source = (IAsyncCursorSource<TEntity>)Query(options);
+        using var cursor = await source.ToCursorAsync(cancellationToken).ConfigureAwait(false);
+        while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            foreach (var entity in cursor.Current)
+            {
+                yield return entity;
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- explain
 

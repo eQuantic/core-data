@@ -26,7 +26,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
     IAsyncQueryableReadRepository<TEntity, TKey>,
     IExplainableRepository<TEntity>,
-    IContinuationReadRepository<TEntity>
+    IContinuationReadRepository<TEntity>,
+    IStreamingReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -206,6 +207,26 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         return new ContinuedResult<TEntity>(entities.ToList(), state is null ? null : Convert.ToBase64String(state));
+    }
+
+    // ---------------------------------------------------------------- streaming
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<TEntity> GetStreamAsync(QueryOptions<TEntity>? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Streams over the native paging state: one page in memory at a time, stop whenever the consumer stops.
+        string? token = null;
+        do
+        {
+            var page = await GetPageAsync(1000, token, options, cancellationToken).ConfigureAwait(false);
+            foreach (var entity in page.Items)
+            {
+                yield return entity;
+            }
+
+            token = page.ContinuationToken;
+        } while (token is not null);
     }
 
     // ---------------------------------------------------------------- explain

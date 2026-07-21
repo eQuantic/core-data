@@ -462,6 +462,26 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         Assert.That(pages, Is.GreaterThanOrEqualTo(3), "the read spans multiple pages");
     }
 
+    [Test]
+    public async Task Get_stream_yields_every_row_through_the_paging_state()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = ReadingRepo(db);
+        await Seed(db, NewReading(1, Utc(0)), NewReading(1, Utc(1)), NewReading(1, Utc(2)), NewReading(2, Utc(0)));
+
+        var stream = ((IStreamingReadRepository<Reading>)repo)
+            .GetStreamAsync(new QueryOptions<Reading>().Where(x => x.SensorId == 1));
+
+        var seen = new List<Reading>();
+        await foreach (var reading in stream)
+        {
+            seen.Add(reading);
+        }
+
+        Assert.That(seen, Has.Count.EqualTo(3));
+        Assert.That(seen.Select(x => x.At), Is.EqualTo(new[] { Utc(0), Utc(1), Utc(2) }), "clustering order preserved");
+    }
+
     // ---------------------------------------------------------------- explain
 
     [Test]

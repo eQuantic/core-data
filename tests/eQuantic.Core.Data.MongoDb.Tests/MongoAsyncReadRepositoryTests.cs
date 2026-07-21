@@ -32,6 +32,52 @@ public sealed class MongoAsyncReadRepositoryTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task GetStreamAsync_streams_the_matching_documents()
+    {
+        using var db = NewDatabase();
+        await Seed(db, Product.New("A", "X", 1, 1m), Product.New("B", "X", 1, 1m), Product.New("C", "Y", 1, 1m));
+
+        var stream = ((IStreamingReadRepository<Product>)AsyncRepo(db))
+            .GetStreamAsync(new QueryOptions<Product>().Where(p => p.Category == "X"));
+
+        var seen = new List<Product>();
+        await foreach (var product in stream)
+        {
+            seen.Add(product);
+        }
+
+        Assert.That(seen.Select(p => p.Name), Is.EquivalentTo(new[] { "A", "B" }));
+    }
+
+    [Test]
+    public async Task GetPageAsync_walks_the_keyset_to_exhaustion()
+    {
+        using var db = NewDatabase();
+        await Seed(db,
+            Product.New("A", "X", 1, 1m), Product.New("B", "X", 1, 1m), Product.New("C", "X", 1, 1m),
+            Product.New("D", "X", 1, 1m), Product.New("E", "X", 1, 1m), Product.New("F", "Y", 1, 1m));
+
+        var pager = (IContinuationReadRepository<Product>)AsyncRepo(db);
+        var options = new QueryOptions<Product>().Where(p => p.Category == "X");
+        var seen = new List<string>();
+        string? token = null;
+        var pages = 0;
+
+        do
+        {
+            var page = await pager.GetPageAsync(2, token, options);
+            Assert.That(page.Items, Has.Count.LessThanOrEqualTo(2));
+            seen.AddRange(page.Items.Select(p => p.Id));
+            token = page.ContinuationToken;
+            pages++;
+        } while (token is not null && pages < 10);
+
+        Assert.That(seen, Has.Count.EqualTo(5));
+        Assert.That(seen, Is.Unique, "no document repeats across pages");
+        Assert.That(pages, Is.GreaterThanOrEqualTo(3));
+    }
+
+    [Test]
     public async Task Explain_renders_the_aggregation_pipeline()
     {
         using var db = NewDatabase();

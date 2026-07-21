@@ -21,7 +21,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
     IAsyncQueryableReadRepository<TEntity, TKey>,
     IExplainableRepository<TEntity>,
-    IContinuationReadRepository<TEntity>
+    IContinuationReadRepository<TEntity>,
+    IStreamingReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -265,6 +266,23 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
         var response = await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
         return new ContinuedResult<TEntity>(response.ToList(), response.ContinuationToken);
+    }
+
+    // ---------------------------------------------------------------- streaming
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<TEntity> GetStreamAsync(QueryOptions<TEntity>? options = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Streams through the FeedIterator: one response page in memory at a time.
+        using var iterator = Query(options).ToFeedIterator();
+        while (iterator.HasMoreResults)
+        {
+            foreach (var entity in await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return entity;
+            }
+        }
     }
 
     // ---------------------------------------------------------------- explain
