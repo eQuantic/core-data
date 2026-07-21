@@ -20,9 +20,6 @@ namespace eQuantic.Core.Data.Query;
 /// </summary>
 public static class FilterInterpreter
 {
-    // Shared instance: its reflection caches make repeated translation cheap, and ToNode is a pure read.
-    private static readonly ExpressionSerializer Serializer = new();
-
     /// <summary>Interprets a predicate into the filter model.</summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="predicate">The predicate.</param>
@@ -34,9 +31,31 @@ public static class FilterInterpreter
     {
         // Transform to the structured node model: closures/captured variables and any parameter-free sub-tree are
         // folded to constants, so the visitor below deals only with parameter-rooted members and literal values.
-        var lambda = (LambdaNode)Serializer.ToNode(predicate);
+        var lambda = ToNode(predicate);
         return Visit(lambda.Body);
     }
+
+    /// <summary>
+    ///     Converts a predicate into its node-model form — one partial-evaluation pass. Engines that split a
+    ///     predicate (pushdown conjuncts, OR branches) convert once and interpret each part with
+    ///     <see cref="Interpret(ExpressionNode)" />.
+    /// </summary>
+    /// <param name="predicate">The predicate lambda.</param>
+    public static LambdaNode ToNode(LambdaExpression predicate) => (LambdaNode)NodeEvaluation.Serializer.ToNode(predicate);
+
+    /// <summary>Interprets a node-model predicate body (or one of its conjuncts/branches) into the filter model.</summary>
+    /// <param name="body">The predicate body node.</param>
+    public static QueryFilter Interpret(ExpressionNode body) => Visit(body);
+
+    /// <summary>
+    ///     Rebuilds a typed predicate for a body node of a converted lambda — e.g. a conjunct the dialect refused,
+    ///     handed back as a compilable expression for client-side residual evaluation.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <param name="lambda">The converted lambda the node came from (its parameters anchor the rebuild).</param>
+    /// <param name="body">The body node to rebuild.</param>
+    public static Expression<Func<TEntity, bool>> RebuildPredicate<TEntity>(LambdaNode lambda, ExpressionNode body) =>
+        NodeEvaluation.Serializer.ToExpression<Func<TEntity, bool>>(new LambdaNode { Parameters = lambda.Parameters, Body = body });
 
     private static QueryFilter Visit(ExpressionNode node)
     {
@@ -189,49 +208,22 @@ public static class FilterInterpreter
     }
 
     /// <summary>
-    ///     The value of a constant operand. Captured variables arrive already folded by the partial evaluator; a
-    ///     parameter-free subtree it kept structural (an inline <c>new DateTime(...)</c>, <c>Guid.Parse(...)</c>,
-    ///     <c>DateTime.UtcNow</c>, …) is rebuilt and evaluated here — the same folding LINQ providers apply at
-    ///     translation time. A subtree still referencing the lambda parameter cannot compile as a value and stays
-    ///     unsupported.
+    ///     The value of a constant operand — folded, or structural-but-parameter-free and evaluated by
+    ///     <see cref="NodeEvaluation" /> (the same folding LINQ providers apply at translation time).
     /// </summary>
-    private static object? Value(ExpressionNode node)
-    {
-        node = Unwrap(node);
-        if (node is ConstantNode constant)
-        {
-            return constant.Value;
-        }
-
-        try
-        {
-            return Expression.Lambda(Serializer.ToExpression(node)).Compile().DynamicInvoke();
-        }
-        catch (Exception exception) when (exception is not NotSupportedException)
-        {
-            throw new NotSupportedException("Each filter clause must compare a member to a constant value.", exception);
-        }
-    }
+    private static object? Value(ExpressionNode node) =>
+        NodeEvaluation.TryValue(node, out var value)
+            ? value
+            : throw new NotSupportedException("Each filter clause must compare a member to a constant value.");
 
     /// <summary>The elements of a constant collection (folded, inline-structural, or evaluated parameter-free).</summary>
-    private static IReadOnlyList<object?> Values(ExpressionNode node) => Unwrap(node) switch
-    {
-        ConstantNode constant when constant.Value is IEnumerable sequence and not string =>
-            sequence.Cast<object?>().ToList(),
-        NewArrayNode { Expressions: { } elements } => elements.Select(Value).ToList(),
-        var other when Value(other) is IEnumerable sequence and not string => sequence.Cast<object?>().ToList(),
-        _ => throw new NotSupportedException("An IN clause requires a constant collection of values."),
-    };
+    private static IReadOnlyList<object?> Values(ExpressionNode node) =>
+        NodeEvaluation.TryValues(node, out var values)
+            ? values
+            : throw new NotSupportedException("An IN clause requires a constant collection of values.");
 
     /// <summary>Strips compiler-inserted conversions so a member/constant underneath is reached.</summary>
-    private static ExpressionNode Unwrap(ExpressionNode node) => node switch
-    {
-        // Casts (Convert) and conversion operators such as the array -> ReadOnlySpan op_Implicit that binds
-        // `array.Contains(x)` to MemoryExtensions.Contains (its ByRefLike node stays structural after folding).
-        UnaryNode { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked, Operand: { } operand } => Unwrap(operand),
-        MethodCallNode { Object: null, Method.Name: "op_Implicit" or "op_Explicit", Arguments: [var argument] } => Unwrap(argument),
-        _ => node,
-    };
+    private static ExpressionNode Unwrap(ExpressionNode node) => NodeEvaluation.Unwrap(node);
 
     private static ComparisonOperator Comparison(ExpressionType nodeType) =>
         TryComparison(nodeType, out var op) ? op : throw new NotSupportedException($"The operator '{nodeType}' is not a supported comparison.");

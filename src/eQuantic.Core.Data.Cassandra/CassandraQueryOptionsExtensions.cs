@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Linq.Expressions.Nodes;
 
 namespace eQuantic.Core.Data.Cassandra;
 
@@ -103,7 +104,11 @@ internal static class CassandraCql
 
         foreach (var filter in Filters(options, extraFilter))
         {
-            foreach (var conjunct in PredicateConjunctions.Split(filter))
+            // One node-model conversion per filter (a single partial-evaluation pass); splitting, interpretation
+            // and the OR analysis all walk the nodes, and only a refused conjunct is rebuilt into an expression
+            // for client-side residual evaluation.
+            var lambda = FilterInterpreter.ToNode(filter);
+            foreach (var conjunct in NodePredicates.Conjuncts(lambda.Body))
             {
                 QueryFilter interpreted;
                 try
@@ -113,7 +118,7 @@ internal static class CassandraCql
                 catch (NotSupportedException)
                 {
                     // The interpreter does not model this shape (an arbitrary predicate): whole conjunct residual.
-                    residual.Add(conjunct);
+                    residual.Add(FilterInterpreter.RebuildPredicate<TEntity>(lambda, conjunct));
                     continue;
                 }
 
@@ -136,7 +141,7 @@ internal static class CassandraCql
                 else
                 {
                     // CQL cannot express it (OR across columns, !=, NULL, …): the refusal becomes residual work.
-                    residual.Add(conjunct);
+                    residual.Add(FilterInterpreter.RebuildPredicate<TEntity>(lambda, conjunct));
                 }
             }
         }
@@ -149,11 +154,10 @@ internal static class CassandraCql
     ///     <c>ALLOW FILTERING</c>) and pin the partition — otherwise the split would multiply scans instead of
     ///     multiplying cheap point paths, and the conjunct stays residual.
     /// </summary>
-    private static bool TryOrSplit<TEntity>(CassandraEntityConfiguration configuration,
-        Expression<Func<TEntity, bool>> conjunct, List<CassandraCqlAlternative> alternatives)
-        where TEntity : class
+    private static bool TryOrSplit(CassandraEntityConfiguration configuration,
+        ExpressionNode conjunct, List<CassandraCqlAlternative> alternatives)
     {
-        var branches = PredicateDisjunctions.Split(conjunct);
+        var branches = NodePredicates.Disjuncts(conjunct);
         if (branches.Count < 2)
         {
             return false;
