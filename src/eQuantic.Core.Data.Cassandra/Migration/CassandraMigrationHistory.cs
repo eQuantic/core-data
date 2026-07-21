@@ -4,13 +4,14 @@ using global::Cassandra;
 namespace eQuantic.Core.Data.Cassandra.Migration;
 
 /// <summary>
-///     Tracks applied migrations in a dedicated Cassandra table (<c>_migrations</c> by default), keyed by the
-///     migration's stable <see cref="MigrationAttribute.Id" />.
+///     Tracks applied migrations in a dedicated Cassandra table (<c>schema_migrations</c> by default), keyed by the
+///     migration's stable <see cref="MigrationAttribute.Id" />. Cassandra forbids a leading underscore in an
+///     unquoted identifier, so the table cannot use the <c>_migrations</c> name other providers do.
 /// </summary>
 public sealed class CassandraMigrationHistory : IMigrationHistory
 {
     /// <summary>The default history table name.</summary>
-    public const string DefaultTableName = "_migrations";
+    public const string DefaultTableName = "schema_migrations";
 
     private readonly ISession _session;
     private readonly string _tableName;

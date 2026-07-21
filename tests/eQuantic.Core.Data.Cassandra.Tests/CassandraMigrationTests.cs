@@ -6,7 +6,7 @@ namespace eQuantic.Core.Data.Cassandra.Tests;
 /// <summary>
 ///     Covers the Cassandra migration runner, executor and history against a real cluster: it creates the declared
 ///     tables (with their partition/clustering keys and column types) and a single-column secondary index, records
-///     what it applied in the <c>_migrations</c> table, and is safe to re-run.
+///     what it applied in the <c>schema_migrations</c> table, and is safe to re-run.
 /// </summary>
 [TestFixture]
 public sealed class CassandraMigrationTests : CassandraIntegrationTest
@@ -23,7 +23,7 @@ public sealed class CassandraMigrationTests : CassandraIntegrationTest
         Assert.That(tables, Does.Contain("accounts"));
         Assert.That(tables, Does.Contain("readings"));
 
-        var recorded = (await db.Session.ExecuteAsync(new SimpleStatement("SELECT id, title FROM _migrations"))).ToList();
+        var recorded = (await db.Session.ExecuteAsync(new SimpleStatement("SELECT id, title FROM schema_migrations"))).ToList();
         Assert.That(recorded, Has.Count.EqualTo(1));
         Assert.That(recorded[0].GetValue<string>("title"), Is.EqualTo("Cassandra schema setup"));
     }
