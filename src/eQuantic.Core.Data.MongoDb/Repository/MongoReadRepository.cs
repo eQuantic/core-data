@@ -271,7 +271,18 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
     {
         var query = Collection.AsQueryable().ApplyQueryOptions(options);
-        return extra is null ? query : extra(query);
+        if (extra is not null)
+        {
+            query = extra(query);
+        }
+
+        // Include navigations as a server-side $lookup after the filter, so the join runs over the matched documents.
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            query = MongoInclude.Apply(query, UnitOfWork, options.IncludePaths);
+        }
+
+        return query;
     }
 
     private IQueryable<TEntity> Ordered(IQueryable<TEntity> query, QueryOptions<TEntity>? options)

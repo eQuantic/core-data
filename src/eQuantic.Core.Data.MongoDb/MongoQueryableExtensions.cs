@@ -11,8 +11,9 @@ namespace eQuantic.Core.Data.MongoDb;
 /// </summary>
 /// <remarks>
 ///     The store-agnostic shaping — before/after customization, specification + predicate filter and
-///     sortings — is applied here. The EF-only knobs (<c>Include</c>, change tracking, global query filters,
-///     query tags) have no meaning for a document store and are intentionally ignored.
+///     sortings — is applied here. <c>Include</c> is applied separately by the repository as a server-side
+///     <c>$lookup</c> (see <see cref="MongoInclude" />). The remaining EF-only knobs (change tracking, global
+///     query filters, query tags) have no meaning for a document store and are intentionally ignored.
 /// </remarks>
 public static class MongoQueryableExtensions
 {
