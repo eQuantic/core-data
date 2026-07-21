@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.6.1](https://github.com/eQuantic/core-data/compare/v5.6.0...v5.6.1) (2026-07-21)
+
+### Performance Improvements
+
+* **core:** evaluate one-shot parameter-free folds by interpretation ([5e74d6a](https://github.com/eQuantic/core-data/commit/5e74d6aa9b4462639531b9dc4182d92b565cac3f))
+
 ## [5.6.0](https://github.com/eQuantic/core-data/compare/v5.5.0...v5.6.0) (2026-07-21)
 
 ### Features
