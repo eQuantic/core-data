@@ -1,3 +1,4 @@
+using eQuantic.Core.Data.Cassandra.Repository;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -191,6 +192,48 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         Assert.That(async () => await AccountRepo(db).UpdateManyAsync(x => x.Id == Guid.NewGuid(),
                 x => new Account { Balance = x.Balance + 1m }),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("counter"));
+    }
+
+    // ---------------------------------------------------------------- counters + lightweight transactions
+
+    [Test]
+    public async Task Counter_columns_move_by_increments_and_read_back()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = db.Resolve<IAsyncRepository<Tally, string>>();
+
+        await repo.UpdateManyAsync(x => x.Space == "api", x => new Tally { Hits = x.Hits + 5 });
+        await repo.UpdateManyAsync(x => x.Space == "api", x => new Tally { Hits = x.Hits - 2 });
+
+        var tally = await repo.GetAsync("api");
+        Assert.That(tally, Is.Not.Null);
+        Assert.That(tally!.Hits, Is.EqualTo(3), "counter incremented and decremented on the server");
+    }
+
+    [Test]
+    public async Task Counter_tables_reject_inserts_with_guidance()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = db.Resolve<IAsyncRepository<Tally, string>>();
+
+        Assert.That(async () => await repo.AddAsync(new Tally { Space = "api", Hits = 1 }),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("counter"));
+    }
+
+    [Test]
+    public async Task Add_if_not_exists_applies_once_and_reports_the_conflict()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = (CassandraRepository<Account, Guid>)db.Resolve<IAsyncRepository<Account, Guid>>();
+        var account = NewAccount("first", 10m);
+
+        Assert.That(await repo.AddIfNotExistsAsync(account), Is.True, "the first insert applies");
+
+        var conflicting = new Account { Id = account.Id, Owner = "second", Balance = 99m, Tags = [], OpenedAt = Utc(0) };
+        Assert.That(await repo.AddIfNotExistsAsync(conflicting), Is.False, "the second insert reports the conflict");
+
+        var loaded = await repo.GetAsync(account.Id);
+        Assert.That(loaded!.Owner, Is.EqualTo("first"), "the original row is untouched");
     }
 
     // ---------------------------------------------------------------- ALLOW FILTERING opt-in

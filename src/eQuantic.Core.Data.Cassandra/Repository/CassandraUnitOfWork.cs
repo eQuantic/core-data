@@ -34,8 +34,18 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     // -------------------------------------------------------------- write staging
 
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class =>
-        _pending.Add(CassandraMapper.BuildUpsert(Configuration<TEntity>(), item));
+    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+        if (configuration.CounterColumns.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through " +
+                "UpdateMany increments (x => new ... { N = x.N + n }).");
+        }
+
+        _pending.Add(CassandraMapper.BuildUpsert(configuration, item));
+    }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
         _pending.Add(CassandraMapper.BuildDelete(Configuration<TEntity>(), item));

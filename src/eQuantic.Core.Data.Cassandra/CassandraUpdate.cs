@@ -8,12 +8,13 @@ namespace eQuantic.Core.Data.Cassandra;
 ///     <see cref="UpdateInterpreter" />) into a CQL <c>SET</c> assignment list with bound values: constant
 ///     assignments become <c>col = ?</c> and collection updates become the native read-modify-write forms
 ///     (<c>col = col + ?</c>, <c>col = ? + col</c>, <c>col = col - ?</c>) — atomic per column in Cassandra.
-///     Numeric read-modify-writes need a counter column, which the model does not declare yet, so they are
-///     rejected with the reason.
+///     Numeric read-modify-writes render as counter increments when the model declares the column with
+///     <c>Counter(...)</c>, and are rejected with guidance otherwise.
 /// </summary>
 internal static class CassandraUpdate
 {
-    public static (string Set, object?[] Values) Build<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
+    public static (string Set, object?[] Values) Build<TEntity>(CassandraEntityConfiguration configuration,
+        Expression<Func<TEntity, TEntity>> updateFactory)
     {
         var assignments = new List<string>();
         var values = new List<object?>();
@@ -22,9 +23,16 @@ internal static class CassandraUpdate
         {
             switch (assignment)
             {
+                case SetAssignment set when configuration.IsCounter(set.Name):
+                    throw new NotSupportedException(
+                        $"A counter column cannot be set ('{set.Name}'); counters only move by increments (x => new ... {{ {set.Name} = x.{set.Name} + n }}).");
                 case SetAssignment set:
                     assignments.Add($"{set.Name} = ?");
                     values.Add(set.Value);
+                    break;
+                case IncrementAssignment increment when configuration.IsCounter(increment.Name):
+                    assignments.Add($"{increment.Name} = {increment.Name} + ?");
+                    values.Add(Convert.ToInt64(increment.Delta));
                     break;
                 case CollectionAddAssignment add when add.Unique && !add.IsSetMember():
                     throw new NotSupportedException(
@@ -43,8 +51,8 @@ internal static class CassandraUpdate
                     break;
                 case IncrementAssignment increment:
                     throw new NotSupportedException(
-                        $"A numeric read-modify-write on '{increment.Name}' needs a Cassandra counter column, which the model " +
-                        "does not declare yet; load the rows and Modify them instead.");
+                        $"A numeric read-modify-write on '{increment.Name}' needs a Cassandra counter column; declare it with " +
+                        $"Counter(x => x.{increment.Name}) in the model, or load the rows and Modify them instead.");
                 case MultiplyAssignment multiply:
                     throw new NotSupportedException(
                         $"CQL cannot multiply in an UPDATE ('{multiply.Name}'); load the rows and Modify them instead.");

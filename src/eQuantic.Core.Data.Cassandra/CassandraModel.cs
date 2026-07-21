@@ -23,7 +23,8 @@ public abstract class CassandraEntityConfiguration
 {
     /// <summary>Initializes the configuration.</summary>
     protected CassandraEntityConfiguration(Type entityType, string tableName, IReadOnlyList<string> partitionKeys,
-        IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn)
+        IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
+        IReadOnlyList<string>? counterColumns = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -31,6 +32,7 @@ public abstract class CassandraEntityConfiguration
         ClusteringKeys = clusteringKeys;
         Columns = columns;
         KeyColumn = keyColumn;
+        CounterColumns = counterColumns ?? [];
     }
 
     /// <summary>The entity type.</summary>
@@ -51,6 +53,12 @@ public abstract class CassandraEntityConfiguration
     /// <summary>The column the entity's key maps to (used by point lookups); defaults to the first partition key.</summary>
     public string KeyColumn { get; }
 
+    /// <summary>The counter columns (a counter table mutates them through increments, never inserts).</summary>
+    public IReadOnlyList<string> CounterColumns { get; }
+
+    /// <summary>Whether <paramref name="column" /> is a counter column.</summary>
+    public bool IsCounter(string column) => CounterColumns.Any(counter => Same(counter, column));
+
     /// <summary>Whether <paramref name="column" /> is part of the primary key (partition or clustering).</summary>
     public bool IsKey(string column) =>
         PartitionKeys.Any(key => Same(key, column)) || ClusteringKeys.Any(key => Same(key.Column, column));
@@ -67,8 +75,9 @@ public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfi
     where TEntity : class
 {
     internal CassandraEntityConfiguration(string tableName, IReadOnlyList<string> partitionKeys,
-        IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn)
-        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn)
+        IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
+        IReadOnlyList<string>? counterColumns = null)
+        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns)
     {
     }
 }
@@ -118,6 +127,7 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
 {
     private readonly List<string> _partitionKeys = [];
     private readonly List<CassandraClusteringColumn> _clusteringKeys = [];
+    private readonly List<string> _counterColumns = [];
     private string? _table;
     private string? _keyColumn;
 
@@ -157,6 +167,19 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Marks a column as a Cassandra <c>counter</c>. A counter table mutates through increments
+    ///     (<c>UpdateMany(filter, x =&gt; new E { N = x.N + n })</c>) — never inserts — and every non-key column
+    ///     of the table must be a counter.
+    /// </summary>
+    /// <typeparam name="TKey">The member type (an integral type; stored as <c>counter</c>/bigint).</typeparam>
+    /// <param name="selector">The member selector.</param>
+    public CassandraEntityBuilder<TEntity> Counter<TKey>(Expression<Func<TEntity, TKey>> selector)
+    {
+        _counterColumns.Add(selector.GetMemberName());
+        return this;
+    }
+
     internal CassandraEntityConfiguration<TEntity> Build()
     {
         if (_partitionKeys.Count == 0)
@@ -168,11 +191,35 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
-            .Select(property => new CassandraColumn(property.Name, CassandraTypes.Cql(property.PropertyType)))
+            .Select(property => new CassandraColumn(property.Name,
+                _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
+                    ? "counter"
+                    : CassandraTypes.Cql(property.PropertyType)))
             .ToList();
 
+        if (_counterColumns.Count > 0)
+        {
+            var keys = _partitionKeys.Concat(_clusteringKeys.Select(key => key.Column)).ToList();
+            if (_counterColumns.Any(counter => keys.Any(key => CassandraEntityConfiguration.Same(key, counter))))
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}': a primary key column cannot be a counter.");
+            }
+
+            var invalid = columns.Where(column =>
+                    !keys.Any(key => CassandraEntityConfiguration.Same(key, column.Name)) && column.CqlType != "counter")
+                .Select(column => column.Name)
+                .ToList();
+            if (invalid.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}': Cassandra requires every non-key column of a counter table to be a counter; " +
+                    $"'{string.Join("', '", invalid)}' is not.");
+            }
+        }
+
         return new CassandraEntityConfiguration<TEntity>(
-            _table ?? typeof(TEntity).Name, _partitionKeys, _clusteringKeys, columns, _keyColumn ?? _partitionKeys[0]);
+            _table ?? typeof(TEntity).Name, _partitionKeys, _clusteringKeys, columns, _keyColumn ?? _partitionKeys[0], _counterColumns);
     }
 }
 

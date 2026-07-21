@@ -28,6 +28,30 @@ public class CassandraRepository<TEntity, TKey> :
 
     private CassandraSet<TEntity> Set() => new(UnitOfWork, Session);
 
+    // ---------------------------------------------------------------- lightweight transactions
+
+    /// <summary>
+    ///     Inserts the item only if no row with its primary key exists — a Cassandra lightweight transaction
+    ///     (<c>INSERT … IF NOT EXISTS</c>, Paxos under the hood). Runs immediately, outside the staged commit,
+    ///     because the cluster answers whether it applied.
+    /// </summary>
+    /// <param name="item">The item to insert.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns><c>true</c> when the row was inserted; <c>false</c> when it already existed (nothing changed).</returns>
+    public async Task<bool> AddIfNotExistsAsync(TEntity item, CancellationToken cancellationToken = default)
+    {
+        var configuration = UnitOfWork.Configuration<TEntity>();
+        if (configuration.CounterColumns.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through UpdateMany increments.");
+        }
+
+        var (cql, values) = CassandraMapper.BuildUpsert(configuration, item);
+        var rows = await CassandraStatements.ExecuteAsync(Session, cql + " IF NOT EXISTS", values).ConfigureAwait(false);
+        return rows.First().GetValue<bool>("[applied]");
+    }
+
     // ---------------------------------------------------------------- staged entity writes (flushed on commit)
 
     /// <inheritdoc />

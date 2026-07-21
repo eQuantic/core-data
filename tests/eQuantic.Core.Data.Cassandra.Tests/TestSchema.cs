@@ -5,7 +5,10 @@ namespace eQuantic.Core.Data.Cassandra.Tests;
 /// <summary>The Cassandra mapping shared by the integration tests: the two test tables and their keys.</summary>
 internal static class TestSchema
 {
-    /// <summary>Maps <see cref="Account" /> (partition key only) and <see cref="Reading" /> (partition + clustering).</summary>
+    /// <summary>
+    ///     Maps <see cref="Account" /> (partition key only), <see cref="Reading" /> (partition + clustering) and
+    ///     <see cref="Tally" /> (a counter table).
+    /// </summary>
     public static void Configure(CassandraModelBuilder builder) => builder
         .Entity<Account>(entity => entity
             .Table("accounts")
@@ -13,7 +16,11 @@ internal static class TestSchema
         .Entity<Reading>(entity => entity
             .Table("readings")
             .PartitionKey(x => x.SensorId)
-            .ClusteringKey(x => x.At));
+            .ClusteringKey(x => x.At))
+        .Entity<Tally>(entity => entity
+            .Table("tallies")
+            .PartitionKey(x => x.Space)
+            .Counter(x => x.Hits));
 }
 
 /// <summary>
@@ -30,5 +37,7 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
             .EnsureCollection()
             .Index(x => x.Owner))
         .For<Reading>(reading => reading
+            .EnsureCollection())
+        .For<Tally>(tally => tally
             .EnsureCollection());
 }
