@@ -20,7 +20,8 @@ namespace eQuantic.Core.Data.CosmosDb.Repository;
 public abstract class CosmosReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
     IAsyncQueryableReadRepository<TEntity, TKey>,
-    IExplainableRepository<TEntity>
+    IExplainableRepository<TEntity>,
+    IContinuationReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -226,6 +227,45 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+
+    // ---------------------------------------------------------------- continuation paging
+
+    /// <inheritdoc />
+    public async Task<ContinuedResult<TEntity>> GetPageAsync(int pageSize, string? continuationToken = null,
+        QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        if (pageSize < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), pageSize, "The page size must be at least 1.");
+        }
+
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
+        }
+
+        var requestOptions = new QueryRequestOptions { MaxItemCount = pageSize };
+        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options?.Filter, options?.Specification?.SatisfiedBy());
+        if (partitionKey is not null)
+        {
+            requestOptions.PartitionKey = partitionKey;
+        }
+
+        // The SDK walks its native continuation: one ReadNextAsync per call, resumed by the (opaque) token.
+        var query = Container
+            .GetItemLinqQueryable<TEntity>(continuationToken: continuationToken, requestOptions: requestOptions)
+            .ApplyQueryOptions(options);
+
+        using var iterator = query.ToFeedIterator();
+        if (!iterator.HasMoreResults)
+        {
+            return new ContinuedResult<TEntity>([], null);
+        }
+
+        var response = await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+        return new ContinuedResult<TEntity>(response.ToList(), response.ContinuationToken);
+    }
 
     // ---------------------------------------------------------------- explain
 

@@ -354,6 +354,35 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         Assert.That(projected.Balance, Is.EqualTo(42m));
     }
 
+    // ---------------------------------------------------------------- continuation paging
+
+    [Test]
+    public async Task Get_page_walks_the_native_paging_state_to_exhaustion()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = ReadingRepo(db);
+        await Seed(db, NewReading(1, Utc(0)), NewReading(1, Utc(1)), NewReading(1, Utc(2)), NewReading(1, Utc(3)), NewReading(1, Utc(4)));
+
+        var pager = (IContinuationReadRepository<Reading>)repo;
+        var options = new QueryOptions<Reading>().Where(x => x.SensorId == 1);
+        var seen = new List<DateTime>();
+        string? token = null;
+        var pages = 0;
+
+        do
+        {
+            var page = await pager.GetPageAsync(2, token, options);
+            Assert.That(page.Items, Has.Count.LessThanOrEqualTo(2));
+            seen.AddRange(page.Items.Select(x => x.At));
+            token = page.ContinuationToken;
+            pages++;
+        } while (token is not null && pages < 10);
+
+        Assert.That(seen, Has.Count.EqualTo(5));
+        Assert.That(seen, Is.Unique, "no row repeats across pages");
+        Assert.That(pages, Is.GreaterThanOrEqualTo(3), "the read spans multiple pages");
+    }
+
     // ---------------------------------------------------------------- explain
 
     [Test]

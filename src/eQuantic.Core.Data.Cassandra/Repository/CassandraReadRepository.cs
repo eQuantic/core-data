@@ -25,7 +25,8 @@ namespace eQuantic.Core.Data.Cassandra.Repository;
 public abstract class CassandraReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
     IAsyncQueryableReadRepository<TEntity, TKey>,
-    IExplainableRepository<TEntity>
+    IExplainableRepository<TEntity>,
+    IContinuationReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -179,6 +180,41 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
+
+    // ---------------------------------------------------------------- continuation paging
+
+    /// <inheritdoc />
+    public async Task<ContinuedResult<TEntity>> GetPageAsync(int pageSize, string? continuationToken = null,
+        QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        if (pageSize < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), pageSize, "The page size must be at least 1.");
+        }
+
+        var plan = GatedPlan(options, null);
+        var residuals = Compile(plan.Residual);
+
+        // The driver walks its native paging: one page per call, resumed by the (opaque) paging state.
+        var bound = await CassandraStatements.BindAsync(Session, SelectCql(null, plan, options, pushLimit: false), plan.Values).ConfigureAwait(false);
+        bound.SetPageSize(pageSize);
+        bound.SetAutoPage(false);
+        if (continuationToken is not null)
+        {
+            bound.SetPagingState(Convert.FromBase64String(continuationToken));
+        }
+
+        var rows = await Session.ExecuteAsync(bound).ConfigureAwait(false);
+        var state = rows.PagingState;
+
+        IEnumerable<TEntity> entities = rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row));
+        if (residuals.Count > 0)
+        {
+            entities = entities.Where(entity => residuals.All(residual => residual(entity)));
+        }
+
+        return new ContinuedResult<TEntity>(entities.ToList(), state is null ? null : Convert.ToBase64String(state));
+    }
 
     // ---------------------------------------------------------------- explain
 
