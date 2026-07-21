@@ -39,12 +39,17 @@ internal static class CassandraMapper
         foreach (var column in configuration.Columns)
         {
             var property = Property(typeof(TEntity), column.Name);
-            if (property is null || !property.CanWrite || row.IsNull(column.Name))
+
+            // Cassandra folds unquoted identifiers to lower case, so a row exposes each column under its
+            // lower-cased name; the driver's by-name lookup is case-sensitive, so read with that name (the
+            // property, matched case-insensitively, still carries the original casing).
+            var name = column.Name.ToLowerInvariant();
+            if (property is null || !property.CanWrite || row.IsNull(name))
             {
                 continue;
             }
 
-            property.SetValue(entity, row.GetValue(property.PropertyType, column.Name));
+            property.SetValue(entity, row.GetValue(property.PropertyType, name));
         }
 
         return entity;
