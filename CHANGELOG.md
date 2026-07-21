@@ -1,5 +1,11 @@
 # Changelog
 
+## [5.5.0](https://github.com/eQuantic/core-data/compare/v5.4.0...v5.5.0) (2026-07-21)
+
+### Features
+
+* **mongodb:** Include navigations via server-side $lookup ([455fef2](https://github.com/eQuantic/core-data/commit/455fef268bdbe1d7be07789b1a61ed2fbb39fb3b))
+
 ## [5.4.0](https://github.com/eQuantic/core-data/compare/v5.3.0...v5.4.0) (2026-07-21)
 
 ### Features
