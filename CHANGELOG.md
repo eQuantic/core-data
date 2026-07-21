@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.4.0](https://github.com/eQuantic/core-data/compare/v5.3.0...v5.4.0) (2026-07-21)
+
+### Features
+
+* **cassandra:** full provider on the reusable translator + CQL renderer ([58e2775](https://github.com/eQuantic/core-data/commit/58e2775db884852cb8bf0871d65537cfb91e9d26))
+* **cassandra:** scaffold + table/key model + hybrid CQL filter translator ([da33ab0](https://github.com/eQuantic/core-data/commit/da33ab0ee61d9a4697053614b7a656dbcdc0e98c))
+* **core:** reusable query-filter translation (IR + interpreter) ([b536831](https://github.com/eQuantic/core-data/commit/b536831a18a09733393fb5413ff544d7ce300061))
+
+### Bug Fixes
+
+* **cassandra:** materialize rows by Cassandra's lower-cased column names ([4905ade](https://github.com/eQuantic/core-data/commit/4905ade45d64fc4f0cad080b94b1947ca7926cd1))
+* **cassandra:** migration history table cannot lead with an underscore ([500bc98](https://github.com/eQuantic/core-data/commit/500bc98c28c46dfbd4fcb8102bb60f7407e4eecb))
+
 ## [5.3.0](https://github.com/eQuantic/core-data/compare/v5.2.0...v5.3.0) (2026-07-20)
 
 ### Features
