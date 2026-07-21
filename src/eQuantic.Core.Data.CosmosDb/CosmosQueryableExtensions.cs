@@ -10,8 +10,9 @@ namespace eQuantic.Core.Data.CosmosDb;
 /// </summary>
 /// <remarks>
 ///     The store-agnostic shaping — before/after customization, specification + predicate filter and sortings —
-///     is applied here. The EF-only knobs (<c>Include</c>, change tracking, global query filters, query tags)
-///     have no meaning for a document store and are intentionally ignored.
+///     is applied here. <c>Include</c> is rejected by the repository (Cosmos has no cross-document navigations);
+///     the remaining EF-only knobs (change tracking, global query filters, query tags) have no meaning for a
+///     document store and are intentionally ignored.
 /// </remarks>
 public static class CosmosQueryableExtensions
 {

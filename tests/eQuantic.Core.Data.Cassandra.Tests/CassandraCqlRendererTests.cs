@@ -113,4 +113,19 @@ public sealed class CassandraCqlRendererTests
     {
         Assert.That(() => Render(x => x.Status != "closed"), Throws.TypeOf<NotSupportedException>());
     }
+
+    [Test]
+    public void Comparing_to_null_is_rejected()
+    {
+        Assert.That(() => Render(x => x.Status == null!),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("NULL"));
+    }
+
+    [Test]
+    public void In_containing_null_is_rejected()
+    {
+        var statuses = new[] { "open", null };
+        Assert.That(() => Render(x => statuses.Contains(x.Status)),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("NULL"));
+    }
 }

@@ -19,7 +19,8 @@ namespace eQuantic.Core.Data.CosmosDb.Repository;
 /// <typeparam name="TKey">The key type.</typeparam>
 public abstract class CosmosReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
-    IAsyncQueryableReadRepository<TEntity, TKey>
+    IAsyncQueryableReadRepository<TEntity, TKey>,
+    IExplainableRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -47,18 +48,18 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public TEntity? Get(TKey id, QueryOptions<TEntity>? options = null) =>
-        Query(options, query => query.Where(IdPredicate(id))).AsEnumerable().FirstOrDefault();
+        Query(options, IdPredicate(id)).AsEnumerable().FirstOrDefault();
 
     /// <inheritdoc />
     public IEnumerable<TEntity> GetAll(QueryOptions<TEntity>? options = null) => Query(options).ToList();
 
     /// <inheritdoc />
     public IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null) =>
-        Query(options, query => query.Where(NotNull(filter))).ToList();
+        Query(options, NotNull(filter)).ToList();
 
     /// <inheritdoc />
     public IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null) =>
-        Query(options, query => query.Where(NotNull(specification).SatisfiedBy())).ToList();
+        Query(options, NotNull(specification).SatisfiedBy()).ToList();
 
     /// <inheritdoc />
     public IEnumerable<TResult> GetMapped<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null) =>
@@ -90,7 +91,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public bool All(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null) =>
-        !Query(options).Where(Negate(NotNull(predicate))).AsEnumerable().Any();
+        !Query(options, Negate(NotNull(predicate))).AsEnumerable().Any();
 
     /// <inheritdoc />
     public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
@@ -126,7 +127,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options, query => query.Where(IdPredicate(id))).Take(1), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        (await MaterializeAsync(Query(options, IdPredicate(id)).Take(1), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -134,11 +135,11 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options, query => query.Where(NotNull(filter))), cancellationToken).ConfigureAwait(false);
+        await MaterializeAsync(Query(options, NotNull(filter)), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options, query => query.Where(NotNull(specification).SatisfiedBy())), cancellationToken).ConfigureAwait(false);
+        await MaterializeAsync(Query(options, NotNull(specification).SatisfiedBy()), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -184,7 +185,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Where(Negate(NotNull(predicate))).Take(1), cancellationToken).ConfigureAwait(false)).Count == 0;
+        (await MaterializeAsync(Query(options, Negate(NotNull(predicate))).Take(1), cancellationToken).ConfigureAwait(false)).Count == 0;
 
     /// <inheritdoc />
     public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -226,6 +227,33 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
+    // ---------------------------------------------------------------- explain
+
+    /// <inheritdoc />
+    public QueryPlan Explain(QueryOptions<TEntity>? options = null)
+    {
+        var notes = new List<string>();
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            notes.Add("Include is not supported: Cosmos documents are self-contained (execution throws NotSupportedException).");
+        }
+
+        // Build the shaped queryable directly (not via Query) so an explain never throws on shaping issues.
+        var definition = Container
+            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true)
+            .ApplyQueryOptions(options)
+            .ToQueryDefinition();
+
+        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options?.Filter, options?.Specification?.SatisfiedBy());
+        notes.Add(partitionKey is not null
+            ? "Scoped to a single partition (partition key inferred from the filter)."
+            : "Cross-partition query: no partition key is pinned by the filter.");
+
+        return new QueryPlan("CosmosDb", definition.QueryText,
+            definition.GetQueryParameters().Select(parameter => (object?)parameter.Value).ToList(), residual: null,
+            serverSideFiltering: false, clientEvaluation: false, partitionScoped: partitionKey is not null, notes);
+    }
+
     // ---------------------------------------------------------------- dispose
 
     /// <inheritdoc />
@@ -243,30 +271,33 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     // ---------------------------------------------------------------- query plumbing
 
-    /// <summary>Builds the shaped query for the supplied options, optionally with an extra transform.</summary>
+    /// <summary>Builds the shaped query for the supplied options, optionally with an extra predicate.</summary>
     /// <param name="options">The query options, or <c>null</c>.</param>
-    /// <param name="extra">An optional extra transform (e.g. an id or ad-hoc filter).</param>
+    /// <param name="extraFilter">An optional extra predicate (e.g. an id or ad-hoc filter); it also feeds partition-key inference.</param>
     /// <returns>The shaped query.</returns>
-    protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
+    protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null)
     {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
+        }
+
         var query = Container
-            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options))
+            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options, extraFilter))
             .ApplyQueryOptions(options);
-        return extra is null ? query : extra(query);
+        return extraFilter is null ? query : query.Where(extraFilter);
     }
 
     /// <summary>
-    ///     Scopes the query to a single partition when the filter pins the partition key, otherwise lets it run
-    ///     cross-partition. Automatic — a filter such as <c>x =&gt; x.Category == "Books"</c> already scopes it.
+    ///     Scopes the query to a single partition when any of its filters — the options' predicate/specification or
+    ///     the extra predicate — pins the partition key, otherwise lets it run cross-partition. Automatic — a filter
+    ///     such as <c>x =&gt; x.Category == "Books"</c> already scopes it.
     /// </summary>
-    private QueryRequestOptions? RequestOptions(QueryOptions<TEntity>? options)
+    private QueryRequestOptions? RequestOptions(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
     {
-        if (options is null)
-        {
-            return null;
-        }
-
-        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options.Filter, options.Specification?.SatisfiedBy());
+        var partitionKey = CosmosPartitionKeyInference.Infer(
+            _partitionKeyPath, extraFilter, options?.Filter, options?.Specification?.SatisfiedBy());
         return partitionKey is null ? null : new QueryRequestOptions { PartitionKey = partitionKey };
     }
 

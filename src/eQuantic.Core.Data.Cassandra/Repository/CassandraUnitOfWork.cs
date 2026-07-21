@@ -17,7 +17,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     protected readonly ISession Session;
     protected readonly CassandraModel Model;
 
-    private readonly List<SimpleStatement> _pending = [];
+    private readonly List<(string Cql, object?[] Values)> _pending = [];
     private bool _inTransaction;
     private bool _disposed;
 
@@ -34,17 +34,11 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     // -------------------------------------------------------------- write staging
 
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
-    {
-        var (cql, values) = CassandraMapper.BuildUpsert(Configuration<TEntity>(), item);
-        _pending.Add(new SimpleStatement(cql, values));
-    }
+    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class =>
+        _pending.Add(CassandraMapper.BuildUpsert(Configuration<TEntity>(), item));
 
-    internal void StageDelete<TEntity>(TEntity item) where TEntity : class
-    {
-        var (cql, values) = CassandraMapper.BuildDelete(Configuration<TEntity>(), item);
-        _pending.Add(new SimpleStatement(cql, values));
-    }
+    internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
+        _pending.Add(CassandraMapper.BuildDelete(Configuration<TEntity>(), item));
 
     // -------------------------------------------------------------- commit
 
@@ -65,7 +59,9 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         var statements = _pending.ToList();
         _pending.Clear();
 
-        await Task.WhenAll(statements.Select(statement => Session.ExecuteAsync(statement))).ConfigureAwait(false);
+        // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write.
+        await Task.WhenAll(statements.Select(statement =>
+            CassandraStatements.ExecuteAsync(Session, statement.Cql, statement.Values))).ConfigureAwait(false);
         return statements.Count;
     }
 
@@ -102,13 +98,15 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         {
             if (_pending.Count > 0)
             {
+                var writes = _pending.ToList();
+                _pending.Clear();
+
                 var batch = new BatchStatement().SetBatchType(BatchType.Logged);
-                foreach (var statement in _pending)
+                foreach (var (cql, values) in writes)
                 {
-                    batch.Add(statement);
+                    batch.Add(await CassandraStatements.BindAsync(Session, cql, values).ConfigureAwait(false));
                 }
 
-                _pending.Clear();
                 await Session.ExecuteAsync(batch).ConfigureAwait(false);
             }
         }

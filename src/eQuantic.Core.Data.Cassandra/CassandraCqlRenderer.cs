@@ -21,6 +21,38 @@ internal static class CassandraCqlRenderer
         return (string.Join(" AND ", clauses), values.ToArray(), requiresFiltering);
     }
 
+    /// <summary>
+    ///     Attempts to render the filter, reporting failure instead of throwing. The strict <see cref="Render" />
+    ///     stays the single source of truth on what CQL can express — the pushdown engine turns its refusals into
+    ///     client-side residual work.
+    /// </summary>
+    public static bool TryRender(CassandraEntityConfiguration configuration, QueryFilter filter,
+        out (string Cql, object?[] Values, bool RequiresAllowFiltering) rendered)
+    {
+        try
+        {
+            rendered = Render(configuration, filter);
+            return true;
+        }
+        catch (NotSupportedException)
+        {
+            rendered = default;
+            return false;
+        }
+    }
+
+    /// <summary>Whether the filter pins the partition (an equality/IN on a partition key column, AND-reachable).</summary>
+    public static bool PinsPartition(CassandraEntityConfiguration configuration, QueryFilter filter) => filter switch
+    {
+        ComparisonFilter { Operator: ComparisonOperator.Equal } comparison =>
+            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, comparison.Member)),
+        InFilter inFilter =>
+            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, inFilter.Member)),
+        LogicalFilter { Operator: LogicalOperator.And } and =>
+            and.Operands.Any(operand => PinsPartition(configuration, operand)),
+        _ => false,
+    };
+
     private static void Conjunction(QueryFilter filter, CassandraEntityConfiguration configuration,
         List<string> clauses, List<object?> values, ref bool requiresFiltering)
     {
@@ -60,6 +92,12 @@ internal static class CassandraCqlRenderer
         var column = filter.Member;
         var isPartition = configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, column));
 
+        if (filter.Value is null)
+        {
+            throw new NotSupportedException(
+                $"Cassandra CQL cannot compare '{column}' to NULL (an unset column is simply absent from the row); filter on a concrete value.");
+        }
+
         if (filter.Operator is ComparisonOperator.NotEqual)
         {
             throw new NotSupportedException($"Cassandra CQL has no '<>' operator; '{column} <> ?' is not expressible.");
@@ -94,6 +132,12 @@ internal static class CassandraCqlRenderer
 
     private static string In(InFilter filter, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
     {
+        if (filter.Values.Any(value => value is null))
+        {
+            throw new NotSupportedException(
+                $"Cassandra CQL cannot match '{filter.Member}' against a set containing NULL (an unset column is simply absent from the row).");
+        }
+
         if (!configuration.IsKey(filter.Member))
         {
             requiresFiltering = true;
@@ -105,6 +149,12 @@ internal static class CassandraCqlRenderer
 
     private static string Collection(CollectionFilter filter, List<object?> values, ref bool requiresFiltering)
     {
+        if (filter.Value is null)
+        {
+            throw new NotSupportedException(
+                $"Cassandra CQL cannot test '{filter.Member}' CONTAINS NULL; collections never hold NULL elements.");
+        }
+
         // CONTAINS / CONTAINS KEY need a secondary index or ALLOW FILTERING.
         requiresFiltering = true;
         values.Add(filter.Value);

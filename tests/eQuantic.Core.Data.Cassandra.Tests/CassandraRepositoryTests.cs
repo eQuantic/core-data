@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Core.Data.Repository.Read;
 using global::Cassandra;
 
 namespace eQuantic.Core.Data.Cassandra.Tests;
@@ -181,6 +182,184 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         Assert.That(found.Select(x => x.Owner), Is.EquivalentTo(new[] { "mid", "high" }));
     }
 
+    // ---------------------------------------------------------------- filter composition
+
+    [Test]
+    public async Task Get_filtered_composes_the_argument_filter_with_the_options_filter()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var low = NewAccount("low", 50m);
+        var high = NewAccount("high", 250m);
+        await Seed(db, low, high, NewAccount("other", 999m));
+
+        var wanted = new[] { low.Id, high.Id };
+        var options = new QueryOptions<Account>().Where(x => x.Balance > 100m).AllowFiltering();
+        var balanceFilter = options.Filter;
+        var found = (await repo.GetFilteredAsync(x => wanted.Contains(x.Id), options)).ToList();
+
+        Assert.That(found.Select(x => x.Owner), Is.EquivalentTo(new[] { "high" }), "both filters apply (AND)");
+        Assert.That(options.Filter, Is.SameAs(balanceFilter), "the caller's options are not mutated");
+    }
+
+    [Test]
+    public async Task Get_honors_the_options_filter()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var dormant = NewAccount("dormant", active: false);
+        await Seed(db, dormant);
+
+        var onlyActive = new QueryOptions<Account>().Where(x => x.Active).AllowFiltering();
+
+        Assert.That(await repo.GetAsync(dormant.Id, onlyActive), Is.Null, "the options filter narrows the point lookup");
+        Assert.That(await repo.GetAsync(dormant.Id), Is.Not.Null, "without options the row is found");
+    }
+
+    // ---------------------------------------------------------------- pushdown + residual engine
+
+    [Test]
+    public async Task Not_equal_runs_client_side_within_the_pinned_partition()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var target = NewAccount("keep");
+        await Seed(db, target, NewAccount("other"));
+
+        var options = new QueryOptions<Account>().AllowClientEvaluation();
+        var found = (await repo.GetFilteredAsync(x => x.Id == target.Id && x.Owner != "nope", options)).ToList();
+
+        Assert.That(found, Has.Count.EqualTo(1));
+        Assert.That(found[0].Owner, Is.EqualTo("keep"));
+    }
+
+    [Test]
+    public async Task Residual_without_the_opt_in_is_rejected_with_guidance()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+
+        Assert.That(async () => await repo.GetFilteredAsync(x => x.Id == Guid.NewGuid() && x.Owner != "nope"),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
+    }
+
+    [Test]
+    public async Task Or_across_columns_runs_client_side_with_both_opt_ins()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        await Seed(db, NewAccount("alice", 50m), NewAccount("bob", 250m), NewAccount("carol", 10m));
+
+        var options = new QueryOptions<Account>().AllowClientEvaluation().AllowFiltering();
+        var found = await repo.GetFilteredAsync(x => x.Owner == "alice" || x.Balance > 100m, options);
+
+        Assert.That(found.Select(x => x.Owner), Is.EquivalentTo(new[] { "alice", "bob" }));
+    }
+
+    [Test]
+    public async Task Unscoped_residual_also_requires_allow_filtering()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var options = new QueryOptions<Account>().AllowClientEvaluation();
+
+        Assert.That(async () => await repo.GetFilteredAsync(x => x.Owner == "a" || x.Balance > 1m, options),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowFiltering"));
+    }
+
+    [Test]
+    public async Task Count_applies_the_residual_filter()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var a = NewAccount("a");
+        var b = NewAccount("b");
+        await Seed(db, a, b);
+
+        var wanted = new[] { a.Id, b.Id };
+        var options = new QueryOptions<Account>().Where(x => wanted.Contains(x.Id) && x.Owner != "b").AllowClientEvaluation();
+
+        Assert.That(await repo.CountAsync(options), Is.EqualTo(1));
+    }
+
+    // ---------------------------------------------------------------- server-side aggregates + projection
+
+    [Test]
+    public async Task Sum_of_a_member_selector_computes_on_the_cluster()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var a = NewAccount("a", 10.5m);
+        var b = NewAccount("b", 20.25m);
+        await Seed(db, a, b, NewAccount("c", 999m));
+
+        var wanted = new[] { a.Id, b.Id };
+        var sum = await repo.SumAsync(x => x.Balance, new QueryOptions<Account>().Where(x => wanted.Contains(x.Id)));
+
+        Assert.That(sum, Is.EqualTo(30.75m));
+    }
+
+    [Test]
+    public async Task Sum_of_a_computed_selector_still_works_client_side()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var a = NewAccount("a", 10m);
+        await Seed(db, a);
+
+        var sum = await repo.SumAsync(x => x.Balance * 2, new QueryOptions<Account>().Where(x => x.Id == a.Id));
+
+        Assert.That(sum, Is.EqualTo(20m));
+    }
+
+    [Test]
+    public async Task Get_mapped_projects_the_selected_columns()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var account = NewAccount("projected", 42m);
+        await Seed(db, account);
+
+        var owners = await repo.GetMappedAsync(x => new { x.Owner, x.Balance },
+            new QueryOptions<Account>().Where(x => x.Id == account.Id));
+
+        var projected = owners.Single();
+        Assert.That(projected.Owner, Is.EqualTo("projected"));
+        Assert.That(projected.Balance, Is.EqualTo(42m));
+    }
+
+    // ---------------------------------------------------------------- explain
+
+    [Test]
+    public async Task Explain_reports_the_pushed_statement_and_the_gates()
+    {
+        using var db = await NewSchemaAsync();
+        var explainable = (IExplainableRepository<Account>)AccountRepo(db);
+
+        var plan = explainable.Explain(new QueryOptions<Account>().Where(x => x.Owner != "x"));
+
+        Assert.That(plan.Provider, Is.EqualTo("Cassandra"));
+        Assert.That(plan.Statement, Does.StartWith("SELECT * FROM"));
+        Assert.That(plan.ClientEvaluation, Is.True);
+        Assert.That(plan.Residual, Does.Contain("Owner"));
+        Assert.That(plan.Notes, Has.Some.Contains("AllowClientEvaluation"));
+    }
+
+    [Test]
+    public async Task Explain_of_a_key_scoped_filter_is_fully_pushed_down()
+    {
+        using var db = await NewSchemaAsync();
+        var explainable = (IExplainableRepository<Account>)AccountRepo(db);
+        var id = Guid.NewGuid();
+
+        var plan = explainable.Explain(new QueryOptions<Account>().Where(x => x.Id == id));
+
+        Assert.That(plan.Statement, Does.Contain("WHERE Id = ?"));
+        Assert.That(plan.Parameters, Is.EqualTo(new object?[] { id }));
+        Assert.That(plan.ClientEvaluation, Is.False);
+        Assert.That(plan.PartitionScoped, Is.True);
+    }
+
     // ---------------------------------------------------------------- guardrails (NotSupported)
 
     [Test]
@@ -190,6 +369,16 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         var options = new QueryOptions<Account>().Where(x => x.Owner == "alice");
 
         Assert.That(async () => await AccountRepo(db).GetAllAsync(options), Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
+    public async Task Include_is_rejected_with_a_clear_message()
+    {
+        using var db = await NewSchemaAsync();
+        var options = new QueryOptions<Account>().Include(nameof(Account.Tags));
+
+        Assert.That(async () => await AccountRepo(db).GetAllAsync(options),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("self-contained"));
     }
 
     [Test]

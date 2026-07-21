@@ -19,7 +19,8 @@ namespace eQuantic.Core.Data.MongoDb.Repository;
 /// <typeparam name="TKey">The key type.</typeparam>
 public abstract class MongoReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
-    IAsyncQueryableReadRepository<TEntity, TKey>
+    IAsyncQueryableReadRepository<TEntity, TKey>,
+    IExplainableRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -246,6 +247,26 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         Query(options).SumAsync(NotNull(selector), cancellationToken);
+
+    // ---------------------------------------------------------------- explain
+
+    /// <inheritdoc />
+    public QueryPlan Explain(QueryOptions<TEntity>? options = null)
+    {
+        var notes = new List<string>
+        {
+            "The driver translates the LINQ query to an aggregation pipeline; filtering, sorting and projections run server-side.",
+        };
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            notes.Add($"Includes ({string.Join(", ", options.IncludePaths)}) run as server-side $lookup joins.");
+        }
+
+        // The driver renders the shaped queryable as its aggregate pipeline; values are inlined in the rendering.
+        var statement = Query(options).ToString() ?? string.Empty;
+        return new QueryPlan("MongoDb", statement, [], residual: null,
+            serverSideFiltering: false, clientEvaluation: false, partitionScoped: false, notes);
+    }
 
     // ---------------------------------------------------------------- dispose
 

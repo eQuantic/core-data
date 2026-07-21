@@ -1,7 +1,6 @@
 using System.Collections;
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Repository;
-using eQuantic.Core.Data.Repository.Options;
 using global::Cassandra;
 
 namespace eQuantic.Core.Data.Cassandra.Repository;
@@ -43,7 +42,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
     private async Task<List<TEntity>> ExecuteAsync(CancellationToken cancellationToken = default)
     {
-        var rows = await _session.ExecuteAsync(new SimpleStatement($"SELECT * FROM {_configuration.TableName}")).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(_session, $"SELECT * FROM {_configuration.TableName}", []).ConfigureAwait(false);
         return rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row)).ToList();
     }
 
@@ -51,8 +50,8 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
     public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
     {
-        var statement = new SimpleStatement($"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", key);
-        var rows = await _session.ExecuteAsync(statement).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(_session,
+            $"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", [key]).ConfigureAwait(false);
         var row = rows.FirstOrDefault();
         return row is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, row);
     }
@@ -71,14 +70,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
-        var (where, values, requiresFiltering) = CassandraCql.Where(_configuration, new QueryOptions<TEntity>().Where(filter));
+        var (where, values, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter);
         if (requiresFiltering)
         {
             throw new NotSupportedException("Cassandra DELETE requires the partition key; it cannot filter on non-key columns.");
         }
 
         var count = await CountAsync(where, values, cancellationToken).ConfigureAwait(false);
-        await _session.ExecuteAsync(new SimpleStatement($"DELETE FROM {_configuration.TableName} WHERE {where}", values)).ConfigureAwait(false);
+        await CassandraStatements.ExecuteAsync(_session, $"DELETE FROM {_configuration.TableName} WHERE {where}", values).ConfigureAwait(false);
         return count;
     }
 
@@ -88,7 +87,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
-        var (where, whereValues, requiresFiltering) = CassandraCql.Where(_configuration, new QueryOptions<TEntity>().Where(filter));
+        var (where, whereValues, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter);
         if (requiresFiltering)
         {
             throw new NotSupportedException("Cassandra UPDATE requires the primary key; it cannot filter on non-key columns.");
@@ -96,15 +95,15 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
         var (set, setValues) = CassandraUpdate.BuildSet(updateExpression);
         var count = await CountAsync(where, whereValues, cancellationToken).ConfigureAwait(false);
-        var statement = new SimpleStatement($"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray());
-        await _session.ExecuteAsync(statement).ConfigureAwait(false);
+        await CassandraStatements.ExecuteAsync(_session,
+            $"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray()).ConfigureAwait(false);
         return count;
     }
 
     private async Task<long> CountAsync(string where, object?[] values, CancellationToken cancellationToken)
     {
         var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}" + (where.Length > 0 ? $" WHERE {where}" : string.Empty);
-        var rows = await _session.ExecuteAsync(new SimpleStatement(cql, values)).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(_session, cql, values).ConfigureAwait(false);
         return rows.First().GetValue<long>(0);
     }
 }

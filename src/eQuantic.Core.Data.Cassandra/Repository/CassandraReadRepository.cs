@@ -10,16 +10,22 @@ using global::Cassandra;
 namespace eQuantic.Core.Data.Cassandra.Repository;
 
 /// <summary>
-///     The native Apache Cassandra read repository. A <see cref="QueryOptions{TEntity}" /> filter is translated to
-///     a CQL <c>WHERE</c> over the partition/clustering keys; non-key predicates require <c>.AllowFiltering()</c>.
-///     Sorting is limited to clustering keys, and paging fetches the first <c>skip+take</c> rows then slices
-///     client-side (Cassandra has no OFFSET). Synchronous members delegate to the asynchronous ones.
+///     The native Apache Cassandra read repository. A <see cref="QueryOptions{TEntity}" /> filter is split by the
+///     pushdown engine: every clause CQL can express runs on the cluster (equality/IN/ranges over the keys,
+///     <c>token()</c> partition ranges, <c>CONTAINS</c>), and the clauses it cannot (<c>OR</c> across columns,
+///     <c>!=</c>, <c>NULL</c>, arbitrary predicates) run client-side over the fetched rows — behind the explicit
+///     <c>.AllowClientEvaluation()</c> opt-in, with <c>.AllowFiltering()</c> gating scans, exactly as
+///     <see cref="Explain" /> reports. Statements are prepared once per session; aggregate <c>Sum</c>s and
+///     projections push down when the selector allows. Sorting is limited to clustering keys, and paging fetches
+///     the first <c>skip+take</c> rows then slices client-side (Cassandra has no OFFSET). Synchronous members
+///     delegate to the asynchronous ones.
 /// </summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
 /// <typeparam name="TKey">The key type.</typeparam>
 public abstract class CassandraReadRepository<TEntity, TKey> :
     IQueryableReadRepository<TEntity, TKey>,
-    IAsyncQueryableReadRepository<TEntity, TKey>
+    IAsyncQueryableReadRepository<TEntity, TKey>,
+    IExplainableRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -29,6 +35,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     protected readonly ISession Session;
 
     private readonly CassandraEntityConfiguration _configuration;
+    private readonly LambdaExpression _keySelector;
 
     /// <summary>Initializes the repository over a unit of work.</summary>
     /// <param name="unitOfWork">The queryable unit of work (a <see cref="CassandraUnitOfWork" />).</param>
@@ -38,33 +45,30 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                      ?? throw new ArgumentException($"The unit of work must be a {nameof(CassandraUnitOfWork)}.", nameof(unitOfWork));
         Session = UnitOfWork.GetSession();
         _configuration = UnitOfWork.Configuration<TEntity>();
+        _keySelector = MemberPathExtensions.ToSelector<TEntity>(_configuration.KeyColumn);
     }
 
     // ---------------------------------------------------------------- asynchronous reads
 
     /// <inheritdoc />
-    public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
-    {
-        var statement = new SimpleStatement($"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", id);
-        var row = (await Session.ExecuteAsync(statement).ConfigureAwait(false)).FirstOrDefault();
-        return row is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, row);
-    }
+    public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        (await SelectAsync(options, 1, cancellationToken, IdPredicate(id)).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await SelectAsync(options, null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        GetAllAsync(With(options, filter), cancellationToken);
+    public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await SelectAsync(options, null, cancellationToken, NotNull(filter)).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        GetAllAsync(With(options, specification.SatisfiedBy()), cancellationToken);
+    public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await SelectAsync(options, null, cancellationToken, NotNull(specification).SatisfiedBy()).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Select(map.Compile()).ToList();
+        (await SelectAsync(options, null, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).ToList();
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
@@ -72,7 +76,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, cancellationToken).ConfigureAwait(false)).Select(map.Compile()).FirstOrDefault();
+        (await SelectAsync(options, 1, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
@@ -90,19 +94,42 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     public async Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var rows = await SelectAsync(options, page.Skip + page.Take, cancellationToken).ConfigureAwait(false);
+        var rows = await SelectAsync(options, page.Skip + page.Take, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false);
         var items = rows.Skip(page.Skip).Take(page.Take).Select(map.Compile()).ToList();
         return new PagedResult<TResult>(items, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
-    public Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
-        var (where, values, allowFiltering) = WhereFor(options);
-        var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}"
-                  + (where.Length > 0 ? $" WHERE {where}" : string.Empty)
-                  + (allowFiltering ? " ALLOW FILTERING" : string.Empty);
-        return CountAsync(cql, values, cancellationToken);
+        var plan = GatedPlan(options, null);
+
+        if (plan.Residual.Count == 0)
+        {
+            var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}"
+                      + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                      + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values).ConfigureAwait(false);
+            return rows.First().GetValue<long>(0);
+        }
+
+        // Residual: fetch only the columns the residual reads and count the rows that pass it client-side.
+        var residuals = Compile(plan.Residual);
+        var selected = SelectedColumns([], plan);
+        var projected = await CassandraStatements
+            .ExecuteAsync(Session, SelectCql(selected, plan, null, pushLimit: false), plan.Values).ConfigureAwait(false);
+
+        long count = 0;
+        foreach (var row in projected)
+        {
+            var entity = CassandraMapper.Materialize<TEntity>(_configuration, row, selected);
+            if (residuals.All(residual => residual(entity)))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     /// <inheritdoc />
@@ -114,34 +141,106 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
 
     /// <inheritdoc />
-    public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
 
     /// <inheritdoc />
-    public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) => (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).Sum(selector.Compile());
+    public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
+
+    // ---------------------------------------------------------------- explain
+
+    /// <inheritdoc />
+    public QueryPlan Explain(QueryOptions<TEntity>? options = null)
+    {
+        var notes = new List<string>();
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            notes.Add("Include is not supported: Cassandra rows are self-contained (execution throws NotSupportedException).");
+        }
+
+        var plan = CassandraCql.Plan(_configuration, options);
+
+        string orderBy;
+        try
+        {
+            orderBy = OrderBy(options);
+        }
+        catch (NotSupportedException exception)
+        {
+            orderBy = string.Empty;
+            notes.Add(exception.Message);
+        }
+
+        var cql = $"SELECT * FROM {_configuration.TableName}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                  + orderBy
+                  + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+
+        if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
+        {
+            notes.Add("Requires .AllowFiltering(): a pushed clause filters outside the primary key (server-side scan).");
+        }
+
+        if (plan.Residual.Count > 0)
+        {
+            if (!CassandraCql.ClientEvaluationOptedIn(options))
+            {
+                notes.Add("Requires .AllowClientEvaluation(): part of the filter cannot be expressed in CQL and runs client-side.");
+            }
+
+            if (!plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
+            {
+                notes.Add("Requires .AllowFiltering() as well: the residual filter is not partition-scoped, so the fetch scans the table.");
+            }
+
+            notes.Add("Rows are fetched without a CQL LIMIT and filtered client-side; LIMIT/Take applies after the residual.");
+        }
+
+        notes.Add("The statement is prepared once per session and bound on every execution.");
+
+        return new QueryPlan(
+            "Cassandra",
+            cql,
+            plan.Values,
+            plan.Residual.Count > 0 ? plan.ResidualText : null,
+            plan.RequiresAllowFiltering,
+            plan.Residual.Count > 0,
+            plan.PartitionScoped,
+            notes);
+    }
 
     // ---------------------------------------------------------------- synchronous reads (delegate)
 
@@ -209,47 +308,159 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     // ---------------------------------------------------------------- query plumbing
 
-    private async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken)
+    private async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
+        Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null)
     {
-        var (where, values, allowFiltering) = WhereFor(options);
+        var plan = GatedPlan(options, extraFilter);
+        var residuals = Compile(plan.Residual);
+        var selected = SelectedColumns(mapColumns, plan);
 
-        var cql = $"SELECT * FROM {_configuration.TableName}";
-        if (where.Length > 0)
+        // A CQL LIMIT would cut rows before the residual filter sees them, so it only pushes when nothing is residual.
+        var pushLimit = limit.HasValue && residuals.Count == 0;
+        var cql = SelectCql(selected, plan, options, pushLimit);
+        var values = pushLimit ? [.. plan.Values, limit!.Value] : plan.Values;
+
+        var rows = await CassandraStatements.ExecuteAsync(Session, cql, values).ConfigureAwait(false);
+
+        // The RowSet pages lazily; composing Where/Take before materializing the list stops fetching once satisfied.
+        IEnumerable<TEntity> entities = rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row, selected));
+        if (residuals.Count > 0)
         {
-            cql += $" WHERE {where}";
+            entities = entities.Where(entity => residuals.All(residual => residual(entity)));
         }
 
-        cql += OrderBy(options);
-        if (limit is { } take)
+        if (limit is { } take && !pushLimit)
         {
-            cql += $" LIMIT {take}";
+            entities = entities.Take(take);
         }
 
-        if (allowFiltering)
-        {
-            cql += " ALLOW FILTERING";
-        }
-
-        var rows = await Session.ExecuteAsync(new SimpleStatement(cql, values)).ConfigureAwait(false);
-        return rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row)).ToList();
+        return entities.ToList();
     }
 
-    private async Task<long> CountAsync(string cql, object?[] values, CancellationToken cancellationToken)
+    private CassandraCqlPlan GatedPlan(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
     {
-        var rows = await Session.ExecuteAsync(new SimpleStatement(cql, values)).ConfigureAwait(false);
-        return rows.First().GetValue<long>(0);
-    }
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Cassandra rows are self-contained; there are no navigations to include — model related data with the partition key or query it explicitly.");
+        }
 
-    private (string Where, object?[] Values, bool AllowFiltering) WhereFor(QueryOptions<TEntity>? options)
-    {
-        var (where, values, requiresFiltering) = CassandraCql.Where(_configuration, options);
-        if (requiresFiltering && !CassandraCql.AllowFilteringOptedIn(options))
+        var plan = CassandraCql.Plan(_configuration, options, extraFilter);
+
+        if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
         {
             throw new NotSupportedException(
                 "This filter targets non-key columns; call .AllowFiltering() to opt into a scan, or filter by the partition/clustering keys.");
         }
 
-        return (where, values, requiresFiltering);
+        if (plan.Residual.Count > 0)
+        {
+            if (!CassandraCql.ClientEvaluationOptedIn(options))
+            {
+                throw new NotSupportedException(
+                    $"The clause(s) '{plan.ResidualText}' cannot be expressed in CQL; call .AllowClientEvaluation() to run them client-side " +
+                    "over the pushed-down rows, or restructure the filter around the partition/clustering keys.");
+            }
+
+            if (!plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
+            {
+                throw new NotSupportedException(
+                    "The client-evaluated filter is not scoped to a partition, so the fetch scans the whole table; " +
+                    "call .AllowFiltering() as well to acknowledge the scan.");
+            }
+        }
+
+        return plan;
+    }
+
+    private string SelectCql(IReadOnlySet<string>? selected, CassandraCqlPlan plan, QueryOptions<TEntity>? options, bool pushLimit)
+    {
+        var columns = selected is null
+            ? "*"
+            : string.Join(", ", _configuration.Columns.Where(column => selected.Contains(column.Name)).Select(column => column.Name));
+
+        var cql = $"SELECT {columns} FROM {_configuration.TableName}";
+        if (plan.Where.Length > 0)
+        {
+            cql += $" WHERE {plan.Where}";
+        }
+
+        cql += OrderBy(options);
+        if (pushLimit)
+        {
+            cql += " LIMIT ?";
+        }
+
+        if (plan.RequiresAllowFiltering)
+        {
+            cql += " ALLOW FILTERING";
+        }
+
+        return cql;
+    }
+
+    /// <summary>The columns the projected SELECT must fetch: the map's columns plus the residual's; null → all.</summary>
+    private HashSet<string>? SelectedColumns(IReadOnlyCollection<string>? mapColumns, CassandraCqlPlan plan)
+    {
+        if (mapColumns is null)
+        {
+            return null;
+        }
+
+        var selected = new HashSet<string>(mapColumns, StringComparer.OrdinalIgnoreCase);
+        if (plan.Residual.Count > 0)
+        {
+            var residualColumns = ColumnsOf(plan.Residual);
+            if (residualColumns is null)
+            {
+                return null;
+            }
+
+            selected.UnionWith(residualColumns);
+        }
+
+        if (selected.Count == 0)
+        {
+            selected.Add(_configuration.KeyColumn);
+        }
+
+        return selected;
+    }
+
+    private async Task<TSum> SumCoreAsync<TSum>(LambdaExpression selector, QueryOptions<TEntity>? options,
+        CancellationToken cancellationToken, Func<List<TEntity>, TSum> clientSum)
+    {
+        var column = SumColumn(selector);
+        if (column is not null)
+        {
+            var plan = GatedPlan(options, null);
+            if (plan.Residual.Count == 0)
+            {
+                var cql = $"SELECT SUM({column}) FROM {_configuration.TableName}"
+                          + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                          + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values).ConfigureAwait(false)).First();
+                return row.IsNull(0) ? default! : row.GetValue<TSum>(0);
+            }
+        }
+
+        // Computed selector or residual filter: materialize and aggregate client-side (same behaviour as before).
+        return clientSum(await SelectAsync(options, null, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>The single column a <c>SUM</c> can push down, or null for a computed selector.</summary>
+    private string? SumColumn(LambdaExpression selector)
+    {
+        var body = selector.Body;
+        while (body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } unary)
+        {
+            body = unary.Operand;
+        }
+
+        return body is MemberExpression { Expression: ParameterExpression } member
+               && _configuration.Columns.Any(column => CassandraEntityConfiguration.Same(column.Name, member.Member.Name))
+            ? member.Member.Name
+            : null;
     }
 
     private string OrderBy(QueryOptions<TEntity>? options)
@@ -274,6 +485,93 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         return " ORDER BY " + string.Join(", ", parts);
     }
 
-    private static QueryOptions<TEntity> With(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>> filter) =>
-        (options ?? new QueryOptions<TEntity>()).Where(filter);
+    /// <summary>Builds <c>x =&gt; x.Key == id</c> over the configured key column, routed through the CQL translator.</summary>
+    private Expression<Func<TEntity, bool>> IdPredicate(TKey id)
+    {
+        var body = Expression.Equal(_keySelector.Body, Expression.Constant(id, _keySelector.Body.Type));
+        return Expression.Lambda<Func<TEntity, bool>>(body, _keySelector.Parameters);
+    }
+
+    private static List<Func<TEntity, bool>> Compile(IReadOnlyList<LambdaExpression> residual) =>
+        residual.Select(predicate => ((Expression<Func<TEntity, bool>>)predicate).Compile()).ToList();
+
+    /// <summary>The first-segment columns the map reads from the entity, or null when it needs the whole entity.</summary>
+    private static IReadOnlyCollection<string>? MapColumns(LambdaExpression map)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return ColumnCollector.TryCollect(map, columns) ? columns : null;
+    }
+
+    /// <summary>The union of the columns the residual predicates read, or null when one needs the whole entity.</summary>
+    private static HashSet<string>? ColumnsOf(IReadOnlyList<LambdaExpression> predicates)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var predicate in predicates)
+        {
+            if (!ColumnCollector.TryCollect(predicate, columns))
+            {
+                return null;
+            }
+        }
+
+        return columns;
+    }
+
+    private static T NotNull<T>(T value) where T : class => value ?? throw new ArgumentNullException(typeof(T).Name);
+
+    /// <summary>
+    ///     Collects the first-segment members a lambda reads from its parameter (the columns a projected
+    ///     <c>SELECT</c> must fetch); reports failure when the lambda uses the parameter itself, meaning the whole
+    ///     entity is needed.
+    /// </summary>
+    private sealed class ColumnCollector : ExpressionVisitor
+    {
+        private readonly ParameterExpression _parameter;
+        private readonly HashSet<string> _columns;
+        private bool _wholeEntity;
+
+        private ColumnCollector(ParameterExpression parameter, HashSet<string> columns)
+        {
+            _parameter = parameter;
+            _columns = columns;
+        }
+
+        public static bool TryCollect(LambdaExpression lambda, HashSet<string> columns)
+        {
+            var collector = new ColumnCollector(lambda.Parameters[0], columns);
+            collector.Visit(lambda.Body);
+            return !collector._wholeEntity;
+        }
+
+        protected override Expression VisitMember(MemberExpression node)
+        {
+            Expression? root = node;
+            MemberExpression? closest = null;
+            while (root is MemberExpression member)
+            {
+                closest = member;
+                root = member.Expression;
+            }
+
+            if (ReferenceEquals(root, _parameter))
+            {
+                // The chain roots at the entity: its first segment is the fetched column; don't descend
+                // into the chain, or the parameter underneath would read as a whole-entity use.
+                _columns.Add(closest!.Member.Name);
+                return node;
+            }
+
+            return base.VisitMember(node);
+        }
+
+        protected override Expression VisitParameter(ParameterExpression node)
+        {
+            if (ReferenceEquals(node, _parameter))
+            {
+                _wholeEntity = true;
+            }
+
+            return node;
+        }
+    }
 }

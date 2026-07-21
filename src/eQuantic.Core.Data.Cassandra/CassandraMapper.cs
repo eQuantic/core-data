@@ -33,11 +33,23 @@ internal static class CassandraMapper
     }
 
     /// <summary>Materializes a row into a new <typeparamref name="TEntity" />.</summary>
-    public static TEntity Materialize<TEntity>(CassandraEntityConfiguration configuration, Row row)
+    public static TEntity Materialize<TEntity>(CassandraEntityConfiguration configuration, Row row) =>
+        Materialize<TEntity>(configuration, row, null);
+
+    /// <summary>
+    ///     Materializes a row into a new <typeparamref name="TEntity" />, reading only the columns in
+    ///     <paramref name="only" /> (a projected <c>SELECT</c> exposes just those; the rest stay default).
+    /// </summary>
+    public static TEntity Materialize<TEntity>(CassandraEntityConfiguration configuration, Row row, IReadOnlySet<string>? only)
     {
         var entity = Activator.CreateInstance<TEntity>()!;
         foreach (var column in configuration.Columns)
         {
+            if (only is not null && !only.Contains(column.Name))
+            {
+                continue;
+            }
+
             var property = Property(typeof(TEntity), column.Name);
 
             // Cassandra folds unquoted identifiers to lower case, so a row exposes each column under its

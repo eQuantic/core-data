@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Core.Data.Repository.Read;
 using eQuantic.Linq.Specification;
 
 namespace eQuantic.Core.Data.MongoDb.Tests;
@@ -28,6 +29,20 @@ public sealed class MongoAsyncReadRepositoryTests : MongoIntegrationTest
         await Seed(db, Product.New("Keyboard", "Peripherals", 10, 49.90m));
 
         Assert.That(await AsyncRepo(db).GetAsync("missing"), Is.Null);
+    }
+
+    [Test]
+    public async Task Explain_renders_the_aggregation_pipeline()
+    {
+        using var db = NewDatabase();
+        await Seed(db, Product.New("Keyboard", "Peripherals", 10, 49.90m));
+        var explainable = (IExplainableRepository<Product>)AsyncRepo(db);
+
+        var plan = explainable.Explain(new QueryOptions<Product>().Where(p => p.Category == "Peripherals"));
+
+        Assert.That(plan.Provider, Is.EqualTo("MongoDb"));
+        Assert.That(plan.Statement, Is.Not.Empty);
+        Assert.That(plan.ClientEvaluation, Is.False);
     }
 
     [Test]
