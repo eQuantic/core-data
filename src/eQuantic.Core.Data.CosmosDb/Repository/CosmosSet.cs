@@ -82,7 +82,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
-        var patch = CosmosPatch.BuildSet(updateExpression);
+        var patch = CosmosPatch.Build(updateExpression);
         var matches = await MaterializeAsync(_queryable.Where(filter), cancellationToken).ConfigureAwait(false);
         await Task.WhenAll(matches.Select(item => _container.PatchItemAsync<TEntity>(
                 _configuration.GetId(item), _configuration.GetPartitionKey(item), patch, cancellationToken: cancellationToken)))

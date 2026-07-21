@@ -1,77 +1,58 @@
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Query;
 
 namespace eQuantic.Core.Data.Cassandra;
 
 /// <summary>
-///     Translates a member-initialisation update (<c>x =&gt; new TEntity { Status = "Closed", ... }</c>) into a CQL
-///     <c>SET</c> assignment list with bound values. Assignments that reference the entity (computed updates) are
-///     not supported.
+///     Renders the dialect-agnostic <see cref="UpdateAssignment" /> model (produced by the core
+///     <see cref="UpdateInterpreter" />) into a CQL <c>SET</c> assignment list with bound values: constant
+///     assignments become <c>col = ?</c> and collection updates become the native read-modify-write forms
+///     (<c>col = col + ?</c>, <c>col = ? + col</c>, <c>col = col - ?</c>) — atomic per column in Cassandra.
+///     Numeric read-modify-writes need a counter column, which the model does not declare yet, so they are
+///     rejected with the reason.
 /// </summary>
 internal static class CassandraUpdate
 {
-    public static (string Set, object?[] Values) BuildSet<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
+    public static (string Set, object?[] Values) Build<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
     {
-        if (updateFactory.Body is not MemberInitExpression memberInit)
-        {
-            throw new NotSupportedException(
-                "UpdateMany expects a member-initialisation update, e.g. x => new " + typeof(TEntity).Name + " { Status = \"Closed\" }.");
-        }
-
-        var parameter = updateFactory.Parameters[0];
         var assignments = new List<string>();
         var values = new List<object?>();
 
-        foreach (var binding in memberInit.Bindings)
+        foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
         {
-            if (binding is not MemberAssignment assignment)
+            switch (assignment)
             {
-                throw new NotSupportedException(
-                    $"Only member assignments are supported in an UpdateMany update; got '{binding.BindingType}'.");
+                case SetAssignment set:
+                    assignments.Add($"{set.Name} = ?");
+                    values.Add(set.Value);
+                    break;
+                case CollectionAddAssignment add when add.Unique && !add.IsSetMember():
+                    throw new NotSupportedException(
+                        $"CQL '+' on a list appends duplicates; Union needs a set column and '{add.Name}' is not one.");
+                case CollectionAddAssignment { Prepend: true } add:
+                    assignments.Add($"{add.Name} = ? + {add.Name}");
+                    values.Add(add.ToTypedCollection());
+                    break;
+                case CollectionAddAssignment add:
+                    assignments.Add($"{add.Name} = {add.Name} + ?");
+                    values.Add(add.ToTypedCollection());
+                    break;
+                case CollectionRemoveAssignment remove:
+                    assignments.Add($"{remove.Name} = {remove.Name} - ?");
+                    values.Add(remove.ToTypedCollection());
+                    break;
+                case IncrementAssignment increment:
+                    throw new NotSupportedException(
+                        $"A numeric read-modify-write on '{increment.Name}' needs a Cassandra counter column, which the model " +
+                        "does not declare yet; load the rows and Modify them instead.");
+                case MultiplyAssignment multiply:
+                    throw new NotSupportedException(
+                        $"CQL cannot multiply in an UPDATE ('{multiply.Name}'); load the rows and Modify them instead.");
+                default:
+                    throw new NotSupportedException($"The Cassandra provider cannot render the assignment '{assignment.GetType().Name}'.");
             }
-
-            if (ReferencesParameter(assignment.Expression, parameter))
-            {
-                throw new NotSupportedException(
-                    $"The assignment to '{assignment.Member.Name}' references the entity; computed set-based updates " +
-                    "are not supported — load the rows and Modify them instead.");
-            }
-
-            assignments.Add($"{assignment.Member.Name} = ?");
-            values.Add(Evaluate(assignment.Expression));
-        }
-
-        if (assignments.Count == 0)
-        {
-            throw new NotSupportedException("The UpdateMany update assigns no columns.");
         }
 
         return (string.Join(", ", assignments), values.ToArray());
-    }
-
-    private static object? Evaluate(Expression expression) =>
-        expression is ConstantExpression constant
-            ? constant.Value
-            : Expression.Lambda(expression).Compile().DynamicInvoke();
-
-    private static bool ReferencesParameter(Expression expression, ParameterExpression parameter)
-    {
-        var finder = new ParameterFinder(parameter);
-        finder.Visit(expression);
-        return finder.Found;
-    }
-
-    private sealed class ParameterFinder(ParameterExpression parameter) : ExpressionVisitor
-    {
-        public bool Found { get; private set; }
-
-        protected override Expression VisitParameter(ParameterExpression node)
-        {
-            if (node == parameter)
-            {
-                Found = true;
-            }
-
-            return base.VisitParameter(node);
-        }
     }
 }

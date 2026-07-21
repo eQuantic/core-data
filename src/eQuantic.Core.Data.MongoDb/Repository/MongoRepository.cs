@@ -120,7 +120,7 @@ public class MongoRepository<TEntity, TKey> :
     /// <inheritdoc />
     public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory)
     {
-        var update = MongoUpdate.BuildSet(updateFactory);
+        var update = MongoUpdate.Build(updateFactory);
         var session = UnitOfWork.Session;
         var result = session is null
             ? Collection.UpdateMany(filter, update)
@@ -135,7 +135,7 @@ public class MongoRepository<TEntity, TKey> :
     /// <inheritdoc />
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateFactory, CancellationToken cancellationToken = default)
     {
-        var update = MongoUpdate.BuildSet(updateFactory);
+        var update = MongoUpdate.Build(updateFactory);
         var session = UnitOfWork.Session;
         var result = session is null
             ? await Collection.UpdateManyAsync(filter, update, cancellationToken: cancellationToken).ConfigureAwait(false)

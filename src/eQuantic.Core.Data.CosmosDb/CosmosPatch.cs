@@ -1,76 +1,70 @@
+using System.Globalization;
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Query;
 using Microsoft.Azure.Cosmos;
 
 namespace eQuantic.Core.Data.CosmosDb;
 
 /// <summary>
-///     Translates a member-initialisation update (<c>x =&gt; new TEntity { Status = "Closed", ... }</c>) into
-///     Cosmos <see cref="PatchOperation" />s (one <c>Set</c> per assigned member, camelCase path). Assignments
-///     that reference the entity (computed updates such as <c>x =&gt; new E { N = x.N + 1 }</c>) are not supported.
+///     Renders the dialect-agnostic <see cref="UpdateAssignment" /> model (produced by the core
+///     <see cref="UpdateInterpreter" />) into Cosmos <see cref="PatchOperation" />s: constant assignments become
+///     <c>Set</c>, numeric read-modify-writes become the native <c>Increment</c>, and collection appends/prepends
+///     become index-addressed <c>Add</c>s — all atomic on the server. Shapes the patch API cannot express
+///     (multiply, remove-by-value, set union) are rejected with the reason.
 /// </summary>
 internal static class CosmosPatch
 {
-    public static IReadOnlyList<PatchOperation> BuildSet<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
+    public static IReadOnlyList<PatchOperation> Build<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
     {
-        if (updateFactory.Body is not MemberInitExpression memberInit)
-        {
-            throw new NotSupportedException(
-                "UpdateMany expects a member-initialisation update, e.g. x => new " + typeof(TEntity).Name + " { Status = \"Closed\" }.");
-        }
-
-        var parameter = updateFactory.Parameters[0];
         var operations = new List<PatchOperation>();
 
-        foreach (var binding in memberInit.Bindings)
+        foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
         {
-            if (binding is not MemberAssignment assignment)
+            var path = "/" + CosmosNaming.CamelCase(assignment.Name);
+            switch (assignment)
             {
-                throw new NotSupportedException(
-                    $"Only member assignments are supported in an UpdateMany update; got '{binding.BindingType}'.");
+                case SetAssignment set:
+                    operations.Add(PatchOperation.Set(path, set.Value));
+                    break;
+                case IncrementAssignment increment:
+                    operations.Add(Increment(path, increment.Delta));
+                    break;
+                case CollectionAddAssignment { Unique: false, Prepend: false } add:
+                    foreach (var item in add.Items)
+                    {
+                        operations.Add(PatchOperation.Add(path + "/-", item));
+                    }
+
+                    break;
+                case CollectionAddAssignment { Unique: false, Prepend: true } add:
+                    for (var index = add.Items.Count - 1; index >= 0; index--)
+                    {
+                        operations.Add(PatchOperation.Add(path + "/0", add.Items[index]));
+                    }
+
+                    break;
+                case CollectionAddAssignment unique:
+                    throw new NotSupportedException(
+                        $"Cosmos patch has no set semantics (Union on '{unique.Name}'); load the documents and Modify them instead.");
+                case MultiplyAssignment multiply:
+                    throw new NotSupportedException(
+                        $"Cosmos patch cannot multiply ('{multiply.Name}'); load the documents and Modify them instead.");
+                case CollectionRemoveAssignment remove:
+                    throw new NotSupportedException(
+                        $"Cosmos patch removes array elements by index, not by value ('{remove.Name}'); load the documents and Modify them instead.");
+                default:
+                    throw new NotSupportedException($"The Cosmos provider cannot render the assignment '{assignment.GetType().Name}'.");
             }
-
-            if (ReferencesParameter(assignment.Expression, parameter))
-            {
-                throw new NotSupportedException(
-                    $"The assignment to '{assignment.Member.Name}' references the entity; computed set-based updates " +
-                    "(e.g. x => new E { N = x.N + 1 }) are not supported — load the documents and Modify them instead.");
-            }
-
-            operations.Add(PatchOperation.Set("/" + CosmosNaming.CamelCase(assignment.Member.Name), Evaluate(assignment.Expression)));
-        }
-
-        if (operations.Count == 0)
-        {
-            throw new NotSupportedException("The UpdateMany update assigns no fields.");
         }
 
         return operations;
     }
 
-    private static object? Evaluate(Expression expression) =>
-        expression is ConstantExpression constant
-            ? constant.Value
-            : Expression.Lambda(expression).Compile().DynamicInvoke();
-
-    private static bool ReferencesParameter(Expression expression, ParameterExpression parameter)
+    /// <summary>The native increment: integral deltas as <c>long</c>, floating/decimal deltas as <c>double</c>.</summary>
+    private static PatchOperation Increment(string path, object delta) => delta switch
     {
-        var finder = new ParameterFinder(parameter);
-        finder.Visit(expression);
-        return finder.Found;
-    }
-
-    private sealed class ParameterFinder(ParameterExpression parameter) : ExpressionVisitor
-    {
-        public bool Found { get; private set; }
-
-        protected override Expression VisitParameter(ParameterExpression node)
-        {
-            if (node == parameter)
-            {
-                Found = true;
-            }
-
-            return base.VisitParameter(node);
-        }
-    }
+        sbyte or byte or short or ushort or int or uint or long =>
+            PatchOperation.Increment(path, Convert.ToInt64(delta, CultureInfo.InvariantCulture)),
+        _ => PatchOperation.Increment(path, Convert.ToDouble(delta, CultureInfo.InvariantCulture)),
+    };
 }

@@ -131,4 +131,38 @@ public sealed class MongoAsyncWriteRepositoryTests : MongoIntegrationTest
         var literature = new eQuantic.Core.Data.Repository.Options.QueryOptions<Product>().Where(p => p.Category == "Literature");
         Assert.That(await repo.CountAsync(literature), Is.EqualTo(1));
     }
+
+    [Test]
+    public async Task UpdateManyAsync_applies_computed_increments_atomically()
+    {
+        using var db = NewDatabase();
+        var repo = AsyncRepo(db);
+        var product = Product.New("Keyboard", "Peripherals", 10, 4m);
+        await Seed(db, product);
+
+        var updated = await repo.UpdateManyAsync(p => p.Id == product.Id,
+            x => new Product { Quantity = x.Quantity + 5, Price = x.Price * 2m });
+
+        Assert.That(updated, Is.EqualTo(1));
+        var loaded = await repo.GetAsync(product.Id);
+        Assert.That(loaded!.Quantity, Is.EqualTo(15), "$inc applied");
+        Assert.That(loaded.Price, Is.EqualTo(8m), "$mul applied");
+    }
+
+    [Test]
+    public async Task UpdateManyAsync_pushes_and_pulls_collection_items()
+    {
+        using var db = NewDatabase();
+        var repo = AsyncRepo(db);
+        var product = Product.New("Keyboard", "Peripherals", 10, 4m);
+        product.Tags = ["old", "keep"];
+        await Seed(db, product);
+
+        await repo.UpdateManyAsync(p => p.Id == product.Id, x => new Product { Tags = x.Tags.Append("vip").ToList() });
+        var gone = new[] { "old" };
+        await repo.UpdateManyAsync(p => p.Id == product.Id, x => new Product { Tags = x.Tags.Except(gone).ToList() });
+
+        var loaded = await repo.GetAsync(product.Id);
+        Assert.That(loaded!.Tags, Is.EqualTo(new[] { "keep", "vip" }), "$push then $pullAll applied");
+    }
 }

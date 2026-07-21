@@ -22,6 +22,8 @@ public sealed class Product : IEntity<string>
 
     public decimal Price { get; set; }
 
+    public List<string> Tags { get; set; } = [];
+
     public string GetKey() => Id;
 
     public void SetKey(string key) => Id = key;

@@ -167,6 +167,32 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
         Assert.That(loaded.Owner, Is.EqualTo("mutable"), "columns not in the SET stay unchanged");
     }
 
+    [Test]
+    public async Task Update_many_appends_and_removes_collection_items_atomically()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = AccountRepo(db);
+        var account = NewAccount("collector", tags: ["old", "keep"]);
+        await Seed(db, account);
+
+        await repo.UpdateManyAsync(x => x.Id == account.Id, x => new Account { Tags = x.Tags.Append("vip").ToList() });
+        var gone = new[] { "old" };
+        await repo.UpdateManyAsync(x => x.Id == account.Id, x => new Account { Tags = x.Tags.Except(gone).ToList() });
+
+        var loaded = await repo.GetAsync(account.Id);
+        Assert.That(loaded!.Tags, Is.EqualTo(new[] { "keep", "vip" }), "list + and - applied on the server");
+    }
+
+    [Test]
+    public async Task Update_many_numeric_increment_is_rejected_with_counter_guidance()
+    {
+        using var db = await NewSchemaAsync();
+
+        Assert.That(async () => await AccountRepo(db).UpdateManyAsync(x => x.Id == Guid.NewGuid(),
+                x => new Account { Balance = x.Balance + 1m }),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("counter"));
+    }
+
     // ---------------------------------------------------------------- ALLOW FILTERING opt-in
 
     [Test]

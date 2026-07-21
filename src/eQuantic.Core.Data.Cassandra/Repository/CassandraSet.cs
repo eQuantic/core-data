@@ -93,7 +93,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             throw new NotSupportedException("Cassandra UPDATE requires the primary key; it cannot filter on non-key columns.");
         }
 
-        var (set, setValues) = CassandraUpdate.BuildSet(updateExpression);
+        var (set, setValues) = CassandraUpdate.Build(updateExpression);
         var count = await CountAsync(where, whereValues, cancellationToken).ConfigureAwait(false);
         await CassandraStatements.ExecuteAsync(_session,
             $"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray()).ConfigureAwait(false);

@@ -1,80 +1,69 @@
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Query;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
 namespace eQuantic.Core.Data.MongoDb;
 
 /// <summary>
-///     Translates a member-initialisation update (<c>x =&gt; new TEntity { Status = "Closed", ... }</c>) into a
-///     MongoDB <c>$set</c>. Each assigned member becomes a <c>$set</c> field whose stored name and value are
-///     resolved through the class map (via <see cref="MongoFieldNames" />). Assignments that reference the entity
-///     (computed updates such as <c>x =&gt; new E { N = x.N + 1 }</c>) are not yet supported.
+///     Renders the dialect-agnostic <see cref="UpdateAssignment" /> model (produced by the core
+///     <see cref="UpdateInterpreter" />) into a MongoDB update document: constant assignments become <c>$set</c>,
+///     numeric read-modify-writes become <c>$inc</c>/<c>$mul</c>, and collection updates become
+///     <c>$push</c> (with <c>$each</c>/<c>$position</c>), <c>$addToSet</c> or <c>$pullAll</c> — all atomic on the
+///     server. Stored names and values are resolved through the class map (via <see cref="MongoFieldNames" />).
 /// </summary>
 internal static class MongoUpdate
 {
-    public static UpdateDefinition<TEntity> BuildSet<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
+    public static UpdateDefinition<TEntity> Build<TEntity>(Expression<Func<TEntity, TEntity>> updateFactory)
     {
-        if (updateFactory.Body is not MemberInitExpression memberInit)
-        {
-            throw new NotSupportedException(
-                "UpdateMany expects a member-initialisation update, e.g. x => new " + typeof(TEntity).Name + " { Status = \"Closed\" }.");
-        }
+        var update = new BsonDocument();
 
-        var parameter = updateFactory.Parameters[0];
-        var set = new BsonDocument();
-
-        foreach (var binding in memberInit.Bindings)
+        foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
         {
-            if (binding is not MemberAssignment assignment)
+            var field = MongoFieldNames.Resolve(typeof(TEntity), assignment.Member);
+            switch (assignment)
             {
-                throw new NotSupportedException(
-                    $"Only member assignments are supported in an UpdateMany update; got '{binding.BindingType}'.");
-            }
+                case SetAssignment set:
+                    Operator(update, "$set")[field] = MongoFieldNames.Serialize(typeof(TEntity), set.Member, set.Value);
+                    break;
+                case IncrementAssignment increment:
+                    Operator(update, "$inc")[field] = MongoFieldNames.Serialize(typeof(TEntity), increment.Member, increment.Delta);
+                    break;
+                case MultiplyAssignment multiply:
+                    Operator(update, "$mul")[field] = MongoFieldNames.Serialize(typeof(TEntity), multiply.Member, multiply.Factor);
+                    break;
+                case CollectionAddAssignment add:
+                {
+                    var items = (BsonArray)MongoFieldNames.Serialize(typeof(TEntity), add.Member, add.ToTypedCollection());
+                    var each = new BsonDocument("$each", items);
+                    if (add.Prepend)
+                    {
+                        each.Add("$position", 0);
+                    }
 
-            if (ReferencesParameter(assignment.Expression, parameter))
-            {
-                throw new NotSupportedException(
-                    $"The assignment to '{assignment.Member.Name}' references the entity; computed set-based updates " +
-                    "(e.g. x => new E { N = x.N + 1 }) are not yet supported — use Modify on loaded documents instead.");
+                    Operator(update, add.Unique ? "$addToSet" : "$push")[field] = each;
+                    break;
+                }
+                case CollectionRemoveAssignment remove:
+                    Operator(update, "$pullAll")[field] =
+                        (BsonArray)MongoFieldNames.Serialize(typeof(TEntity), remove.Member, remove.ToTypedCollection());
+                    break;
+                default:
+                    throw new NotSupportedException($"The MongoDB provider cannot render the assignment '{assignment.GetType().Name}'.");
             }
-
-            set.Add(
-                MongoFieldNames.Resolve(typeof(TEntity), assignment.Member),
-                MongoFieldNames.Serialize(typeof(TEntity), assignment.Member, Evaluate(assignment.Expression)));
         }
 
-        if (set.ElementCount == 0)
-        {
-            throw new NotSupportedException("The UpdateMany update assigns no fields.");
-        }
-
-        return new BsonDocumentUpdateDefinition<TEntity>(new BsonDocument("$set", set));
+        return new BsonDocumentUpdateDefinition<TEntity>(update);
     }
 
-    private static object? Evaluate(Expression expression) =>
-        expression is ConstantExpression constant
-            ? constant.Value
-            : Expression.Lambda(expression).Compile().DynamicInvoke();
-
-    private static bool ReferencesParameter(Expression expression, ParameterExpression parameter)
+    private static BsonDocument Operator(BsonDocument update, string name)
     {
-        var finder = new ParameterFinder(parameter);
-        finder.Visit(expression);
-        return finder.Found;
-    }
-
-    private sealed class ParameterFinder(ParameterExpression parameter) : ExpressionVisitor
-    {
-        public bool Found { get; private set; }
-
-        protected override Expression VisitParameter(ParameterExpression node)
+        if (!update.TryGetValue(name, out var existing))
         {
-            if (node == parameter)
-            {
-                Found = true;
-            }
-
-            return base.VisitParameter(node);
+            existing = new BsonDocument();
+            update[name] = existing;
         }
+
+        return existing.AsBsonDocument;
     }
 }
