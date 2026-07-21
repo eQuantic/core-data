@@ -384,6 +384,11 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         // Reads join the active transaction session, so a query inside a transaction sees its own writes.
         var session = UnitOfWork.Session;
         var query = (session is null ? Collection.AsQueryable() : Collection.AsQueryable(session)).ApplyQueryOptions(options);
+        if (GlobalFilter(options) is { } global)
+        {
+            query = query.Where(global);
+        }
+
         if (extra is not null)
         {
             query = extra(query);
@@ -424,6 +429,10 @@ public abstract class MongoReadRepository<TEntity, TKey> :
             Expression.Constant(id, _idType));
         return Expression.Lambda<Func<TEntity, bool>>(body, parameter);
     }
+
+    /// <summary>The global filter for this entity, unless the options opt out of query filters.</summary>
+    private Expression<Func<TEntity, bool>>? GlobalFilter(QueryOptions<TEntity>? options) =>
+        options is { IgnoreQueryFilters: true } ? null : UnitOfWork.GlobalFilter<TEntity>();
 
     private static Expression<Func<TEntity, bool>> Negate(Expression<Func<TEntity, bool>> predicate) =>
         Expression.Lambda<Func<TEntity, bool>>(Expression.Not(predicate.Body), predicate.Parameters);

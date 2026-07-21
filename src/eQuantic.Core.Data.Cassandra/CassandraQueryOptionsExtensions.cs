@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Linq.Expressions.Nodes;
+using global::Cassandra;
 
 namespace eQuantic.Core.Data.Cassandra;
 
@@ -14,6 +15,7 @@ public static class CassandraQueryOptionsExtensions
     // Opt-ins are tracked per options instance so the diagnostic Tag stays free for the caller's own use.
     private static readonly ConditionalWeakTable<object, object> FilteringOptIns = new();
     private static readonly ConditionalWeakTable<object, object> ClientEvaluationOptIns = new();
+    private static readonly ConditionalWeakTable<object, object> Consistencies = new();
 
     /// <summary>
     ///     Opts this query into <c>ALLOW FILTERING</c>, letting it filter on non-key columns. This is a scan —
@@ -46,11 +48,29 @@ public static class CassandraQueryOptionsExtensions
         return options;
     }
 
+    /// <summary>
+    ///     Applies a consistency level to this query's reads (e.g. <c>LocalQuorum</c> for read-your-writes across
+    ///     replicas), overriding the cluster default for this statement only.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <param name="options">The query options.</param>
+    /// <param name="consistency">The consistency level.</param>
+    /// <returns>The same options for chaining.</returns>
+    public static QueryOptions<TEntity> WithConsistency<TEntity>(this QueryOptions<TEntity> options, ConsistencyLevel consistency)
+        where TEntity : class
+    {
+        Consistencies.AddOrUpdate(options, consistency);
+        return options;
+    }
+
     internal static bool IsAllowFilteringOptedIn(object? options) =>
         options is not null && FilteringOptIns.TryGetValue(options, out _);
 
     internal static bool IsClientEvaluationOptedIn(object? options) =>
         options is not null && ClientEvaluationOptIns.TryGetValue(options, out _);
+
+    internal static ConsistencyLevel? ConsistencyOf(object? options) =>
+        options is not null && Consistencies.TryGetValue(options, out var value) ? (ConsistencyLevel)value : null;
 }
 
 /// <summary>One branch of an OR-split query: its rendered <c>WHERE</c> fragment and bound values.</summary>
@@ -92,7 +112,8 @@ internal static class CassandraCql
     ///     never mutated.
     /// </summary>
     public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration,
-        QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null)
+        QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null,
+        Expression<Func<TEntity, bool>>? globalFilter = null)
         where TEntity : class
     {
         var clauses = new List<string>();
@@ -102,7 +123,7 @@ internal static class CassandraCql
         var requiresFiltering = false;
         var partitionScoped = false;
 
-        foreach (var filter in Filters(options, extraFilter))
+        foreach (var filter in Filters(options, extraFilter, globalFilter))
         {
             // One node-model conversion per filter (a single partial-evaluation pass); splitting, interpretation
             // and the OR analysis all walk the nodes, and only a refused conjunct is rebuilt into an expression
@@ -198,14 +219,15 @@ internal static class CassandraCql
     /// </summary>
     public static (string Where, object?[] Values, bool RequiresFiltering) Where<TEntity>(
         CassandraEntityConfiguration configuration, QueryOptions<TEntity>? options,
-        Expression<Func<TEntity, bool>>? extraFilter = null)
+        Expression<Func<TEntity, bool>>? extraFilter = null,
+        Expression<Func<TEntity, bool>>? globalFilter = null)
         where TEntity : class
     {
         var clauses = new List<string>();
         var values = new List<object?>();
         var requiresFiltering = false;
 
-        foreach (var filter in Filters(options, extraFilter))
+        foreach (var filter in Filters(options, extraFilter, globalFilter))
         {
             var (cql, filterValues, allowFiltering) = CassandraCqlRenderer.Render(configuration, FilterInterpreter.Interpret(filter));
             if (cql.Length == 0)
@@ -228,8 +250,14 @@ internal static class CassandraCql
         CassandraQueryOptionsExtensions.IsClientEvaluationOptedIn(options);
 
     private static IEnumerable<Expression<Func<TEntity, bool>>> Filters<TEntity>(
-        QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter) where TEntity : class
+        QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
+        Expression<Func<TEntity, bool>>? globalFilter) where TEntity : class
     {
+        if (globalFilter is not null)
+        {
+            yield return globalFilter;
+        }
+
         if (options?.Filter is not null)
         {
             yield return options.Filter;

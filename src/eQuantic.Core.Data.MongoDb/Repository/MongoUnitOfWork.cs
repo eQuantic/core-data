@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Linq.Expressions;
+using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using MongoDB.Bson.Serialization;
@@ -34,6 +37,21 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork
 
     internal IMongoCollection<TEntity> GetCollection<TEntity>() =>
         Database.GetCollection<TEntity>(CollectionName<TEntity>());
+
+    private QueryFilters? _queryFilters;
+    private bool _queryFiltersResolved;
+
+    /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
+    {
+        if (!_queryFiltersResolved)
+        {
+            _queryFilters = ServiceProvider.GetService(typeof(QueryFilters)) as QueryFilters;
+            _queryFiltersResolved = true;
+        }
+
+        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+    }
 
     // -------------------------------------------------------------- write staging (called by MongoSet)
 
@@ -78,6 +96,10 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork
         {
             return 0;
         }
+
+        using var activity = DataActivitySource.Instance.StartActivity("mongodb.commit", ActivityKind.Client);
+        activity?.SetTag("db.system", "mongodb");
+        activity?.SetTag("equantic.writes", _pending.Values.Sum(pending => pending.Count));
 
         long affected = 0;
         foreach (var pending in _pending.Values)

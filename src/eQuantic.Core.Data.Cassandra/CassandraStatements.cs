@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using eQuantic.Core.Data.Diagnostics;
 using global::Cassandra;
 
 namespace eQuantic.Core.Data.Cassandra;
@@ -9,7 +11,8 @@ namespace eQuantic.Core.Data.Cassandra;
 ///     bound thereafter — the server parses the statement once, and the driver routes bound statements token-aware.
 ///     The cache lives and dies with its <see cref="ISession" />; a faulted preparation is evicted so the next call
 ///     retries instead of replaying the failure. DDL and other one-shot statements should keep using
-///     <see cref="SimpleStatement" /> — preparing them buys nothing.
+///     <see cref="SimpleStatement" /> — preparing them buys nothing. Executions emit a <c>cassandra.execute</c>
+///     activity on <see cref="DataActivitySource" /> carrying the statement text (placeholders, never values).
 /// </summary>
 internal static class CassandraStatements
 {
@@ -32,10 +35,27 @@ internal static class CassandraStatements
         }
     }
 
-    /// <summary>Prepares (once), binds and executes the statement.</summary>
-    public static async Task<RowSet> ExecuteAsync(ISession session, string cql, object?[] values)
+    /// <summary>Prepares (once), binds and executes the statement, optionally at an explicit consistency level.</summary>
+    public static async Task<RowSet> ExecuteAsync(ISession session, string cql, object?[] values,
+        ConsistencyLevel? consistency = null)
     {
         var bound = await BindAsync(session, cql, values).ConfigureAwait(false);
+        if (consistency is { } level)
+        {
+            bound.SetConsistencyLevel(level);
+        }
+
+        using var activity = DataActivitySource.Instance.StartActivity("cassandra.execute", ActivityKind.Client);
+        if (activity is not null)
+        {
+            activity.SetTag("db.system", "cassandra");
+            activity.SetTag("db.statement", cql);
+            if (consistency is { } tagged)
+            {
+                activity.SetTag("db.cassandra.consistency_level", tagged.ToString());
+            }
+        }
+
         return await session.ExecuteAsync(bound).ConfigureAwait(false);
     }
 }

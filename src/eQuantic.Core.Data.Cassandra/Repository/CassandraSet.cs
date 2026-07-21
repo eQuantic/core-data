@@ -70,7 +70,8 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
-        var (where, values, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter);
+        // The global filter scopes set-based writes too (a tenant-scoped delete stays tenant-scoped).
+        var (where, values, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter, _unitOfWork.GlobalFilter<TEntity>());
         if (requiresFiltering)
         {
             throw new NotSupportedException("Cassandra DELETE requires the partition key; it cannot filter on non-key columns.");
@@ -87,7 +88,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
-        var (where, whereValues, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter);
+        var (where, whereValues, requiresFiltering) = CassandraCql.Where<TEntity>(_configuration, null, filter, _unitOfWork.GlobalFilter<TEntity>());
         if (requiresFiltering)
         {
             throw new NotSupportedException("Cassandra UPDATE requires the primary key; it cannot filter on non-key columns.");

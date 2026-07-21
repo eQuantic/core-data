@@ -154,7 +154,16 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
   `ConcurrencyToken(x => x.ETag)` turns `Modify` into a conditional `If-Match` replace.
 - **Prepared statements and LWT (Cassandra)** — every repeated CQL text is prepared once per
   session and bound thereafter; `AddIfNotExistsAsync` runs `INSERT … IF NOT EXISTS` and reports
-  whether it applied.
+  whether it applied; `WithConsistency(...)` sets a per-query consistency level and
+  `CommitAsync(o => o.WithTtl(...))` writes expiring rows.
+- **Global query filters (multi-tenancy)** — register `new QueryFilters().For<Order>(...)` as a
+  singleton and every read *and set-based write* is scoped by it on all three providers; a
+  per-request factory receives the scope's `IServiceProvider` (resolve the current tenant there),
+  and `IgnoringQueryFilters()` opts a read out. A tenant filter on the Cosmos partition key
+  auto-scopes the query to that partition.
+- **OpenTelemetry built in** — subscribe to the `eQuantic.Core.Data` `ActivitySource` and every
+  provider emits spans with the statement (placeholders, never values) plus the engine's own facts:
+  client evaluation, split-query count, partition scoping, staged write counts.
 
 The rule behind all of it: **a query never lies about its cost.** Anything beyond the store's
 native access path is explicit and opt-in, and `Explain()` shows exactly what will run. Providers

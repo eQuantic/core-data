@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Linq.Expressions;
 using eQuantic.Linq.Specification;
 using MongoDB.Driver;
 
@@ -26,6 +27,10 @@ public class MongoRepository<TEntity, TKey> :
     public MongoRepository(IQueryableUnitOfWork unitOfWork) : base(unitOfWork)
     {
     }
+
+    /// <summary>ANDs the global filter into a set-based write (a tenant-scoped delete stays tenant-scoped).</summary>
+    private Expression<Func<TEntity, bool>> Scoped(Expression<Func<TEntity, bool>> filter) =>
+        UnitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
 
     // ---------------------------------------------------------------- staged entity writes (flushed on commit)
 
@@ -95,8 +100,8 @@ public class MongoRepository<TEntity, TKey> :
     {
         var session = UnitOfWork.Session;
         var result = session is null
-            ? Collection.DeleteMany(filter)
-            : Collection.DeleteMany(session, filter);
+            ? Collection.DeleteMany(Scoped(filter))
+            : Collection.DeleteMany(session, Scoped(filter));
         return result.DeletedCount;
     }
 
@@ -108,8 +113,8 @@ public class MongoRepository<TEntity, TKey> :
     {
         var session = UnitOfWork.Session;
         var result = session is null
-            ? await Collection.DeleteManyAsync(filter, cancellationToken).ConfigureAwait(false)
-            : await Collection.DeleteManyAsync(session, filter, cancellationToken: cancellationToken).ConfigureAwait(false);
+            ? await Collection.DeleteManyAsync(Scoped(filter), cancellationToken).ConfigureAwait(false)
+            : await Collection.DeleteManyAsync(session, Scoped(filter), cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.DeletedCount;
     }
 
@@ -123,8 +128,8 @@ public class MongoRepository<TEntity, TKey> :
         var update = MongoUpdate.Build(updateFactory);
         var session = UnitOfWork.Session;
         var result = session is null
-            ? Collection.UpdateMany(filter, update)
-            : Collection.UpdateMany(session, filter, update);
+            ? Collection.UpdateMany(Scoped(filter), update)
+            : Collection.UpdateMany(session, Scoped(filter), update);
         return result.ModifiedCount;
     }
 
@@ -138,8 +143,8 @@ public class MongoRepository<TEntity, TKey> :
         var update = MongoUpdate.Build(updateFactory);
         var session = UnitOfWork.Session;
         var result = session is null
-            ? await Collection.UpdateManyAsync(filter, update, cancellationToken: cancellationToken).ConfigureAwait(false)
-            : await Collection.UpdateManyAsync(session, filter, update, cancellationToken: cancellationToken).ConfigureAwait(false);
+            ? await Collection.UpdateManyAsync(Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await Collection.UpdateManyAsync(session, Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.ModifiedCount;
     }
 

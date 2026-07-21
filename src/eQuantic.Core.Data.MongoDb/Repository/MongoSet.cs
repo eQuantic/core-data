@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Linq.Expressions;
 using MongoDB.Driver;
 using MongoDB.Driver.Linq;
 
@@ -27,6 +28,10 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     // Reads join the active transaction session, so a query inside a transaction sees its own writes.
     private IQueryable<TEntity> Queryable =>
         _unitOfWork.Session is { } session ? _collection.AsQueryable(session) : _collection.AsQueryable();
+
+    /// <summary>ANDs the global filter into a set-based write (a tenant-scoped delete stays tenant-scoped).</summary>
+    private Expression<Func<TEntity, bool>> Scoped(Expression<Func<TEntity, bool>> filter) =>
+        _unitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
 
     // ---------------------------------------------------------------- IQueryable
     public Type ElementType => Queryable.ElementType;
@@ -69,8 +74,8 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     {
         var session = _unitOfWork.Session;
         var result = session is null
-            ? _collection.DeleteMany(filter)
-            : _collection.DeleteMany(session, filter);
+            ? _collection.DeleteMany(Scoped(filter))
+            : _collection.DeleteMany(session, Scoped(filter));
         return result.DeletedCount;
     }
 
@@ -78,8 +83,8 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     {
         var session = _unitOfWork.Session;
         var result = session is null
-            ? await _collection.DeleteManyAsync(filter, cancellationToken).ConfigureAwait(false)
-            : await _collection.DeleteManyAsync(session, filter, cancellationToken: cancellationToken).ConfigureAwait(false);
+            ? await _collection.DeleteManyAsync(Scoped(filter), cancellationToken).ConfigureAwait(false)
+            : await _collection.DeleteManyAsync(session, Scoped(filter), cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.DeletedCount;
     }
 
@@ -88,8 +93,8 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         var update = MongoUpdate.Build(updateExpression);
         var session = _unitOfWork.Session;
         var result = session is null
-            ? _collection.UpdateMany(filter, update)
-            : _collection.UpdateMany(session, filter, update);
+            ? _collection.UpdateMany(Scoped(filter), update)
+            : _collection.UpdateMany(session, Scoped(filter), update);
         return result.ModifiedCount;
     }
 
@@ -99,8 +104,8 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         var update = MongoUpdate.Build(updateExpression);
         var session = _unitOfWork.Session;
         var result = session is null
-            ? await _collection.UpdateManyAsync(filter, update, cancellationToken: cancellationToken).ConfigureAwait(false)
-            : await _collection.UpdateManyAsync(session, filter, update, cancellationToken: cancellationToken).ConfigureAwait(false);
+            ? await _collection.UpdateManyAsync(Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await _collection.UpdateManyAsync(session, Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.ModifiedCount;
     }
 }

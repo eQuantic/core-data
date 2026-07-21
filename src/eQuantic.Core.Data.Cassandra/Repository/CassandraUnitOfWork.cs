@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Linq.Expressions;
+using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using global::Cassandra;
@@ -32,6 +35,21 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     internal ISession GetSession() => Session;
 
+    private QueryFilters? _queryFilters;
+    private bool _queryFiltersResolved;
+
+    /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
+    {
+        if (!_queryFiltersResolved)
+        {
+            _queryFilters = ServiceProvider.GetService(typeof(QueryFilters)) as QueryFilters;
+            _queryFiltersResolved = true;
+        }
+
+        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+    }
+
     // -------------------------------------------------------------- write staging
 
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
@@ -54,7 +72,22 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     public int Commit() => CommitAsync().GetAwaiter().GetResult();
 
-    public async Task<int> CommitAsync(CancellationToken cancellationToken = default)
+    public Task<int> CommitAsync(CancellationToken cancellationToken = default) => CommitCoreAsync(null, null, cancellationToken);
+
+    public int Commit(Action<SaveOptions> options) => CommitAsync(options).GetAwaiter().GetResult();
+
+    /// <summary>Commits with Cassandra save opt-ins: <c>o.WithConsistency(...)</c> and <c>o.WithTtl(...)</c>.</summary>
+    public Task<int> CommitAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default)
+    {
+        var saveOptions = GetSaveOptions();
+        options?.Invoke(saveOptions);
+        return CommitCoreAsync(
+            CassandraSaveOptionsExtensions.ConsistencyOf(saveOptions),
+            CassandraSaveOptionsExtensions.TtlOf(saveOptions),
+            cancellationToken);
+    }
+
+    private async Task<int> CommitCoreAsync(ConsistencyLevel? consistency, int? ttlSeconds, CancellationToken cancellationToken)
     {
         if (_inTransaction)
         {
@@ -69,14 +102,24 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         var statements = _pending.ToList();
         _pending.Clear();
 
-        // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write.
+        using var activity = DataActivitySource.Instance.StartActivity("cassandra.commit", ActivityKind.Client);
+        activity?.SetTag("db.system", "cassandra");
+        activity?.SetTag("equantic.writes", statements.Count);
+
+        // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write; a TTL
+        // applies to this flush's inserts only (deletes carry none).
         await Task.WhenAll(statements.Select(statement =>
-            CassandraStatements.ExecuteAsync(Session, statement.Cql, statement.Values))).ConfigureAwait(false);
+        {
+            var (cql, values) = WithTtl(statement, ttlSeconds);
+            return CassandraStatements.ExecuteAsync(Session, cql, values, consistency);
+        })).ConfigureAwait(false);
         return statements.Count;
     }
 
-    public int Commit(Action<SaveOptions> options) => Commit();
-    public Task<int> CommitAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
+    private static (string Cql, object?[] Values) WithTtl((string Cql, object?[] Values) statement, int? ttlSeconds) =>
+        ttlSeconds is { } ttl && statement.Cql.StartsWith("INSERT", StringComparison.Ordinal)
+            ? (statement.Cql + " USING TTL ?", [.. statement.Values, ttl])
+            : statement;
     public int CommitAndRefreshChanges() => Commit();
     public int CommitAndRefreshChanges(Action<SaveOptions> options) => Commit();
     public Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
@@ -110,6 +153,10 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
             {
                 var writes = _pending.ToList();
                 _pending.Clear();
+
+                using var activity = DataActivitySource.Instance.StartActivity("cassandra.commit_transaction", ActivityKind.Client);
+                activity?.SetTag("db.system", "cassandra");
+                activity?.SetTag("equantic.writes", writes.Count);
 
                 var batch = new BatchStatement().SetBatchType(BatchType.Logged);
                 foreach (var (cql, values) in writes)

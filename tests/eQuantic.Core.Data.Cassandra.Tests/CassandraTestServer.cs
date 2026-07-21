@@ -62,7 +62,11 @@ public sealed class CassandraTestServer
 
     /// <summary>Creates a fresh, isolated keyspace with the test model (and optional migrations) registered.</summary>
     public static CassandraTestDatabase NewDatabase(params Assembly[] migrationAssemblies) =>
-        new(Host, Port, "ks_" + Guid.NewGuid().ToString("N"), TestSchema.Configure, migrationAssemblies);
+        new(Host, Port, "ks_" + Guid.NewGuid().ToString("N"), TestSchema.Configure, migrationAssemblies, null);
+
+    /// <summary>Creates a fresh keyspace with extra registrations (e.g. global query filters).</summary>
+    public static CassandraTestDatabase NewDatabase(Action<IServiceCollection> configure, params Assembly[] migrationAssemblies) =>
+        new(Host, Port, "ks_" + Guid.NewGuid().ToString("N"), TestSchema.Configure, migrationAssemblies, configure);
 }
 
 /// <summary>Base class that skips a test when the Cassandra container is unavailable, with shared helpers.</summary>
@@ -74,6 +78,14 @@ public abstract class CassandraIntegrationTest
     /// <summary>A fresh keyspace with the test model registered but no schema yet (migration tests drive the runner).</summary>
     protected static CassandraTestDatabase NewDatabase(params Assembly[] migrationAssemblies) =>
         CassandraTestServer.NewDatabase(migrationAssemblies);
+
+    /// <summary>A fresh keyspace with the schema applied and extra registrations (e.g. global query filters).</summary>
+    protected static async Task<CassandraTestDatabase> NewSchemaAsync(Action<IServiceCollection> configure)
+    {
+        var db = CassandraTestServer.NewDatabase(configure, typeof(SchemaSetupMigration).Assembly);
+        await db.Resolve<IMigrationRunner>().RunAsync();
+        return db;
+    }
 
     /// <summary>A fresh keyspace with the schema migration already applied — ready for repository work.</summary>
     protected static async Task<CassandraTestDatabase> NewSchemaAsync()
@@ -124,7 +136,8 @@ public sealed class CassandraTestDatabase : IDisposable
     private readonly IServiceScope _scope;
 
     public CassandraTestDatabase(string host, int port, string keyspace,
-        Action<CassandraModelBuilder> model, Assembly[] migrationAssemblies)
+        Action<CassandraModelBuilder> model, Assembly[] migrationAssemblies,
+        Action<IServiceCollection>? configure = null)
     {
         Keyspace = keyspace;
 
@@ -135,6 +148,8 @@ public sealed class CassandraTestDatabase : IDisposable
         {
             services.AddCassandraMigrations(migrationAssemblies);
         }
+
+        configure?.Invoke(services);
 
         _provider = services.BuildServiceProvider();
         _scope = _provider.CreateScope();

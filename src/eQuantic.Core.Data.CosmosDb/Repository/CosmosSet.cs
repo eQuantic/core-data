@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Linq.Expressions;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Cosmos.Linq;
 
@@ -64,12 +65,16 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         return Task.CompletedTask;
     }
 
+    /// <summary>ANDs the global filter into a set-based write (a tenant-scoped delete stays tenant-scoped).</summary>
+    private Expression<Func<TEntity, bool>> Scoped(Expression<Func<TEntity, bool>> filter) =>
+        _unitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
+
     // ---------------------------------------------------------------- set-based writes (immediate)
     public long DeleteMany(Expression<Func<TEntity, bool>> filter) => DeleteManyAsync(filter).GetAwaiter().GetResult();
 
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
-        var matches = await MaterializeAsync(_queryable.Where(filter), cancellationToken).ConfigureAwait(false);
+        var matches = await MaterializeAsync(_queryable.Where(Scoped(filter)), cancellationToken).ConfigureAwait(false);
         await Task.WhenAll(matches.Select(item => _container.DeleteItemStreamAsync(
                 _configuration.GetId(item), _configuration.GetPartitionKey(item), cancellationToken: cancellationToken)))
             .ConfigureAwait(false);
@@ -83,7 +88,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
         var patch = CosmosPatch.Build(updateExpression);
-        var matches = await MaterializeAsync(_queryable.Where(filter), cancellationToken).ConfigureAwait(false);
+        var matches = await MaterializeAsync(_queryable.Where(Scoped(filter)), cancellationToken).ConfigureAwait(false);
         await Task.WhenAll(matches.Select(item => _container.PatchItemAsync<TEntity>(
                 _configuration.GetId(item), _configuration.GetPartitionKey(item), patch, cancellationToken: cancellationToken)))
             .ConfigureAwait(false);

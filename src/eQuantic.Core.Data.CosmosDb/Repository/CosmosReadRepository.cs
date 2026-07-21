@@ -246,8 +246,9 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
                 "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
         }
 
+        var global = GlobalFilter(options);
         var requestOptions = new QueryRequestOptions { MaxItemCount = pageSize };
-        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options?.Filter, options?.Specification?.SatisfiedBy());
+        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, global, options?.Filter, options?.Specification?.SatisfiedBy());
         if (partitionKey is not null)
         {
             requestOptions.PartitionKey = partitionKey;
@@ -257,6 +258,10 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         var query = Container
             .GetItemLinqQueryable<TEntity>(continuationToken: continuationToken, requestOptions: requestOptions)
             .ApplyQueryOptions(options);
+        if (global is not null)
+        {
+            query = query.Where(global);
+        }
 
         using var iterator = query.ToFeedIterator();
         if (!iterator.HasMoreResults)
@@ -297,12 +302,18 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         }
 
         // Build the shaped queryable directly (not via Query) so an explain never throws on shaping issues.
-        var definition = Container
-            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true)
-            .ApplyQueryOptions(options)
-            .ToQueryDefinition();
+        var global = GlobalFilter(options);
+        if (global is not null)
+        {
+            notes.Add("A global query filter is ANDed into this query; IgnoringQueryFilters() opts out.");
+        }
 
-        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, options?.Filter, options?.Specification?.SatisfiedBy());
+        var shaped = Container
+            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true)
+            .ApplyQueryOptions(options);
+        var definition = (global is null ? shaped : shaped.Where(global)).ToQueryDefinition();
+
+        var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, global, options?.Filter, options?.Specification?.SatisfiedBy());
         notes.Add(partitionKey is not null
             ? "Scoped to a single partition (partition key inferred from the filter)."
             : "Cross-partition query: no partition key is pinned by the filter.");
@@ -341,23 +352,34 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
                 "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
         }
 
+        var global = GlobalFilter(options);
         var query = Container
-            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options, extraFilter))
+            .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options, extraFilter, global))
             .ApplyQueryOptions(options);
+        if (global is not null)
+        {
+            query = query.Where(global);
+        }
+
         return extraFilter is null ? query : query.Where(extraFilter);
     }
 
     /// <summary>
-    ///     Scopes the query to a single partition when any of its filters — the options' predicate/specification or
-    ///     the extra predicate — pins the partition key, otherwise lets it run cross-partition. Automatic — a filter
-    ///     such as <c>x =&gt; x.Category == "Books"</c> already scopes it.
+    ///     Scopes the query to a single partition when any of its filters — the options' predicate/specification,
+    ///     the extra predicate or the global filter — pins the partition key, otherwise lets it run cross-partition.
+    ///     Automatic — a tenant filter such as <c>x =&gt; x.TenantId == tenant</c> on the partition key already scopes it.
     /// </summary>
-    private QueryRequestOptions? RequestOptions(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
+    private QueryRequestOptions? RequestOptions(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
+        Expression<Func<TEntity, bool>>? globalFilter)
     {
         var partitionKey = CosmosPartitionKeyInference.Infer(
-            _partitionKeyPath, extraFilter, options?.Filter, options?.Specification?.SatisfiedBy());
+            _partitionKeyPath, extraFilter, globalFilter, options?.Filter, options?.Specification?.SatisfiedBy());
         return partitionKey is null ? null : new QueryRequestOptions { PartitionKey = partitionKey };
     }
+
+    /// <summary>The global filter for this entity, unless the options opt out of query filters.</summary>
+    private Expression<Func<TEntity, bool>>? GlobalFilter(QueryOptions<TEntity>? options) =>
+        options is { IgnoreQueryFilters: true } ? null : UnitOfWork.GlobalFilter<TEntity>();
 
     private IQueryable<TEntity> Ordered(IQueryable<TEntity> query, QueryOptions<TEntity>? options)
     {

@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -111,7 +113,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}"
                       + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                       + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
-            var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values).ConfigureAwait(false);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
+                CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
             return rows.First().GetValue<long>(0);
         }
 
@@ -190,6 +193,11 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         // The driver walks its native paging: one page per call, resumed by the (opaque) paging state.
         var bound = await CassandraStatements.BindAsync(Session,
             SelectCql(null, plan.Where, plan.RequiresAllowFiltering, options, pushLimit: false), plan.Values).ConfigureAwait(false);
+        if (CassandraQueryOptionsExtensions.ConsistencyOf(options) is { } consistency)
+        {
+            bound.SetConsistencyLevel(consistency);
+        }
+
         bound.SetPageSize(pageSize);
         bound.SetAutoPage(false);
         if (continuationToken is not null)
@@ -240,7 +248,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             notes.Add("Include is not supported: Cassandra rows are self-contained (execution throws NotSupportedException).");
         }
 
-        var plan = CassandraCql.Plan(_configuration, options);
+        var global = GlobalFilter(options);
+        if (global is not null)
+        {
+            notes.Add("A global query filter is ANDed into this query; IgnoringQueryFilters() opts out.");
+        }
+
+        var plan = CassandraCql.Plan(_configuration, options, null, global);
 
         string orderBy;
         try
@@ -371,6 +385,17 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var residuals = Compile(plan.Residual);
         var selected = SelectedColumns(mapColumns, plan);
 
+        // The engine span carries what no driver instrumentation can know: residual, split and gate facts.
+        using var activity = DataActivitySource.Instance.StartActivity("cassandra.select", ActivityKind.Client);
+        if (activity is not null)
+        {
+            activity.SetTag("db.system", "cassandra");
+            activity.SetTag("equantic.client_evaluation", residuals.Count > 0);
+            activity.SetTag("equantic.split_queries", plan.Alternatives.Count);
+            activity.SetTag("equantic.partition_scoped", plan.PartitionScoped);
+            activity.SetTag("equantic.allow_filtering", plan.RequiresAllowFiltering);
+        }
+
         if (plan.Alternatives.Count > 0)
         {
             return await SelectSplitAsync(plan, residuals, selected, options, limit).ConfigureAwait(false);
@@ -381,7 +406,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var cql = SelectCql(selected, plan.Where, plan.RequiresAllowFiltering, options, pushLimit);
         var values = pushLimit ? [.. plan.Values, limit!.Value] : plan.Values;
 
-        var rows = await CassandraStatements.ExecuteAsync(Session, cql, values).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(Session, cql, values,
+            CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
 
         // The RowSet pages lazily; composing Where/Take before materializing the list stops fetching once satisfied.
         IEnumerable<TEntity> entities = rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row, selected));
@@ -407,6 +433,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit)
     {
         var pushLimit = limit.HasValue && residuals.Count == 0;
+        var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(options);
         var executions = plan.Alternatives.Select(alternative =>
         {
             var where = plan.Where.Length > 0 ? $"{plan.Where} AND {alternative.Where}" : alternative.Where;
@@ -414,7 +441,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                 ? [.. plan.Values, .. alternative.Values, limit!.Value]
                 : [.. plan.Values, .. alternative.Values];
             return CassandraStatements.ExecuteAsync(Session,
-                SelectCql(selected, where, plan.RequiresAllowFiltering, options, pushLimit), values);
+                SelectCql(selected, where, plan.RequiresAllowFiltering, options, pushLimit), values, consistency);
         }).ToList();
 
         var rowSets = await Task.WhenAll(executions).ConfigureAwait(false);
@@ -448,7 +475,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                 "Cassandra rows are self-contained; there are no navigations to include — model related data with the partition key or query it explicitly.");
         }
 
-        var plan = CassandraCql.Plan(_configuration, options, extraFilter);
+        var plan = CassandraCql.Plan(_configuration, options, extraFilter, GlobalFilter(options));
 
         if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
         {
@@ -586,7 +613,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                 var cql = $"SELECT SUM({column}) FROM {_configuration.TableName}"
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                           + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
-                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values).ConfigureAwait(false)).First();
+                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
+                    CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false)).First();
                 return row.IsNull(0) ? default! : row.GetValue<TSum>(0);
             }
         }
@@ -631,6 +659,10 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
         return " ORDER BY " + string.Join(", ", parts);
     }
+
+    /// <summary>The global filter for this entity, unless the options opt out of query filters.</summary>
+    private Expression<Func<TEntity, bool>>? GlobalFilter(QueryOptions<TEntity>? options) =>
+        options is { IgnoreQueryFilters: true } ? null : UnitOfWork.GlobalFilter<TEntity>();
 
     /// <summary>Builds <c>x =&gt; x.Key == id</c> over the configured key column, routed through the CQL translator.</summary>
     private Expression<Func<TEntity, bool>> IdPredicate(TKey id)

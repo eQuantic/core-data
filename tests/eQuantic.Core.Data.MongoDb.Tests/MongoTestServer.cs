@@ -67,7 +67,11 @@ public sealed class MongoTestServer
 
     /// <summary>Creates a fresh, isolated database wired through the provider's DI registrations.</summary>
     public static MongoTestDatabase NewDatabase(params Assembly[] migrationAssemblies) =>
-        new(Client, "test_" + Guid.NewGuid().ToString("N"), migrationAssemblies);
+        new(Client, "test_" + Guid.NewGuid().ToString("N"), migrationAssemblies, null);
+
+    /// <summary>Creates a fresh database with extra registrations (e.g. global query filters).</summary>
+    public static MongoTestDatabase NewDatabase(Action<IServiceCollection> configure) =>
+        new(Client, "test_" + Guid.NewGuid().ToString("N"), [], configure);
 }
 
 /// <summary>Base class that skips a test when the MongoDB container is unavailable, with shared helpers.</summary>
@@ -78,6 +82,9 @@ public abstract class MongoIntegrationTest
 
     protected static MongoTestDatabase NewDatabase(params Assembly[] migrationAssemblies) =>
         MongoTestServer.NewDatabase(migrationAssemblies);
+
+    protected static MongoTestDatabase NewDatabase(Action<IServiceCollection> configure) =>
+        MongoTestServer.NewDatabase(configure);
 
     protected static IAsyncRepository<Product, string> AsyncRepo(MongoTestDatabase db) =>
         db.Resolve<IAsyncRepository<Product, string>>();
@@ -99,7 +106,8 @@ public sealed class MongoTestDatabase : IDisposable
     private readonly ServiceProvider _provider;
     private readonly IServiceScope _scope;
 
-    public MongoTestDatabase(IMongoClient client, string databaseName, Assembly[] migrationAssemblies)
+    public MongoTestDatabase(IMongoClient client, string databaseName, Assembly[] migrationAssemblies,
+        Action<IServiceCollection>? configure = null)
     {
         Database = client.GetDatabase(databaseName);
 
@@ -111,6 +119,8 @@ public sealed class MongoTestDatabase : IDisposable
         {
             services.AddMongoMigrations(migrationAssemblies);
         }
+
+        configure?.Invoke(services);
 
         _provider = services.BuildServiceProvider();
         _scope = _provider.CreateScope();

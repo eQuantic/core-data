@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Linq.Expressions;
+using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using Microsoft.Azure.Cosmos;
@@ -34,6 +37,21 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     internal CosmosEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
 
     internal Container GetContainer<TEntity>() => Database.GetContainer(Configuration<TEntity>().ContainerName);
+
+    private QueryFilters? _queryFilters;
+    private bool _queryFiltersResolved;
+
+    /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
+    {
+        if (!_queryFiltersResolved)
+        {
+            _queryFilters = ServiceProvider.GetService(typeof(QueryFilters)) as QueryFilters;
+            _queryFiltersResolved = true;
+        }
+
+        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+    }
 
     // -------------------------------------------------------------- write staging (called by the repository/set)
 
@@ -105,6 +123,10 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         var writes = _pending.ToList();
         _pending.Clear();
 
+        using var activity = DataActivitySource.Instance.StartActivity("cosmosdb.commit", ActivityKind.Client);
+        activity?.SetTag("db.system", "cosmosdb");
+        activity?.SetTag("equantic.writes", writes.Count);
+
         await Task.WhenAll(writes.Select(write =>
             write.Execute(Database.GetContainer(write.ContainerName), cancellationToken))).ConfigureAwait(false);
 
@@ -155,6 +177,10 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
                 var writes = _pending.ToList();
                 _pending.Clear();
+
+                using var activity = DataActivitySource.Instance.StartActivity("cosmosdb.commit_transaction", ActivityKind.Client);
+                activity?.SetTag("db.system", "cosmosdb");
+                activity?.SetTag("equantic.writes", writes.Count);
 
                 var batch = Database.GetContainer(writes[0].ContainerName).CreateTransactionalBatch(writes[0].PartitionKey);
                 foreach (var write in writes)
