@@ -294,6 +294,42 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
     }
 
     [Test]
+    public async Task Or_across_partitions_splits_into_parallel_native_queries()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = ReadingRepo(db);
+        var cutoff = Utc(2);
+        await Seed(db,
+            NewReading(1, Utc(0)), NewReading(1, Utc(1)),
+            NewReading(2, Utc(1)), NewReading(2, Utc(3)),
+            NewReading(3, Utc(0)));
+
+        // No opt-ins: every branch is a native partition query, so the split is the cheap path.
+        var found = await repo.GetFilteredAsync(x => x.SensorId == 1 || (x.SensorId == 2 && x.At >= cutoff));
+
+        Assert.That(found.Select(x => (x.SensorId, x.At)), Is.EquivalentTo(new[]
+        {
+            (1, Utc(0)), (1, Utc(1)), (2, Utc(3)),
+        }));
+    }
+
+    [Test]
+    public async Task Or_split_deduplicates_overlapping_branches_and_counts_correctly()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = ReadingRepo(db);
+        var cutoff = Utc(1);
+        await Seed(db, NewReading(1, Utc(0)), NewReading(1, Utc(2)));
+
+        // Both branches match the Utc(2) row; the merge must de-duplicate it.
+        var options = new QueryOptions<Reading>().Where(x => x.SensorId == 1 || (x.SensorId == 1 && x.At >= cutoff));
+        var found = (await repo.GetAllAsync(options)).ToList();
+
+        Assert.That(found, Has.Count.EqualTo(2));
+        Assert.That(await repo.CountAsync(options), Is.EqualTo(2));
+    }
+
+    [Test]
     public async Task Count_applies_the_residual_filter()
     {
         using var db = await NewSchemaAsync();

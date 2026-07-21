@@ -52,8 +52,14 @@ public static class CassandraQueryOptionsExtensions
         options is not null && ClientEvaluationOptIns.TryGetValue(options, out _);
 }
 
+/// <summary>One branch of an OR-split query: its rendered <c>WHERE</c> fragment and bound values.</summary>
+/// <param name="Where">The branch's <c>WHERE</c> fragment (ANDed with the plan's common conjunction).</param>
+/// <param name="Values">The branch's bound values, in order.</param>
+internal sealed record CassandraCqlAlternative(string Where, object?[] Values);
+
 /// <summary>
 ///     The pushdown plan for one Cassandra read: the CQL <c>WHERE</c> conjunction the cluster executes, the
+///     OR branches that run as parallel single-partition queries (merged and de-duplicated client-side), the
 ///     residual conjuncts the library evaluates client-side, and the cost facts a caller (or a plan explain)
 ///     needs to reason about it.
 /// </summary>
@@ -61,12 +67,14 @@ public static class CassandraQueryOptionsExtensions
 /// <param name="Values">The bound values of the pushed clauses, in order.</param>
 /// <param name="RequiresAllowFiltering">Whether the pushed clauses need CQL <c>ALLOW FILTERING</c>.</param>
 /// <param name="Residual">The conjuncts CQL cannot express, to be evaluated client-side over the fetched rows.</param>
-/// <param name="PartitionScoped">Whether a pushed clause pins the partition (an equality/IN on a partition key).</param>
+/// <param name="Alternatives">The OR branches, each a native partition-pinned query (empty when there is no split).</param>
+/// <param name="PartitionScoped">Whether a pushed clause (or every OR branch) pins the partition.</param>
 internal sealed record CassandraCqlPlan(
     string Where,
     object?[] Values,
     bool RequiresAllowFiltering,
     IReadOnlyList<LambdaExpression> Residual,
+    IReadOnlyList<CassandraCqlAlternative> Alternatives,
     bool PartitionScoped)
 {
     /// <summary>Human-readable description of the residual conjunction (empty when fully pushed down).</summary>
@@ -89,6 +97,7 @@ internal static class CassandraCql
         var clauses = new List<string>();
         var values = new List<object?>();
         var residual = new List<LambdaExpression>();
+        var alternatives = new List<CassandraCqlAlternative>();
         var requiresFiltering = false;
         var partitionScoped = false;
 
@@ -118,6 +127,12 @@ internal static class CassandraCql
                         partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
                     }
                 }
+                else if (alternatives.Count == 0 && TryOrSplit(configuration, conjunct, alternatives))
+                {
+                    // An OR whose every branch is native and partition-pinned runs as parallel split queries
+                    // ("one query per access path"), merged and de-duplicated client-side. One split per query.
+                    partitionScoped = true;
+                }
                 else
                 {
                     // CQL cannot express it (OR across columns, !=, NULL, …): the refusal becomes residual work.
@@ -126,7 +141,50 @@ internal static class CassandraCql
             }
         }
 
-        return new CassandraCqlPlan(string.Join(" AND ", clauses), values.ToArray(), requiresFiltering, residual, partitionScoped);
+        return new CassandraCqlPlan(string.Join(" AND ", clauses), values.ToArray(), requiresFiltering, residual, alternatives, partitionScoped);
+    }
+
+    /// <summary>
+    ///     Attempts to split an OR conjunct into native branches: every disjunct must render (no
+    ///     <c>ALLOW FILTERING</c>) and pin the partition — otherwise the split would multiply scans instead of
+    ///     multiplying cheap point paths, and the conjunct stays residual.
+    /// </summary>
+    private static bool TryOrSplit<TEntity>(CassandraEntityConfiguration configuration,
+        Expression<Func<TEntity, bool>> conjunct, List<CassandraCqlAlternative> alternatives)
+        where TEntity : class
+    {
+        var branches = PredicateDisjunctions.Split(conjunct);
+        if (branches.Count < 2)
+        {
+            return false;
+        }
+
+        var rendered = new List<CassandraCqlAlternative>(branches.Count);
+        foreach (var branch in branches)
+        {
+            QueryFilter interpreted;
+            try
+            {
+                interpreted = FilterInterpreter.Interpret(branch);
+            }
+            catch (NotSupportedException)
+            {
+                return false;
+            }
+
+            if (!CassandraCqlRenderer.TryRender(configuration, interpreted, out var cql)
+                || cql.Cql.Length == 0
+                || cql.RequiresAllowFiltering
+                || !CassandraCqlRenderer.PinsPartition(configuration, interpreted))
+            {
+                return false;
+            }
+
+            rendered.Add(new CassandraCqlAlternative(cql.Cql, cql.Values));
+        }
+
+        alternatives.AddRange(rendered);
+        return true;
     }
 
     /// <summary>

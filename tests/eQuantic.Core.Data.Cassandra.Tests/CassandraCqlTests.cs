@@ -118,6 +118,29 @@ public sealed class CassandraCqlTests
     }
 
     [Test]
+    public void Plan_splits_a_partition_pinned_or_into_native_alternatives()
+    {
+        var date = new DateTime(2026, 1, 1);
+        var plan = CassandraCql.Plan<OrderData>(Config(), null,
+            x => x.TenantId == 1 || (x.TenantId == 2 && x.CreatedAt >= date));
+
+        Assert.That(plan.Alternatives, Has.Count.EqualTo(2));
+        Assert.That(plan.Alternatives[0].Where, Is.EqualTo("TenantId = ?"));
+        Assert.That(plan.Alternatives[1].Where, Is.EqualTo("TenantId = ? AND CreatedAt >= ?"));
+        Assert.That(plan.Residual, Is.Empty);
+        Assert.That(plan.PartitionScoped, Is.True);
+    }
+
+    [Test]
+    public void Plan_keeps_an_unpinned_or_as_residual()
+    {
+        var plan = CassandraCql.Plan<OrderData>(Config(), null, x => x.Total > 1m || x.IsPaid);
+
+        Assert.That(plan.Alternatives, Is.Empty);
+        Assert.That(plan.Residual, Has.Count.EqualTo(1));
+    }
+
+    [Test]
     public void Plan_folds_an_inline_constructed_value_into_the_pushdown()
     {
         // `new DateTime(...)` inline stays structural in the node model; the interpreter evaluates the

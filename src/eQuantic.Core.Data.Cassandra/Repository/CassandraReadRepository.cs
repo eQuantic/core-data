@@ -105,7 +105,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     {
         var plan = GatedPlan(options, null);
 
-        if (plan.Residual.Count == 0)
+        if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
         {
             var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}"
                       + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
@@ -114,23 +114,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             return rows.First().GetValue<long>(0);
         }
 
-        // Residual: fetch only the columns the residual reads and count the rows that pass it client-side.
-        var residuals = Compile(plan.Residual);
-        var selected = SelectedColumns([], plan);
-        var projected = await CassandraStatements
-            .ExecuteAsync(Session, SelectCql(selected, plan, null, pushLimit: false), plan.Values).ConfigureAwait(false);
-
-        long count = 0;
-        foreach (var row in projected)
-        {
-            var entity = CassandraMapper.Materialize<TEntity>(_configuration, row, selected);
-            if (residuals.All(residual => residual(entity)))
-            {
-                count++;
-            }
-        }
-
-        return count;
+        // Residual/split: fetch only the needed columns, de-duplicate and filter client-side, and count.
+        return (await SelectAsync(options, null, cancellationToken, null, []).ConfigureAwait(false)).Count;
     }
 
     /// <inheritdoc />
@@ -193,10 +178,17 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         var plan = GatedPlan(options, null);
+        if (plan.Alternatives.Count > 0)
+        {
+            throw new NotSupportedException(
+                "Token paging cannot span an OR-split query (there is one paging state per statement); page each branch separately or restructure the filter.");
+        }
+
         var residuals = Compile(plan.Residual);
 
         // The driver walks its native paging: one page per call, resumed by the (opaque) paging state.
-        var bound = await CassandraStatements.BindAsync(Session, SelectCql(null, plan, options, pushLimit: false), plan.Values).ConfigureAwait(false);
+        var bound = await CassandraStatements.BindAsync(Session,
+            SelectCql(null, plan.Where, plan.RequiresAllowFiltering, options, pushLimit: false), plan.Values).ConfigureAwait(false);
         bound.SetPageSize(pageSize);
         bound.SetAutoPage(false);
         if (continuationToken is not null)
@@ -263,6 +255,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             }
 
             notes.Add("Rows are fetched without a CQL LIMIT and filtered client-side; LIMIT/Take applies after the residual.");
+        }
+
+        if (plan.Alternatives.Count > 0)
+        {
+            notes.Add($"Runs as {plan.Alternatives.Count} parallel single-partition queries (OR branches: "
+                      + string.Join(" | ", plan.Alternatives.Select(alternative => alternative.Where))
+                      + "), merged and de-duplicated by primary key client-side.");
         }
 
         notes.Add("The statement is prepared once per session and bound on every execution.");
@@ -351,9 +350,14 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var residuals = Compile(plan.Residual);
         var selected = SelectedColumns(mapColumns, plan);
 
+        if (plan.Alternatives.Count > 0)
+        {
+            return await SelectSplitAsync(plan, residuals, selected, options, limit).ConfigureAwait(false);
+        }
+
         // A CQL LIMIT would cut rows before the residual filter sees them, so it only pushes when nothing is residual.
         var pushLimit = limit.HasValue && residuals.Count == 0;
-        var cql = SelectCql(selected, plan, options, pushLimit);
+        var cql = SelectCql(selected, plan.Where, plan.RequiresAllowFiltering, options, pushLimit);
         var values = pushLimit ? [.. plan.Values, limit!.Value] : plan.Values;
 
         var rows = await CassandraStatements.ExecuteAsync(Session, cql, values).ConfigureAwait(false);
@@ -366,6 +370,48 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         if (limit is { } take && !pushLimit)
+        {
+            entities = entities.Take(take);
+        }
+
+        return entities.ToList();
+    }
+
+    /// <summary>
+    ///     Executes an OR-split plan: one native partition query per branch, in parallel, merged and
+    ///     de-duplicated by primary key. A per-branch LIMIT keeps the global top-N correct (every merged top-N
+    ///     row is inside some branch's top-N); the merge re-applies order and limit client-side.
+    /// </summary>
+    private async Task<List<TEntity>> SelectSplitAsync(CassandraCqlPlan plan, List<Func<TEntity, bool>> residuals,
+        HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit)
+    {
+        var pushLimit = limit.HasValue && residuals.Count == 0;
+        var executions = plan.Alternatives.Select(alternative =>
+        {
+            var where = plan.Where.Length > 0 ? $"{plan.Where} AND {alternative.Where}" : alternative.Where;
+            object?[] values = pushLimit
+                ? [.. plan.Values, .. alternative.Values, limit!.Value]
+                : [.. plan.Values, .. alternative.Values];
+            return CassandraStatements.ExecuteAsync(Session,
+                SelectCql(selected, where, plan.RequiresAllowFiltering, options, pushLimit), values);
+        }).ToList();
+
+        var rowSets = await Task.WhenAll(executions).ConfigureAwait(false);
+
+        IEnumerable<TEntity> entities = rowSets.SelectMany(rows =>
+            rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row, selected)));
+        entities = DistinctByPrimaryKey(entities);
+        if (residuals.Count > 0)
+        {
+            entities = entities.Where(entity => residuals.All(residual => residual(entity)));
+        }
+
+        if (options?.Sortings is { Count: > 0 } sortings)
+        {
+            entities = ClientSort(entities, sortings);
+        }
+
+        if (limit is { } take)
         {
             entities = entities.Take(take);
         }
@@ -409,16 +455,16 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         return plan;
     }
 
-    private string SelectCql(IReadOnlySet<string>? selected, CassandraCqlPlan plan, QueryOptions<TEntity>? options, bool pushLimit)
+    private string SelectCql(IReadOnlySet<string>? selected, string where, bool allowFiltering, QueryOptions<TEntity>? options, bool pushLimit)
     {
         var columns = selected is null
             ? "*"
             : string.Join(", ", _configuration.Columns.Where(column => selected.Contains(column.Name)).Select(column => column.Name));
 
         var cql = $"SELECT {columns} FROM {_configuration.TableName}";
-        if (plan.Where.Length > 0)
+        if (where.Length > 0)
         {
-            cql += $" WHERE {plan.Where}";
+            cql += $" WHERE {where}";
         }
 
         cql += OrderBy(options);
@@ -427,7 +473,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             cql += " LIMIT ?";
         }
 
-        if (plan.RequiresAllowFiltering)
+        if (allowFiltering)
         {
             cql += " ALLOW FILTERING";
         }
@@ -444,6 +490,12 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         var selected = new HashSet<string>(mapColumns, StringComparer.OrdinalIgnoreCase);
+        if (plan.Alternatives.Count > 0)
+        {
+            // The split merge de-duplicates by primary key, so a projected read must fetch the key columns too.
+            selected.UnionWith(CassandraMapper.PrimaryKey(_configuration));
+        }
+
         if (plan.Residual.Count > 0)
         {
             var residualColumns = ColumnsOf(plan.Residual);
@@ -463,6 +515,44 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         return selected;
     }
 
+    /// <summary>Filters out duplicate rows across OR-split branches by their primary key values.</summary>
+    private IEnumerable<TEntity> DistinctByPrimaryKey(IEnumerable<TEntity> entities)
+    {
+        var properties = CassandraMapper.PrimaryKey(_configuration)
+            .Select(column => typeof(TEntity).GetProperty(column,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase))
+            .Where(property => property is not null)
+            .ToArray();
+
+        var seen = new HashSet<string>();
+        foreach (var entity in entities)
+        {
+            if (seen.Add(string.Join("\u0001", properties.Select(property => property!.GetValue(entity)))))
+            {
+                yield return entity;
+            }
+        }
+    }
+
+    /// <summary>Re-applies the requested ordering over a merged result set (each branch arrives ordered on its own).</summary>
+    private static IEnumerable<TEntity> ClientSort(IEnumerable<TEntity> entities, IReadOnlyList<QuerySort<TEntity>> sortings)
+    {
+        IOrderedEnumerable<TEntity>? ordered = null;
+        foreach (var sort in sortings)
+        {
+            var key = Boxed(sort.KeySelector);
+            ordered = ordered is null
+                ? sort.Direction == SortDirection.Descending ? entities.OrderByDescending(key) : entities.OrderBy(key)
+                : sort.Direction == SortDirection.Descending ? ordered.ThenByDescending(key) : ordered.ThenBy(key);
+        }
+
+        return ordered ?? entities;
+    }
+
+    private static Func<TEntity, object?> Boxed(LambdaExpression keySelector) =>
+        Expression.Lambda<Func<TEntity, object?>>(
+            Expression.Convert(keySelector.Body, typeof(object)), keySelector.Parameters).Compile();
+
     private async Task<TSum> SumCoreAsync<TSum>(LambdaExpression selector, QueryOptions<TEntity>? options,
         CancellationToken cancellationToken, Func<List<TEntity>, TSum> clientSum)
     {
@@ -470,7 +560,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         if (column is not null)
         {
             var plan = GatedPlan(options, null);
-            if (plan.Residual.Count == 0)
+            if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
             {
                 var cql = $"SELECT SUM({column}) FROM {_configuration.TableName}"
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
