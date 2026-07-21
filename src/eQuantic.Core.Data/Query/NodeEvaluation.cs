@@ -43,7 +43,9 @@ internal static class NodeEvaluation
 
         try
         {
-            value = Expression.Lambda(Serializer.ToExpression(node)).Compile().DynamicInvoke();
+            // The value is evaluated exactly once per translation, so interpretation beats paying the JIT:
+            // Compile(preferInterpretation: true) skips codegen entirely for these one-shot lambdas.
+            value = Expression.Lambda(Serializer.ToExpression(node)).Compile(preferInterpretation: true).DynamicInvoke();
             return true;
         }
         catch
