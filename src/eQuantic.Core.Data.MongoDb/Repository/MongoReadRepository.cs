@@ -291,7 +291,9 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     /// <returns>The shaped query.</returns>
     protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
     {
-        var query = Collection.AsQueryable().ApplyQueryOptions(options);
+        // Reads join the active transaction session, so a query inside a transaction sees its own writes.
+        var session = UnitOfWork.Session;
+        var query = (session is null ? Collection.AsQueryable() : Collection.AsQueryable(session)).ApplyQueryOptions(options);
         if (extra is not null)
         {
             query = extra(query);

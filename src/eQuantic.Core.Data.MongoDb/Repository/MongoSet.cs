@@ -17,31 +17,43 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
 {
     private readonly MongoUnitOfWork _unitOfWork;
     private readonly IMongoCollection<TEntity> _collection;
-    private readonly IQueryable<TEntity> _queryable;
 
     internal MongoSet(MongoUnitOfWork unitOfWork, IMongoCollection<TEntity> collection)
     {
         _unitOfWork = unitOfWork;
         _collection = collection;
-        _queryable = collection.AsQueryable();
     }
 
+    // Reads join the active transaction session, so a query inside a transaction sees its own writes.
+    private IQueryable<TEntity> Queryable =>
+        _unitOfWork.Session is { } session ? _collection.AsQueryable(session) : _collection.AsQueryable();
+
     // ---------------------------------------------------------------- IQueryable
-    public Type ElementType => _queryable.ElementType;
-    public Expression Expression => _queryable.Expression;
-    public IQueryProvider Provider => _queryable.Provider;
-    public IEnumerator<TEntity> GetEnumerator() => _queryable.GetEnumerator();
-    IEnumerator IEnumerable.GetEnumerator() => _queryable.GetEnumerator();
+    public Type ElementType => Queryable.ElementType;
+    public Expression Expression => Queryable.Expression;
+    public IQueryProvider Provider => Queryable.Provider;
+    public IEnumerator<TEntity> GetEnumerator() => Queryable.GetEnumerator();
+    IEnumerator IEnumerable.GetEnumerator() => Queryable.GetEnumerator();
 
     // ---------------------------------------------------------------- reads
-    public IEnumerable<TEntity> Execute() => _queryable.ToList();
+    public IEnumerable<TEntity> Execute() => Queryable.ToList();
 
-    public TEntity? Find<TKey>(TKey key) =>
-        _collection.Find(Builders<TEntity>.Filter.Eq("_id", key)).FirstOrDefault();
+    public TEntity? Find<TKey>(TKey key)
+    {
+        var filter = Builders<TEntity>.Filter.Eq("_id", key);
+        var session = _unitOfWork.Session;
+        return (session is null ? _collection.Find(filter) : _collection.Find(session, filter)).FirstOrDefault();
+    }
 
-    public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default) =>
-        await (await _collection.FindAsync(Builders<TEntity>.Filter.Eq("_id", key), cancellationToken: cancellationToken)
-            .ConfigureAwait(false)).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
+    {
+        var filter = Builders<TEntity>.Filter.Eq("_id", key);
+        var session = _unitOfWork.Session;
+        var cursor = session is null
+            ? await _collection.FindAsync(filter, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await _collection.FindAsync(session, filter, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return await cursor.FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     // ---------------------------------------------------------------- entity writes (staged → commit)
     public void Insert(TEntity item) => _unitOfWork.StageInsert(item);

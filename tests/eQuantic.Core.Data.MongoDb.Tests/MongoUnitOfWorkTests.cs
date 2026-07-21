@@ -92,6 +92,24 @@ public sealed class MongoUnitOfWorkTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task Reads_inside_a_transaction_see_its_writes_and_rollback_hides_them()
+    {
+        using var db = NewDatabase();
+        var uow = Uow(db);
+        var repo = AsyncRepo(db);
+        var product = Product.New("Tx", "X", 1, 1m);
+
+        await uow.BeginTransactionAsync();
+        await repo.AddAsync(product);
+        await uow.CommitAsync();
+
+        Assert.That(await repo.GetAsync(product.Id), Is.Not.Null, "the session-bound read sees the transactional write");
+
+        await uow.RollbackTransactionAsync();
+        Assert.That(await repo.GetAsync(product.Id), Is.Null, "the abort discarded it");
+    }
+
+    [Test]
     public async Task Transaction_rollback_discards_the_flushed_writes()
     {
         using var db = NewDatabase();
