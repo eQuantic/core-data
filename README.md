@@ -181,6 +181,8 @@ Targets `net8.0` and `net10.0`. Depends only on the framework-free
 
 ## Learn more
 
+- [Upgrading to v5.6](docs/UPGRADING-5.6.md) — the behaviour corrections in 5.6.0 and what they
+  mean for code written against 5.4/5.5.
 - [Repository Pattern walkthrough](Repository.md) — a full example: data entities, unit of work,
   repository, specifications and domain services.
 - [v5 contracts design](docs/CONTRACTS_V5_DESIGN.md) — the rationale, the consolidated interface and
