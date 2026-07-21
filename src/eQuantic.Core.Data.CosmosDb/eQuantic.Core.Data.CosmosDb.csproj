@@ -28,7 +28,7 @@
     <ItemGroup>
         <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.46.0" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-        <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.0" />
+        <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     </ItemGroup>
 
