@@ -51,8 +51,20 @@ public sealed class CosmosTestServer
 
             var services = new ServiceCollection();
             services.AddSingleton(_client);
+
+            // A per-request tenant read by the global-filter factory: tests that set it get scoped reads/writes,
+            // tests that don't are untouched (the factory returns null).
+            services.AddScoped<TenantBox>();
+            services.AddSingleton(new QueryFilters().For<CosmosProduct>(scope =>
+                scope.GetService(typeof(TenantBox)) is TenantBox { Category: { } category }
+                    ? product => product.Category == category
+                    : null));
+
             services.AddCosmosDatabase("emulator", DatabaseName, model =>
-                model.Entity<CosmosProduct>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category)));
+                model.Entity<CosmosProduct>(entity => entity
+                    .Container(ContainerName)
+                    .PartitionKey(x => x.Category)
+                    .ConcurrencyToken(x => x.ETag)));
             services.AddCosmosRepositories();
             services.AddCosmosMigrations(typeof(CosmosProductsSetupMigration).Assembly);
             _provider = services.BuildServiceProvider();
@@ -84,6 +96,13 @@ public sealed class CosmosTestServer
     }
 }
 
+/// <summary>The per-scope tenant the global-filter factory reads; unset (null) applies no filter.</summary>
+public sealed class TenantBox
+{
+    /// <summary>The tenant's partition value, or <c>null</c> for no scoping.</summary>
+    public string? Category { get; set; }
+}
+
 /// <summary>
 ///     Base for the Cosmos integration tests: skips when the emulator is unavailable, opens a fresh DI scope per
 ///     test, and hands each test a unique partition value (<see cref="Partition" />) so they share one container
@@ -112,6 +131,9 @@ public abstract class CosmosIntegrationTest
         Partition = "p" + Guid.NewGuid().ToString("N");
         _scope = CosmosTestServer.Provider.CreateScope();
     }
+
+    /// <summary>Resolves a service from this test's scope.</summary>
+    protected T Resolve<T>() where T : notnull => _scope.ServiceProvider.GetRequiredService<T>();
 
     [TearDown]
     public void TearDown() => _scope?.Dispose();
