@@ -103,13 +103,14 @@ This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`,
 `IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
 implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
 
-## Native document-store provider (MongoDB)
+## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra
 
-`eQuantic.Core.Data.MongoDb` implements the same contracts **directly on the MongoDB driver — no
-Entity Framework**. The write model is lean: `Add`/`Modify`/`Remove` buffer typed write models and a
-single ordered bulk write runs on `Commit` (no change tracking or snapshotting); explicit multi-document
-transactions are opt-in. It also brings what EF's document support cannot — **fluent, typed migrations**
-for a document store, authored with member selectors instead of field strings:
+The same contracts implemented **directly on each official driver — no Entity Framework** — with a
+lean write model: `Add`/`Modify`/`Remove` buffer typed writes and one native batch runs on `Commit`
+(no change tracking or snapshotting). Explicit transactions are opt-in: multi-document sessions on
+MongoDB (reads inside the transaction see its writes), a single-partition `TransactionalBatch` on
+Cosmos, an atomic `LOGGED BATCH` on Cassandra. All three ship the same **fluent, typed migrations**,
+authored with member selectors instead of field strings:
 
 ```csharp
 services.AddMongoRepositories("mongodb://localhost:27017", "shop");
@@ -129,8 +130,35 @@ public sealed class AddProductIndexes : Migration
 await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 ```
 
-Targets `net10.0`. Set-based `UpdateMany(filter, x => new Product { Status = "Closed" })` translates the
-member-init to a `$set`, honouring `[BsonElement]`/`[BsonRepresentation]` and custom serializers.
+### The engine — what the providers add on top of the drivers
+
+- **Pushdown + residual filtering (Cassandra)** — every clause CQL can express runs on the cluster;
+  the ones it cannot (`OR` across columns, `!=`, `NULL`, arbitrary predicates) run client-side over
+  the fetched rows behind the explicit `.AllowClientEvaluation()` opt-in, with `.AllowFiltering()`
+  gating scans. An `OR` whose branches each pin a partition needs no opt-in at all: it runs as
+  **parallel native queries**, merged and de-duplicated by primary key.
+- **`Explain()` on every provider** (`IExplainableRepository<T>`) — the native statement (CQL,
+  Cosmos SQL, aggregation pipeline), what is pushed down versus evaluated client-side, partition
+  scoping, and the opt-ins a query still needs. Builds the plan without executing anything.
+- **Computed set-based updates** — `UpdateMany(filter, x => new E { N = x.N + 1, Tags = x.Tags.Append("vip").ToList() })`
+  renders to the store's atomic form: `$inc`/`$mul`/`$push`/`$addToSet`/`$pullAll` on MongoDB
+  (honouring `[BsonElement]` and custom serializers), `PatchOperation.Increment`/`Add` on Cosmos,
+  collection `col = col + ?` and **counter columns** on Cassandra. Shapes a store cannot apply
+  atomically are rejected with the reason — an update never silently degrades to read-modify-write.
+- **Continuation paging and streaming** (`IContinuationReadRepository<T>`,
+  `IStreamingReadRepository<T>`) — deep pages walk the native path (Cassandra `PagingState`, Cosmos
+  continuation tokens, MongoDB keyset by id), every page costing the same as the first, and
+  `IAsyncEnumerable<T>` streams hold one page in memory at a time.
+- **Partition-key inference and ETag concurrency (Cosmos)** — a filter that pins the partition key
+  scopes the query to a single partition automatically (the biggest RU saving there is), and
+  `ConcurrencyToken(x => x.ETag)` turns `Modify` into a conditional `If-Match` replace.
+- **Prepared statements and LWT (Cassandra)** — every repeated CQL text is prepared once per
+  session and bound thereafter; `AddIfNotExistsAsync` runs `INSERT … IF NOT EXISTS` and reports
+  whether it applied.
+
+The rule behind all of it: **a query never lies about its cost.** Anything beyond the store's
+native access path is explicit and opt-in, and `Explain()` shows exactly what will run. Providers
+target `net10.0`.
 
 ## Install
 
