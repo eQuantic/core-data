@@ -1,5 +1,20 @@
 # Changelog
 
+## [5.6.0](https://github.com/eQuantic/core-data/compare/v5.5.0...v5.6.0) (2026-07-21)
+
+### Features
+
+* **cassandra:** counter columns and IF NOT EXISTS lightweight transactions ([f456c5e](https://github.com/eQuantic/core-data/commit/f456c5e72761f436546f6614c2e40ce715458087))
+* **cassandra:** OR-split — partition-pinned OR branches run as parallel native queries ([e705fd6](https://github.com/eQuantic/core-data/commit/e705fd610b02657a7fef7507af11882aa441dc07))
+* **core,cassandra,cosmosdb:** continuation-token paging over the native paths ([7b51e20](https://github.com/eQuantic/core-data/commit/7b51e208474b0da9c74a3595ba92ffef68b212d0))
+* **core,providers:** global query filters, OpenTelemetry activities, per-operation consistency/TTL ([e99509a](https://github.com/eQuantic/core-data/commit/e99509aa0e0fa65fa630d221bb2710341bddd71d))
+* **core,providers:** pushdown+residual engine, Explain, prepared statements ([8541a0b](https://github.com/eQuantic/core-data/commit/8541a0b6916eb04d5777f372ef006e40d337bca1))
+* **core:** evaluate parameter-free filter operands at translation time ([1d09d11](https://github.com/eQuantic/core-data/commit/1d09d11600dfb76a4c7ef96a77b0cbdc7bff9286))
+* **cosmosdb:** optimistic concurrency through the document ETag ([5555dfd](https://github.com/eQuantic/core-data/commit/5555dfd61c6b71cf0cbe2abd2f74af465aa6bda5))
+* **mongodb:** reads join the active transaction session ([cde1957](https://github.com/eQuantic/core-data/commit/cde19576d5f0d29ae65162b48a71365f0302862c))
+* **providers:** computed set-based updates via a shared update IR ([6b59be1](https://github.com/eQuantic/core-data/commit/6b59be1eeb35b9e5a155cbaec3f0d5e190094ca3))
+* **providers:** IAsyncEnumerable streaming + MongoDB keyset continuation paging ([39faf6b](https://github.com/eQuantic/core-data/commit/39faf6b2f11dba6e41c8d09c1824d0de454cca98))
+
 ## [5.5.0](https://github.com/eQuantic/core-data/compare/v5.4.0...v5.5.0) (2026-07-21)
 
 ### Features
