@@ -139,4 +139,27 @@ public sealed class FilterInterpreterTests
         var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.TenantId == tenant);
         Assert.That(filter.Value, Is.EqualTo(7));
     }
+
+    [Test]
+    public void Inline_constructed_value_is_evaluated_at_translation_time()
+    {
+        var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.CreatedAt >= new DateTime(2026, 1, 1));
+
+        Assert.That(filter.Member, Is.EqualTo("CreatedAt"));
+        Assert.That(filter.Value, Is.EqualTo(new DateTime(2026, 1, 1)));
+    }
+
+    [Test]
+    public void Static_member_value_is_evaluated_at_translation_time()
+    {
+        var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.Name == string.Empty);
+        Assert.That(filter.Value, Is.EqualTo(""));
+    }
+
+    [Test]
+    public void Parameter_referencing_operand_stays_unsupported()
+    {
+        Assert.That(() => FilterInterpreter.Interpret<Sample>(x => x.TenantId == x.Name.Length),
+            Throws.TypeOf<NotSupportedException>());
+    }
 }

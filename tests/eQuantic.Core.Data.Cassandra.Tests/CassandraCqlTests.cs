@@ -118,14 +118,14 @@ public sealed class CassandraCqlTests
     }
 
     [Test]
-    public void Plan_keeps_an_inline_constructed_value_as_residual_instead_of_rejecting()
+    public void Plan_folds_an_inline_constructed_value_into_the_pushdown()
     {
-        // `new DateTime(...)` inline stays structural in the node model (not a folded constant), so the strict
-        // path used to reject it; the engine now degrades it to a client-side conjunct behind the opt-in.
+        // `new DateTime(...)` inline stays structural in the node model; the interpreter evaluates the
+        // parameter-free subtree at translation time, so the clause pushes down like a captured variable.
         var plan = CassandraCql.Plan<OrderData>(Config(), null, x => x.TenantId == 5 && x.CreatedAt >= new DateTime(2026, 1, 1));
 
-        Assert.That(plan.Where, Is.EqualTo("TenantId = ?"));
-        Assert.That(plan.Residual, Has.Count.EqualTo(1));
-        Assert.That(plan.PartitionScoped, Is.True);
+        Assert.That(plan.Where, Is.EqualTo("TenantId = ? AND CreatedAt >= ?"));
+        Assert.That(plan.Values, Is.EqualTo(new object?[] { 5, new DateTime(2026, 1, 1) }));
+        Assert.That(plan.Residual, Is.Empty);
     }
 }

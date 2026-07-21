@@ -188,19 +188,38 @@ public static class FilterInterpreter
         return string.Join(".", parts);
     }
 
-    /// <summary>The value of a folded constant node (the node model has already partial-evaluated it).</summary>
-    private static object? Value(ExpressionNode node) => Unwrap(node) switch
+    /// <summary>
+    ///     The value of a constant operand. Captured variables arrive already folded by the partial evaluator; a
+    ///     parameter-free subtree it kept structural (an inline <c>new DateTime(...)</c>, <c>Guid.Parse(...)</c>,
+    ///     <c>DateTime.UtcNow</c>, …) is rebuilt and evaluated here — the same folding LINQ providers apply at
+    ///     translation time. A subtree still referencing the lambda parameter cannot compile as a value and stays
+    ///     unsupported.
+    /// </summary>
+    private static object? Value(ExpressionNode node)
     {
-        ConstantNode constant => constant.Value,
-        _ => throw new NotSupportedException("Each filter clause must compare a member to a constant value."),
-    };
+        node = Unwrap(node);
+        if (node is ConstantNode constant)
+        {
+            return constant.Value;
+        }
 
-    /// <summary>The elements of a constant collection (a folded array/list, or an inline array that stayed structural).</summary>
+        try
+        {
+            return Expression.Lambda(Serializer.ToExpression(node)).Compile().DynamicInvoke();
+        }
+        catch (Exception exception) when (exception is not NotSupportedException)
+        {
+            throw new NotSupportedException("Each filter clause must compare a member to a constant value.", exception);
+        }
+    }
+
+    /// <summary>The elements of a constant collection (folded, inline-structural, or evaluated parameter-free).</summary>
     private static IReadOnlyList<object?> Values(ExpressionNode node) => Unwrap(node) switch
     {
         ConstantNode constant when constant.Value is IEnumerable sequence and not string =>
             sequence.Cast<object?>().ToList(),
         NewArrayNode { Expressions: { } elements } => elements.Select(Value).ToList(),
+        var other when Value(other) is IEnumerable sequence and not string => sequence.Cast<object?>().ToList(),
         _ => throw new NotSupportedException("An IN clause requires a constant collection of values."),
     };
 
