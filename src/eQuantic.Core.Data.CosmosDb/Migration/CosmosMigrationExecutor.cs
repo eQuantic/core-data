@@ -81,10 +81,28 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
     private async Task EnsureContainerAsync(EnsureCollectionOperation operation, CancellationToken cancellationToken)
     {
         var configuration = _model.For(operation.EntityType);
-        var properties = new ContainerProperties(configuration.ContainerName, configuration.PartitionKeyPath);
+        var properties = configuration.HasHierarchicalPartitionKey
+            ? new ContainerProperties(configuration.ContainerName, (IReadOnlyList<string>)configuration.PartitionKeyPaths.ToList())
+            : new ContainerProperties(configuration.ContainerName, configuration.PartitionKeyPaths[0]);
         if (configuration.DefaultTimeToLiveSeconds is { } ttl)
         {
             properties.DefaultTimeToLive = ttl;
+        }
+
+        // The model's ordered-read declaration (two or more paths) lands as a composite index on the policy.
+        if (configuration.ClusteringPaths.Count > 1)
+        {
+            var composite = new Collection<CompositePath>();
+            foreach (var (path, descending) in configuration.ClusteringPaths)
+            {
+                composite.Add(new CompositePath
+                {
+                    Path = path,
+                    Order = descending ? CompositePathSortOrder.Descending : CompositePathSortOrder.Ascending,
+                });
+            }
+
+            properties.IndexingPolicy.CompositeIndexes.Add(composite);
         }
 
         await _database.CreateContainerIfNotExistsAsync(properties, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -145,7 +163,7 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
         var configuration = _model.For(operation.EntityType);
         var container = _database.GetContainer(configuration.ContainerName);
         var field = FieldElement(operation.Field);
-        var partitionField = configuration.PartitionKeyPath.TrimStart('/');
+        var partitionField = FlatPartitionField(configuration);
 
         var query = new QueryDefinition(
             $"SELECT c[\"id\"], c[\"{partitionField}\"], c[\"{field}\"] FROM c WHERE {TypeCheck(operation.From)}(c[\"{field}\"])");
@@ -163,7 +181,7 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
         var configuration = _model.For(operation.EntityType);
         var container = _database.GetContainer(configuration.ContainerName);
         var field = FieldElement(operation.Field);
-        var partitionField = configuration.PartitionKeyPath.TrimStart('/');
+        var partitionField = FlatPartitionField(configuration);
 
         var query = new QueryDefinition(
             $"SELECT c[\"id\"], c[\"{partitionField}\"] FROM c WHERE IS_DEFINED(c[\"{field}\"])");
@@ -211,6 +229,17 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
             }
         }
     }
+
+    /// <summary>
+    ///     The flat partition-key field the per-document data operations read back. A hierarchical key has no
+    ///     single field to read — those migrations rewrite documents through <c>Run(...)</c> instead.
+    /// </summary>
+    private static string FlatPartitionField(CosmosEntityConfiguration configuration) =>
+        configuration.HasHierarchicalPartitionKey
+            ? throw new NotSupportedException(
+                $"'{configuration.EntityType.Name}' declares a hierarchical partition key; this per-document migration " +
+                "cannot address items through a single field — rewrite the documents with a Run(...) step.")
+            : configuration.PartitionKeyPaths[0].TrimStart('/');
 
     private static string FieldPath(LambdaExpression selector) =>
         "/" + string.Join("/", CosmosNaming.StoredPath(selector));

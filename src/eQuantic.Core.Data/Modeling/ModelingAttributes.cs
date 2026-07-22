@@ -51,8 +51,9 @@ public sealed class UnmappedAttribute : Attribute;
 
 /// <summary>
 ///     Declares the member part of the <b>partition key</b> — the access-pattern declaration: Cassandra's
-///     partition key (compose with <see cref="Order" />), Cosmos DB's partition key path. Relational stores and
-///     MongoDB have no partition concept and ignore it.
+///     partition key and Cosmos DB's partition key path (compose with <see cref="Order" /> — Cosmos builds a
+///     hierarchical, multi-hash key from up to three members). Relational stores and MongoDB have no partition
+///     concept and ignore it.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class PartitionKeyAttribute : Attribute
@@ -61,7 +62,13 @@ public sealed class PartitionKeyAttribute : Attribute
     public int Order { get; set; }
 }
 
-/// <summary>Declares a Cassandra clustering key member (ordered within the partition).</summary>
+/// <summary>
+///     Declares an ordered-read member — "I read this sorted, within the key" — and each store materializes the
+///     declaration as well as it can: Cassandra as a real clustering key (rows physically ordered in the
+///     partition), relational stores and MongoDB as a multi-column index with the declared directions, Cosmos DB
+///     as a composite index on the container's policy (two or more members). The semantics of queries never
+///     change; only the plan does.
+/// </summary>
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class ClusteringKeyAttribute : Attribute
 {
@@ -70,6 +77,24 @@ public sealed class ClusteringKeyAttribute : Attribute
 
     /// <summary>Whether the clustering order is descending.</summary>
     public bool Descending { get; set; }
+}
+
+/// <summary>
+///     Declares storage facets for a member — a maximum <see cref="Length" /> for text, a
+///     <see cref="Precision" />/<see cref="Scale" /> for decimals. Relational DDL sizes the column with them
+///     (<c>varchar(n)</c>, <c>numeric(p,s)</c>); stores without sized types ignore them.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class FacetAttribute : Attribute
+{
+    /// <summary>The maximum text length (0 = the store's default, usually unbounded).</summary>
+    public int Length { get; set; }
+
+    /// <summary>The total number of significant digits (0 = the store's default).</summary>
+    public int Precision { get; set; }
+
+    /// <summary>The number of digits after the decimal point.</summary>
+    public int Scale { get; set; }
 }
 
 /// <summary>

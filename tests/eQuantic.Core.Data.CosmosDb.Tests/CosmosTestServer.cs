@@ -106,7 +106,9 @@ public sealed class CosmosTestServer
             .ConcurrencyToken(x => x.ETag))
         .Entity<RenamedGadget>(entity => entity
             .Container(ContainerName)
-            .PartitionKey(x => x.Category));
+            .PartitionKey(x => x.Category))
+        .Entity<GeoEvent>(entity => entity
+            .Container("geo_events"));
 
     [OneTimeTearDown]
     public async Task StopAsync()

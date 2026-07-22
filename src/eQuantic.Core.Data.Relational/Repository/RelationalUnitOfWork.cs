@@ -439,7 +439,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             case PendingWriteKind.Update:
             {
                 // The token it read goes into the WHERE; the bumped value goes into the SET (written back on success).
-                var columns = configuration.Columns.Where(column => column != key && column != token).ToList();
+                var columns = configuration.Columns.Where(column => !configuration.Keys.Contains(column) && column != token).ToList();
                 var set = string.Join(", ", columns.Select(column =>
                     $"{Dialect.Quote(column.Name)} = {Bind(column.Read(write.Entity))}"));
                 var where = string.Empty;
@@ -454,7 +454,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
                 command.CommandText =
                     $"UPDATE {Dialect.Quote(configuration.TableName)} SET {set} " +
-                    $"WHERE {Dialect.Quote(key.Name)} = {Bind(key.Property.GetValue(write.Entity))}" + where;
+                    $"WHERE {KeyWhere(configuration, write.Entity, Bind)}" + where;
                 break;
             }
 
@@ -462,7 +462,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             {
                 command.CommandText =
                     $"DELETE FROM {Dialect.Quote(configuration.TableName)} " +
-                    $"WHERE {Dialect.Quote(key.Name)} = {Bind(key.Property.GetValue(write.Entity))}";
+                    $"WHERE {KeyWhere(configuration, write.Entity, Bind)}";
                 if (token is not null)
                 {
                     bumped.Add((write, token.Property.GetValue(write.Entity)!));
@@ -484,6 +484,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
         return returning;
     }
+
+    /// <summary>The WHERE addressing one row by its (possibly composite) key.</summary>
+    private string KeyWhere(RelationalEntityConfiguration configuration, object entity, Func<object?, string> bind) =>
+        string.Join(" AND ", configuration.Keys.Select(key =>
+            $"{Dialect.Quote(key.Name)} = {bind(key.Property.GetValue(entity))}"));
 
     /// <summary>The next token value: integers increment, Guids renew.</summary>
     private static object NextVersion(object? current, Type type)

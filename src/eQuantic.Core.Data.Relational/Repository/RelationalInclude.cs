@@ -69,6 +69,12 @@ internal static class RelationalInclude
         IReadOnlyList<object> entities, Type entityType, PropertyInfo navigation, CancellationToken cancellationToken)
     {
         var configuration = unitOfWork.Model.For(navigation.PropertyType);
+        if (configuration.HasCompositeKey)
+        {
+            throw new NotSupportedException(
+                $"Cannot include '{navigation.Name}': '{navigation.PropertyType.Name}' has a composite key, which a " +
+                "single foreign-key column cannot address — load it explicitly with its key tuple.");
+        }
 
         // The declared navigation wins; the {Nav}Id convention covers the rest.
         var foreignKeyName = unitOfWork.Model.For(entityType).NavigationFor(navigation.Name)?.ForeignKey

@@ -17,8 +17,25 @@ public abstract class CosmosEntityConfiguration
     /// <summary>The container name.</summary>
     public string ContainerName { get; }
 
-    /// <summary>The partition key path (e.g. <c>/countryCode</c>).</summary>
-    public string PartitionKeyPath { get; }
+    /// <summary>
+    ///     The partition key path (e.g. <c>/countryCode</c>). Throws for a hierarchical key — read
+    ///     <see cref="PartitionKeyPaths" /> there; nothing single-path can be silently right for it.
+    /// </summary>
+    public string PartitionKeyPath =>
+        PartitionKeyPaths.Count == 1
+            ? PartitionKeyPaths[0]
+            : throw new InvalidOperationException(
+                $"'{EntityType.Name}' declares a hierarchical partition key ({string.Join(", ", PartitionKeyPaths)}); " +
+                "read PartitionKeyPaths.");
+
+    /// <summary>The partition key paths — one for a flat key, up to three for a hierarchical (multi-hash) key.</summary>
+    public IReadOnlyList<string> PartitionKeyPaths { get; protected init; } = [];
+
+    /// <summary>Whether the partition key is hierarchical (more than one path).</summary>
+    public bool HasHierarchicalPartitionKey => PartitionKeyPaths.Count > 1;
+
+    /// <summary>The ordered-read paths — materialized as a composite index on the container's policy (two or more).</summary>
+    public IReadOnlyList<(string Path, bool Descending)> ClusteringPaths { get; protected init; } = [];
 
     /// <summary>The container's default time-to-live in seconds, or <c>null</c> for none.</summary>
     public int? DefaultTimeToLiveSeconds { get; protected init; }
@@ -34,7 +51,15 @@ public abstract class CosmosEntityConfiguration
     {
         EntityType = entityType;
         ContainerName = containerName;
-        PartitionKeyPath = partitionKeyPath;
+        PartitionKeyPaths = [partitionKeyPath];
+    }
+
+    /// <summary>Initializes the configuration with a (possibly hierarchical) partition key.</summary>
+    protected CosmosEntityConfiguration(Type entityType, string containerName, IReadOnlyList<string> partitionKeyPaths)
+    {
+        EntityType = entityType;
+        ContainerName = containerName;
+        PartitionKeyPaths = partitionKeyPaths;
     }
 
     /// <summary>Reads the partition key value from an entity instance (for point writes, patches and deletes).</summary>
@@ -63,16 +88,18 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
     private readonly Func<TEntity, string> _id;
     private readonly Func<TEntity, string?>? _etag;
 
-    internal CosmosEntityConfiguration(string containerName, string partitionKeyPath,
+    internal CosmosEntityConfiguration(string containerName, IReadOnlyList<string> partitionKeyPaths,
         Func<TEntity, PartitionKey> partitionKey, Func<TEntity, string> id, int? ttlSeconds,
-        Func<TEntity, string?>? etag = null, string? idDescription = null)
-        : base(typeof(TEntity), containerName, partitionKeyPath)
+        Func<TEntity, string?>? etag = null, string? idDescription = null,
+        IReadOnlyList<(string Path, bool Descending)>? clusteringPaths = null)
+        : base(typeof(TEntity), containerName, partitionKeyPaths)
     {
         _partitionKey = partitionKey;
         _id = id;
         _etag = etag;
         DefaultTimeToLiveSeconds = ttlSeconds;
         HasConcurrencyToken = etag is not null;
+        ClusteringPaths = clusteringPaths ?? [];
         if (idDescription is not null)
         {
             IdDescription = idDescription;
@@ -128,7 +155,18 @@ public sealed class CosmosModel
         foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
         {
             report.AppendLine($"{configuration.EntityType.Name} -> container \"{configuration.ContainerName}\"");
-            report.AppendLine($"  partition key: \"{configuration.PartitionKeyPath}\"");
+            report.AppendLine(configuration.HasHierarchicalPartitionKey
+                ? $"  partition key: ({string.Join(", ", configuration.PartitionKeyPaths)}) hierarchical (multi-hash)"
+                : $"  partition key: \"{configuration.PartitionKeyPaths[0]}\"");
+            if (configuration.ClusteringPaths.Count > 0)
+            {
+                report.AppendLine("  clustering: " + string.Join(", ", configuration.ClusteringPaths.Select(clustering =>
+                    $"{clustering.Path} {(clustering.Descending ? "DESC" : "ASC")}")) +
+                    (configuration.ClusteringPaths.Count > 1
+                        ? " (composite index on the container's policy)"
+                        : " (single path; Cosmos serves it from the default range indexes)"));
+            }
+
             report.AppendLine($"  id: {configuration.IdDescription}");
             if (configuration.DefaultTimeToLiveSeconds is { } ttl)
             {
@@ -200,9 +238,11 @@ public sealed class CosmosModelBuilder
 /// <typeparam name="TEntity">The entity type.</typeparam>
 public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
 {
+    private readonly List<string> _partitionKeyPaths = [];
+    private readonly List<Func<TEntity, object?>> _partitionValues = [];
+    private readonly List<(string Path, bool Descending)> _clusteringPaths = [];
+    private bool _fluentPartitionKey;
     private string? _container;
-    private string? _partitionKeyPath;
-    private Func<TEntity, PartitionKey>? _partitionKey;
     private Func<TEntity, string>? _id;
     private Func<TEntity, string?>? _etag;
     private int? _ttlSeconds;
@@ -223,15 +263,31 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
             _ttlSeconds = timeToLive.Seconds;
         }
 
-        foreach (var property in typeof(TEntity).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
-        {
-            if (property.GetCustomAttributes(typeof(Data.Modeling.PartitionKeyAttribute), inherit: true).Length > 0)
-            {
-                _partitionKeyPath = "/" + CosmosNaming.StoredName(property);
-                var partitionProperty = property;
-                _partitionKey = entity => ToPartitionKey(partitionProperty.GetValue(entity));
-            }
+        var properties = typeof(TEntity).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
 
+        // [PartitionKey] members compose a hierarchical key in Order (a single member stays a flat key).
+        foreach (var property in properties
+                     .Where(candidate => candidate.GetCustomAttributes(typeof(Data.Modeling.PartitionKeyAttribute), inherit: true).Length > 0)
+                     .OrderBy(candidate => ((Data.Modeling.PartitionKeyAttribute)candidate
+                         .GetCustomAttributes(typeof(Data.Modeling.PartitionKeyAttribute), inherit: true)[0]).Order))
+        {
+            var partitionProperty = property;
+            _partitionKeyPaths.Add("/" + CosmosNaming.StoredName(property));
+            _partitionValues.Add(entity => partitionProperty.GetValue(entity));
+        }
+
+        foreach (var property in properties
+                     .Where(candidate => candidate.GetCustomAttributes(typeof(Data.Modeling.ClusteringKeyAttribute), inherit: true).Length > 0)
+                     .OrderBy(candidate => ((Data.Modeling.ClusteringKeyAttribute)candidate
+                         .GetCustomAttributes(typeof(Data.Modeling.ClusteringKeyAttribute), inherit: true)[0]).Order))
+        {
+            var descending = ((Data.Modeling.ClusteringKeyAttribute)property
+                .GetCustomAttributes(typeof(Data.Modeling.ClusteringKeyAttribute), inherit: true)[0]).Descending;
+            _clusteringPaths.Add(("/" + CosmosNaming.StoredName(property), descending));
+        }
+
+        foreach (var property in properties)
+        {
             if (property.GetCustomAttributes(typeof(Data.Modeling.EntityKeyAttribute), inherit: true).Length > 0)
             {
                 var keyProperty = property;
@@ -273,17 +329,40 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
-    ///     Declares the partition key from a member selector. The stored path defaults to the member name
-    ///     (Cosmos preserves property names by default); pass <paramref name="path" /> to override it.
+    ///     Declares a partition key level from a member selector — call once for a flat key, up to three times
+    ///     for a <b>hierarchical</b> (multi-hash) key, in order. The stored path derives from the member's
+    ///     stored name; pass <paramref name="path" /> to override it. The first call replaces whatever the
+    ///     annotations seeded; subsequent calls append levels.
     /// </summary>
     /// <typeparam name="TKey">The partition key member type.</typeparam>
     /// <param name="selector">The member selector (e.g. <c>x =&gt; x.CountryCode</c>).</param>
     /// <param name="path">An explicit partition key path, or <c>null</c> to derive it from the member.</param>
     public CosmosEntityBuilder<TEntity> PartitionKey<TKey>(Expression<Func<TEntity, TKey>> selector, string? path = null)
     {
-        _partitionKeyPath = path ?? "/" + string.Join("/", CosmosNaming.StoredPath(selector));
+        if (!_fluentPartitionKey)
+        {
+            // Fluent overrides the annotation seeding wholesale (conventions < annotations < fluent).
+            _partitionKeyPaths.Clear();
+            _partitionValues.Clear();
+            _fluentPartitionKey = true;
+        }
+
+        _partitionKeyPaths.Add(path ?? "/" + string.Join("/", CosmosNaming.StoredPath(selector)));
         var read = selector.Compile();
-        _partitionKey = entity => ToPartitionKey(read(entity));
+        _partitionValues.Add(entity => read(entity));
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares an ordered-read member — materialized as a composite index on the container's indexing
+    ///     policy when two or more are declared (Cosmos needs no index declaration for a single ORDER BY).
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="descending">Whether the declared order is descending.</param>
+    public CosmosEntityBuilder<TEntity> ClusteringKey<TMember>(Expression<Func<TEntity, TMember>> selector, bool descending = false)
+    {
+        _clusteringPaths.Add(("/" + string.Join("/", CosmosNaming.StoredPath(selector)), descending));
         return this;
     }
 
@@ -311,15 +390,58 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
 
     internal CosmosEntityConfiguration<TEntity> Build()
     {
-        if (_partitionKey is null || _partitionKeyPath is null)
+        if (_partitionKeyPaths.Count == 0)
         {
             throw new InvalidOperationException(
                 $"Entity '{typeof(TEntity).Name}' must declare a partition key (e.g. PartitionKey(x => x.CountryCode)).");
         }
 
+        if (_partitionKeyPaths.Count > 3)
+        {
+            throw new InvalidOperationException(
+                $"Entity '{typeof(TEntity).Name}' declares {_partitionKeyPaths.Count} partition key levels; " +
+                "Cosmos DB hierarchical keys take at most three.");
+        }
+
+        var values = _partitionValues.ToList();
+        Func<TEntity, PartitionKey> partitionKey = values.Count == 1
+            ? entity => ToPartitionKey(values[0](entity))
+            : entity =>
+            {
+                var builder = new PartitionKeyBuilder();
+                foreach (var read in values)
+                {
+                    AddToBuilder(builder, read(entity));
+                }
+
+                return builder.Build();
+            };
+
         return new CosmosEntityConfiguration<TEntity>(
-            _container ?? typeof(TEntity).Name, _partitionKeyPath, _partitionKey, _id ?? DefaultId(), _ttlSeconds, _etag,
-            _idDescription);
+            _container ?? typeof(TEntity).Name, _partitionKeyPaths.ToList(), partitionKey, _id ?? DefaultId(), _ttlSeconds,
+            _etag, _idDescription, _clusteringPaths.ToList());
+    }
+
+    private static void AddToBuilder(PartitionKeyBuilder builder, object? value)
+    {
+        switch (value)
+        {
+            case null:
+                builder.AddNullValue();
+                break;
+            case string text:
+                builder.Add(text);
+                break;
+            case bool flag:
+                builder.Add(flag);
+                break;
+            case double number:
+                builder.Add(number);
+                break;
+            default:
+                builder.Add(value.ToString());
+                break;
+        }
     }
 
     private static Func<TEntity, string> DefaultId()

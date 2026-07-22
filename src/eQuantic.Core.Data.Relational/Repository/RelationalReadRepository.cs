@@ -453,6 +453,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 "Keyset paging orders by the key; custom sortings are not supported — use GetPagedAsync, or sort each page client-side.");
         }
 
+        if (_configuration.HasCompositeKey)
+        {
+            throw new NotSupportedException(
+                $"Keyset paging does not span '{typeof(TEntity).Name}''s composite key yet; use GetPagedAsync (offset paging) instead.");
+        }
+
         var extra = continuationToken is null ? null : KeyAfter(ReadToken(continuationToken));
         var items = await SelectAsync(options, pageSize, null, true, cancellationToken, extra).ConfigureAwait(false);
         var token = items.Count < pageSize ? null : WriteToken(_configuration.Key.Property.GetValue(items[^1]));
@@ -731,7 +737,9 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             return " ORDER BY " + string.Join(", ", parts);
         }
 
-        return orderByKeyWhenUnsorted ? $" ORDER BY {_dialect.Quote(_configuration.Key.Name)}" : string.Empty;
+        return orderByKeyWhenUnsorted
+            ? " ORDER BY " + string.Join(", ", _configuration.Keys.Select(key => _dialect.Quote(key.Name)))
+            : string.Empty;
     }
 
     private async Task<TSum> SumCoreAsync<TSum>(LambdaExpression selector, QueryOptions<TEntity>? options,
@@ -803,7 +811,35 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     private Expression<Func<TEntity, bool>>? GlobalFilter(QueryOptions<TEntity>? options) =>
         options is { IgnoreQueryFilters: true } ? null : UnitOfWork.GlobalFilter<TEntity>();
 
-    private Expression<Func<TEntity, bool>> IdPredicate(TKey id) => KeyAfterOrEqual(id, ExpressionType.Equal);
+    private Expression<Func<TEntity, bool>> IdPredicate(TKey id) =>
+        _configuration.HasCompositeKey ? CompositeKeyPredicate(id) : KeyAfterOrEqual(id, ExpressionType.Equal);
+
+    /// <summary>
+    ///     The point-lookup predicate for a composite key: the id is a tuple whose items align with the declared
+    ///     key columns, in order (<c>Key(x =&gt; new { x.A, x.B })</c> ↔ <c>GetAsync((a, b))</c>).
+    /// </summary>
+    private Expression<Func<TEntity, bool>> CompositeKeyPredicate(TKey id)
+    {
+        if (id is not System.Runtime.CompilerServices.ITuple tuple || tuple.Length != _configuration.Keys.Count)
+        {
+            throw new ArgumentException(
+                $"'{typeof(TEntity).Name}' has a composite key of {_configuration.Keys.Count} columns; pass a tuple with " +
+                $"one item per key column, in the declared order.", nameof(id));
+        }
+
+        var parameter = Expression.Parameter(typeof(TEntity), "e");
+        Expression? body = null;
+        for (var index = 0; index < _configuration.Keys.Count; index++)
+        {
+            var property = _configuration.Keys[index].Property;
+            var equal = Expression.Equal(
+                Expression.MakeMemberAccess(parameter, property),
+                Expression.Constant(tuple[index], property.PropertyType));
+            body = body is null ? equal : Expression.AndAlso(body, equal);
+        }
+
+        return Expression.Lambda<Func<TEntity, bool>>(body!, parameter);
+    }
 
     private Expression<Func<TEntity, bool>> KeyAfter(object? key) => KeyAfterOrEqual(key, ExpressionType.GreaterThan);
 

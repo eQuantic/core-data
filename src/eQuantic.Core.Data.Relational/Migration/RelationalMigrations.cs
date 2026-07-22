@@ -75,6 +75,17 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                         }
                     }
 
+                    // The ordered-read declaration materializes as one multi-column index with the declared directions.
+                    if (configuration.ClusteringColumns.Count > 0)
+                    {
+                        var list = string.Join(", ", configuration.ClusteringColumns.Select(clustering =>
+                            $"{_dialect.Quote(clustering.Column.Name)}{(clustering.Descending ? " DESC" : string.Empty)}"));
+                        await ExecuteAsync(connection,
+                            _dialect.CreateIndexSql(_dialect.Quote($"ix_{configuration.TableName}_clustering"),
+                                _dialect.Quote(configuration.TableName), list, unique: false),
+                            [], cancellationToken).ConfigureAwait(false);
+                    }
+
                     break;
                 }
 
@@ -141,8 +152,8 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
     {
         var columns = configuration.Columns.Select(column =>
         {
-            var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column.StoredType)}";
-            if (column == configuration.Key)
+            var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column)}";
+            if (!configuration.HasCompositeKey && column == configuration.Key)
             {
                 if (configuration.KeyIsGenerated)
                 {
@@ -155,7 +166,14 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             return declaration;
         });
 
-        return _dialect.CreateTableSql(_dialect.Quote(configuration.TableName), string.Join(", ", columns));
+        // A composite key declares at the table level; a simple one stays inline on its column.
+        var body = string.Join(", ", columns);
+        if (configuration.HasCompositeKey)
+        {
+            body += $", PRIMARY KEY ({string.Join(", ", configuration.Keys.Select(key => _dialect.Quote(key.Name)))})";
+        }
+
+        return _dialect.CreateTableSql(_dialect.Quote(configuration.TableName), body);
     }
 
     private string CreateIndex(EnsureIndexOperation operation)

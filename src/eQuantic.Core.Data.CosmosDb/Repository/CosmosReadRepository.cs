@@ -46,7 +46,12 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
                      ?? throw new ArgumentException($"The unit of work must be a {nameof(CosmosUnitOfWork)}.", nameof(unitOfWork));
         var configuration = UnitOfWork.Configuration<TEntity>();
         Container = UnitOfWork.GetContainer<TEntity>();
-        _partitionKeyPath = configuration.PartitionKeyPath;
+
+        // Partition inference pins single-path keys only; a hierarchical key's queries fan out (the inference
+        // guard sees the '/' and declines), so the sentinel keeps the path harmlessly un-inferable.
+        _partitionKeyPath = configuration.HasHierarchicalPartitionKey
+            ? string.Join("/", configuration.PartitionKeyPaths)
+            : configuration.PartitionKeyPaths[0];
         _idSelector = MemberPathExtensions.ToSelector<TEntity>("Id");
     }
 

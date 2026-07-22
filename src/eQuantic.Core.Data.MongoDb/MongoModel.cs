@@ -165,6 +165,21 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares an ordered-read member — materialized as one compound index with the declared directions by
+    ///     the migration's <c>EnsureCollection()</c>. Call in order for several.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="descending">Whether the declared order is descending.</param>
+    public MongoEntityBuilder<TEntity> ClusteringKey<TMember>(Expression<Func<TEntity, TMember>> selector, bool descending = false)
+    {
+        var member = eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector);
+        MongoModeling.AddClusteringKey(typeof(TEntity), member, descending);
+        Notes.Add($"clustering: {member} {(descending ? "DESC" : "ASC")} (compound index)");
+        return this;
+    }
+
+    /// <summary>
     ///     Declares the TTL index: each document expires <paramref name="timeToLive" /> after the date its
     ///     <paramref name="selector" /> member carries (MongoDB's per-document expiry — unlike Cosmos DB's
     ///     container default). The migration's <c>EnsureCollection()</c> creates the index.

@@ -72,6 +72,9 @@ public class SqlServerDialect : SqlDialect
         value is bool flag ? (flag ? "1" : "0") : base.Literal(value);
 
     /// <inheritdoc />
+    /// <inheritdoc />
+    protected override string SizedTextType(int length) => $"nvarchar({length})";
+
     public override string SqlType(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;

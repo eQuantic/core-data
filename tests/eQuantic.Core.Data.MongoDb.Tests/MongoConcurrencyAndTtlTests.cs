@@ -114,4 +114,38 @@ public sealed class MongoConcurrencyAndTtlTests : MongoIntegrationTest
         Assert.That(ttl, Is.Not.Null, "[TimeToLive] + IEntityTimeMark yields a TTL index on CreatedAt");
         Assert.That(ttl!["expireAfterSeconds"].ToDouble(), Is.EqualTo(3600));
     }
+
+    [Test]
+    public async Task EnsureCollection_materializes_the_clustering_compound_index()
+    {
+        using var db = NewDatabase();
+
+        var builder = new MigrationBuilder();
+        builder.For<RankedDoc>(doc => doc.EnsureCollection());
+        await new MongoMigrationExecutor(db.Database).ApplyAsync(builder.Operations);
+
+        var indexes = await (await db.Database.GetCollection<BsonDocument>("ranked_docs").Indexes.ListAsync()).ToListAsync();
+        var clustering = indexes.SingleOrDefault(index => index.GetValue("name", "").AsString == "ix_clustering");
+        Assert.That(clustering, Is.Not.Null, "[ClusteringKey] materialized the ordered-read compound index");
+        var key = clustering!["key"].AsBsonDocument;
+        Assert.That(key["Category"].ToInt32(), Is.EqualTo(1), "the first member ascends");
+        Assert.That(key["Score"].ToInt32(), Is.EqualTo(-1), "the second member descends, as declared");
+    }
+}
+
+/// <summary>A ranked document — <c>[ClusteringKey]</c> declares the ordered read the compound index serves.</summary>
+[Entity("ranked_docs")]
+public sealed class RankedDoc : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    [ClusteringKey(Order = 0)]
+    public string Category { get; set; } = "";
+
+    [ClusteringKey(Order = 1, Descending = true)]
+    public int Score { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
 }

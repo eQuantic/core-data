@@ -25,6 +25,15 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     /// <summary>The stored CLR type — the converter's, or the member's own.</summary>
     public Type StoredType => Converter?.StoredType ?? Property.PropertyType;
 
+    /// <summary>The maximum text length (0 = the dialect's default), from <c>[Facet]</c> / <c>Facet(...)</c>.</summary>
+    public int Length { get; init; }
+
+    /// <summary>The decimal precision (0 = the dialect's default).</summary>
+    public int Precision { get; init; }
+
+    /// <summary>The decimal scale (meaningful when <see cref="Precision" /> is set).</summary>
+    public int Scale { get; init; }
+
     /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
     public object? Read(object entity)
     {
@@ -41,6 +50,11 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
 /// <param name="Mode">What the declaration promises to match (<c>Contains</c> serves any pattern).</param>
 public sealed record RelationalSearchColumn(RelationalColumn Column, Data.Modeling.SearchMode Mode);
 
+/// <summary>An ordered-read column: the migration materializes a multi-column index with the declared directions.</summary>
+/// <param name="Column">The column.</param>
+/// <param name="Descending">Whether the declared order is descending.</param>
+public sealed record RelationalClusteringColumn(RelationalColumn Column, bool Descending);
+
 /// <summary>
 ///     The relational mapping for an entity: its table, key column, columns (named through the dialect's
 ///     convention unless overridden) and whether the key is database-generated. Declared up front — the engine
@@ -51,7 +65,8 @@ public abstract class RelationalEntityConfiguration
     /// <summary>Initializes the configuration.</summary>
     protected RelationalEntityConfiguration(Type entityType, string tableName, IReadOnlyList<RelationalColumn> columns,
         RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
-        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null)
+        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null,
+        IReadOnlyList<RelationalColumn>? keys = null, IReadOnlyList<RelationalClusteringColumn>? clusteringColumns = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -61,6 +76,8 @@ public abstract class RelationalEntityConfiguration
         ConcurrencyToken = concurrencyToken;
         Navigations = navigations ?? [];
         SearchColumns = searchColumns ?? [];
+        Keys = keys is { Count: > 0 } ? keys : [key];
+        ClusteringColumns = clusteringColumns ?? [];
     }
 
     /// <summary>The entity type.</summary>
@@ -72,8 +89,17 @@ public abstract class RelationalEntityConfiguration
     /// <summary>Every mapped column.</summary>
     public IReadOnlyList<RelationalColumn> Columns { get; }
 
-    /// <summary>The key column.</summary>
+    /// <summary>The key column (the first one when the key is composite — see <see cref="Keys" />).</summary>
     public RelationalColumn Key { get; }
+
+    /// <summary>The key columns, in declared order (one for a simple key; several for <c>Key(x =&gt; new { … })</c>).</summary>
+    public IReadOnlyList<RelationalColumn> Keys { get; }
+
+    /// <summary>Whether the key spans more than one column.</summary>
+    public bool HasCompositeKey => Keys.Count > 1;
+
+    /// <summary>The ordered-read columns (a multi-column index materializes them).</summary>
+    public IReadOnlyList<RelationalClusteringColumn> ClusteringColumns { get; }
 
     /// <summary>Whether the key is database-generated (identity): inserts omit it and read it back.</summary>
     public bool KeyIsGenerated { get; }
@@ -111,8 +137,10 @@ public sealed class RelationalEntityConfiguration<TEntity> : RelationalEntityCon
 {
     internal RelationalEntityConfiguration(string tableName, IReadOnlyList<RelationalColumn> columns,
         RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
-        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null)
-        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken, navigations, searchColumns)
+        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null,
+        IReadOnlyList<RelationalColumn>? keys = null, IReadOnlyList<RelationalClusteringColumn>? clusteringColumns = null)
+        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken, navigations, searchColumns,
+            keys, clusteringColumns)
     {
     }
 }
@@ -147,20 +175,35 @@ public sealed class RelationalModel
         foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
         {
             report.AppendLine($"{configuration.EntityType.Name} -> table \"{configuration.TableName}\"");
-            report.AppendLine($"  key: {configuration.Key.Property.Name} \"{configuration.Key.Name}\" " +
-                              $"({dialect.SqlType(configuration.Key.StoredType)})" +
-                              (configuration.KeyIsGenerated ? " database-generated" : " client-generated"));
+            if (configuration.HasCompositeKey)
+            {
+                report.AppendLine("  key: (" + string.Join(", ",
+                    configuration.Keys.Select(key => $"{key.Property.Name} \"{key.Name}\"")) + ") composite, client-generated");
+            }
+            else
+            {
+                report.AppendLine($"  key: {configuration.Key.Property.Name} \"{configuration.Key.Name}\" " +
+                                  $"({dialect.SqlType(configuration.Key)})" +
+                                  (configuration.KeyIsGenerated ? " database-generated" : " client-generated"));
+            }
+
             if (configuration.ConcurrencyToken is { } token)
             {
                 report.AppendLine($"  concurrency token: {token.Property.Name} \"{token.Name}\"");
             }
 
-            foreach (var column in configuration.Columns.Where(column => column != configuration.Key))
+            foreach (var column in configuration.Columns.Where(column => !configuration.Keys.Contains(column)))
             {
                 var converted = column.Converter is not null
                     ? $" (converted from {column.Property.PropertyType.Name})"
                     : string.Empty;
-                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column.StoredType)}){converted}");
+                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column)}){converted}");
+            }
+
+            if (configuration.ClusteringColumns.Count > 0)
+            {
+                report.AppendLine("  clustering: " + string.Join(", ", configuration.ClusteringColumns.Select(clustering =>
+                    $"{clustering.Column.Name} {(clustering.Descending ? "DESC" : "ASC")}")) + " (multi-column index)");
             }
 
             foreach (var navigation in configuration.Navigations)
@@ -222,6 +265,9 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, RelationalConverter> _converters = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<RelationalNavigation> _navigations = [];
     private readonly Dictionary<string, Modeling.SearchMode> _searchMembers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(string Member, bool Descending)> _clusteringMembers = [];
+    private readonly Dictionary<string, (int Length, int Precision, int Scale)> _facets = new(StringComparer.OrdinalIgnoreCase);
+    private List<string>? _keyMembers;
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
@@ -265,6 +311,18 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             {
                 _searchMembers[property.Name] = search.Mode;
             }
+
+            if (property.GetCustomAttribute<Modeling.FacetAttribute>() is { } facet)
+            {
+                _facets[property.Name] = (facet.Length, facet.Precision, facet.Scale);
+            }
+        }
+
+        foreach (var property in typeof(TEntity).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(candidate => candidate.GetCustomAttribute<Modeling.ClusteringKeyAttribute>() is not null)
+                     .OrderBy(candidate => candidate.GetCustomAttribute<Modeling.ClusteringKeyAttribute>()!.Order))
+        {
+            _clusteringMembers.Add((property.Name, property.GetCustomAttribute<Modeling.ClusteringKeyAttribute>()!.Descending));
         }
     }
 
@@ -276,14 +334,64 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
-    /// <summary>Declares the key member (defaults to a member named <c>Id</c>).</summary>
-    /// <typeparam name="TKey">The member type.</typeparam>
+    /// <summary>
+    ///     Declares the key member (defaults to a member named <c>Id</c>) — or a <b>composite key</b> with an
+    ///     anonymous projection: <c>Key(x =&gt; new { x.OrderId, x.LineNumber })</c>, member order defining the
+    ///     column order. Point lookups take the same shape as a tuple (<c>GetAsync((orderId, lineNumber))</c>);
+    ///     a composite key cannot be database-generated.
+    /// </summary>
+    /// <typeparam name="TKey">The member (or anonymous projection) type.</typeparam>
     /// <param name="selector">The member selector.</param>
     /// <param name="generated">Whether the database generates the key (identity): inserts omit it and read it back.</param>
     public RelationalEntityBuilder<TEntity> Key<TKey>(Expression<Func<TEntity, TKey>> selector, bool generated = false)
     {
+        if (selector.Body is NewExpression { Arguments.Count: > 1 } projection)
+        {
+            if (generated)
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}': a composite key cannot be database-generated.");
+            }
+
+            _keyMembers = projection.Arguments
+                .Select(argument => argument is MemberExpression member
+                    ? member.Member.Name
+                    : throw new InvalidOperationException("A composite key projects entity members only (new { x.A, x.B })."))
+                .ToList();
+            _keyMember = _keyMembers[0];
+            _keyIsGenerated = false;
+            return this;
+        }
+
+        _keyMembers = null;
         _keyMember = selector.GetMemberName();
         _keyIsGenerated = generated;
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares an ordered-read member — "I read this sorted" — materialized as a multi-column index with
+    ///     the declared directions by the migration's <c>EnsureCollection()</c>. Call in order for several.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="descending">Whether the declared order is descending.</param>
+    public RelationalEntityBuilder<TEntity> ClusteringKey<TMember>(Expression<Func<TEntity, TMember>> selector, bool descending = false)
+    {
+        _clusteringMembers.Add((selector.GetMemberName(), descending));
+        return this;
+    }
+
+    /// <summary>Declares storage facets for a member: a text length, a decimal precision/scale (the DDL sizes the column).</summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="length">The maximum text length (0 = the dialect's default).</param>
+    /// <param name="precision">The decimal precision (0 = the dialect's default).</param>
+    /// <param name="scale">The decimal scale (with <paramref name="precision" />).</param>
+    public RelationalEntityBuilder<TEntity> Facet<TMember>(Expression<Func<TEntity, TMember>> selector,
+        int length = 0, int precision = 0, int scale = 0)
+    {
+        _facets[selector.GetMemberName()] = (length, precision, scale);
         return this;
     }
 
@@ -398,9 +506,18 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                                && property.GetIndexParameters().Length == 0
                                && !_ignored.Contains(property.Name)
                                && (IsMapped(property.PropertyType) || _converters.ContainsKey(property.Name)))
-            .Select(property => new RelationalColumn(property,
-                _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name),
-                _converters.TryGetValue(property.Name, out var converter) ? converter : null))
+            .Select(property =>
+            {
+                var facet = _facets.TryGetValue(property.Name, out var declared) ? declared : default;
+                return new RelationalColumn(property,
+                    _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name),
+                    _converters.TryGetValue(property.Name, out var converter) ? converter : null)
+                {
+                    Length = facet.Length,
+                    Precision = facet.Precision,
+                    Scale = facet.Scale,
+                };
+            })
             .ToList();
 
         foreach (var converted in _converters)
@@ -448,9 +565,25 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             searchColumns.Add(new RelationalSearchColumn(column, mode));
         }
 
+        var keys = (_keyMembers ?? [keyMember])
+            .Select(member => columns.FirstOrDefault(candidate =>
+                                  string.Equals(candidate.Property.Name, member, StringComparison.OrdinalIgnoreCase))
+                              ?? throw new InvalidOperationException(
+                                  $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' in the composite key."))
+            .ToList();
+
+        var clusteringColumns = _clusteringMembers
+            .Select(declared => new RelationalClusteringColumn(
+                columns.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Property.Name, declared.Member, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}' has no mapped member '{declared.Member}' to cluster by."),
+                declared.Descending))
+            .ToList();
+
         return new RelationalEntityConfiguration<TEntity>(
-            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken, _navigations,
-            searchColumns);
+            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, keys[0], _keyIsGenerated, concurrencyToken, _navigations,
+            searchColumns, keys, clusteringColumns);
     }
 
     private bool IsMapped(Type type)

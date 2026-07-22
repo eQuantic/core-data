@@ -110,6 +110,29 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
                 .CreateOneAsync(new CreateIndexModel<BsonDocument>(keys, indexOptions), cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
         }
+
+        // The ordered-read declaration materializes as one compound index with the declared directions.
+        var clustering = MongoModeling.ClusteringKeys(operation.EntityType);
+        if (clustering.Count > 0)
+        {
+            IndexKeysDefinition<BsonDocument>? clusteringKeys = null;
+            foreach (var (memberName, descending) in clustering)
+            {
+                var member = operation.EntityType.GetProperty(memberName)
+                             ?? throw new InvalidOperationException(
+                                 $"'{operation.EntityType.Name}' clusters by '{memberName}', which is not a property.");
+                var element = MongoFieldNames.Resolve(operation.EntityType, member);
+                var next = descending
+                    ? Builders<BsonDocument>.IndexKeys.Descending(element)
+                    : Builders<BsonDocument>.IndexKeys.Ascending(element);
+                clusteringKeys = clusteringKeys is null ? next : Builders<BsonDocument>.IndexKeys.Combine(clusteringKeys, next);
+            }
+
+            await _database.GetCollection<BsonDocument>(name).Indexes
+                .CreateOneAsync(new CreateIndexModel<BsonDocument>(clusteringKeys,
+                    new CreateIndexOptions { Name = "ix_clustering" }), cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     private async Task EnsureIndexAsync(EnsureIndexOperation operation, CancellationToken cancellationToken)

@@ -82,6 +82,41 @@ internal static class MongoModeling
     public static void SetTimeToLive(Type entityType, string member, int seconds) =>
         TtlOverrides[entityType] = (member, seconds);
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, List<(string Member, bool Descending)>> ClusteringOverrides = new();
+
+    /// <summary>
+    ///     The ordered-read declaration for an entity type: fluent <c>ClusteringKey(...)</c> calls, then the
+    ///     <c>[ClusteringKey]</c> annotations in <c>Order</c>. <c>EnsureCollection()</c> materializes them as one
+    ///     compound index with the declared directions.
+    /// </summary>
+    public static IReadOnlyList<(string Member, bool Descending)> ClusteringKeys(Type entityType)
+    {
+        if (ClusteringOverrides.TryGetValue(entityType, out var overridden))
+        {
+            return overridden;
+        }
+
+        return entityType
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Select(property => (Property: property,
+                Annotation: property.GetCustomAttributes(typeof(ClusteringKeyAttribute), inherit: true)
+                    is [ClusteringKeyAttribute annotation, ..] ? annotation : null))
+            .Where(candidate => candidate.Annotation is not null)
+            .OrderBy(candidate => candidate.Annotation!.Order)
+            .Select(candidate => (candidate.Property.Name, candidate.Annotation!.Descending))
+            .ToList();
+    }
+
+    /// <summary>Appends a fluent ordered-read declaration (fluent replaces the annotations wholesale).</summary>
+    public static void AddClusteringKey(Type entityType, string member, bool descending) =>
+        ClusteringOverrides.AddOrUpdate(entityType,
+            _ => [(member, descending)],
+            (_, existing) =>
+            {
+                existing.Add((member, descending));
+                return existing;
+            });
+
     /// <summary>Registers the annotation conventions with the driver (idempotent).</summary>
     public static void Register()
     {

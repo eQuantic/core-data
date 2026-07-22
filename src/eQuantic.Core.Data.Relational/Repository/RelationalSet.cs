@@ -59,10 +59,23 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
 
     public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
     {
+        // A composite key arrives as a tuple: its items align with the declared key columns, in order.
+        object?[] values = _configuration.HasCompositeKey && key is System.Runtime.CompilerServices.ITuple tuple
+            ? Enumerable.Range(0, tuple.Length).Select(index => tuple[index]).ToArray()
+            : [key];
+        if (values.Length != _configuration.Keys.Count)
+        {
+            throw new ArgumentException(
+                $"'{typeof(TEntity).Name}' has a key of {_configuration.Keys.Count} column(s); pass one value per key column.",
+                nameof(key));
+        }
+
         var columns = _configuration.Columns;
+        var where = string.Join(" AND ",
+            _configuration.Keys.Select((column, index) => $"{_dialect.Quote(column.Name)} = @p{index}"));
         var sql = $"SELECT {string.Join(", ", columns.Select(column => _dialect.Quote(column.Name)))}"
-                  + $" FROM {_dialect.Quote(_configuration.TableName)} WHERE {_dialect.Quote(_configuration.Key.Name)} = @p0";
-        await using var command = await _unitOfWork.CommandAsync(sql, [key], cancellationToken).ConfigureAwait(false);
+                  + $" FROM {_dialect.Quote(_configuration.TableName)} WHERE {where}";
+        await using var command = await _unitOfWork.CommandAsync(sql, values, cancellationToken).ConfigureAwait(false);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
             ? RelationalMaterializer.Materialize<TEntity>(reader, columns)

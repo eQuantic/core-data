@@ -205,6 +205,31 @@ public sealed class Article : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     A composite-keyed line item with declared facets and an ordered-read member: the DDL sizes the columns,
+///     the primary key spans two columns, and the clustering declaration materializes as an index.
+/// </summary>
+[eQuantic.Core.Data.Modeling.Entity("order_lines")]
+public sealed class OrderLine : IEntity<(Guid, int)>
+{
+    public Guid OrderId { get; set; }
+
+    public int LineNo { get; set; }
+
+    [eQuantic.Core.Data.Modeling.Facet(Length = 200)]
+    public string Product { get; set; } = "";
+
+    [eQuantic.Core.Data.Modeling.Facet(Precision = 18, Scale = 2)]
+    public decimal Amount { get; set; }
+
+    [eQuantic.Core.Data.Modeling.ClusteringKey(Order = 0, Descending = true)]
+    public DateTime AddedAt { get; set; }
+
+    public (Guid, int) GetKey() => (OrderId, LineNo);
+
+    public void SetKey((Guid, int) key) => (OrderId, LineNo) = key;
+}
+
 /// <summary>The relational mapping shared by the integration tests.</summary>
 internal static class TestSchema
 {
@@ -224,7 +249,8 @@ internal static class TestSchema
         .Entity<AnnotatedOrder>(_ => { })
         .Entity<AuditedTicket>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
-        .Entity<Article>(_ => { });
+        .Entity<Article>(_ => { })
+        .Entity<OrderLine>(entity => entity.Key(x => new { x.OrderId, x.LineNo }));
 }
 
 /// <summary>The schema migration the runner discovers: both tables plus a customer index.</summary>
@@ -253,6 +279,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Ticket>(ticket => ticket
             .EnsureCollection())
         .For<Article>(article => article
+            .EnsureCollection())
+        .For<OrderLine>(line => line
             .EnsureCollection());
 }
 

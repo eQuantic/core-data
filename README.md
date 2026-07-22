@@ -114,21 +114,28 @@ clashes with `System.ComponentModel.DataAnnotations`:
 
 ```csharp
 [Entity("sale_orders")]
+[TimeToLive(3600)] // Cosmos container TTL / Cassandra default_time_to_live / MongoDB TTL index (per document, from CreatedAt)
 public sealed class SaleOrder : IEntity<Guid>
 {
-    [EntityKey(Generated = false)] public Guid Code { get; set; }
-    [StoredAs("client_name")]      public string Name { get; set; } = "";  // column on SQL, BSON element on Mongo
-    [ConcurrencyToken]             public int Revision { get; set; }       // versioned column / Cosmos _etag
-    [PartitionKey]                 public string Region { get; set; } = ""; // Cassandra partition / Cosmos path
-    [ClusteringKey(Descending = true)] public DateTime At { get; set; }
-    [SearchIndex]                  public string Description { get; set; } = ""; // SASI LIKE pushdown
+    [EntityKey(Generated = false)] public Guid Code { get; set; }          // key on SQL/Cassandra, _id on Mongo, Cosmos id
+    [StoredAs("client_name")]      public string Name { get; set; } = "";  // column on SQL/Cassandra, BSON element, Cosmos JSON
+    [Facet(Length = 200)]          public string Title { get; set; } = ""; // varchar(200) on SQL; sized DDL
+    [ConcurrencyToken]             public int Revision { get; set; }       // versioned WHERE / Cosmos _etag / Cassandra LWT / Mongo conditional replace
+    [PartitionKey]                 public string Region { get; set; } = ""; // Cassandra partition / Cosmos path (Order composes a hierarchical key)
+    [ClusteringKey(Descending = true)] public DateTime At { get; set; }    // Cassandra clustering / index on SQL+Mongo / Cosmos composite index
+    [SearchIndex]                  public string Description { get; set; } = ""; // Cassandra SASI LIKE / PostgreSQL GIN trigram
     [Unmapped]                     public string Scratch { get; set; } = "";
 }
 ```
 
-Each provider honours the subset that maps to its store and ignores the rest. And the model
-**never lies**: `model.Explain(dialect)` reports every mapping decision — names, stored types,
-keys, tokens, converters, navigations, lifecycle — the way `Explain()` reports a query.
+Each provider honours the subset that maps to its store — as its own native mechanism, with the
+cost explicit (a Cassandra token write is a Paxos LWT; a Mongo TTL expires per document) — and
+ignores the rest. Relational models also take **composite keys**
+(`Key(x => new { x.OrderId, x.LineNo })`, point lookups by tuple), and every provider's model has
+value conversions (`Converts(...)`: per member on SQL and Mongo, per type on Cosmos — its LINQ
+serializes filter constants by type). And the model **never lies**: `Explain()` on every model
+reports every mapping decision — names, stored types, keys, tokens, converters, TTLs, indexes,
+lifecycle — the way `Explain()` reports a query.
 
 ## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra, PostgreSQL, MySQL, SQL Server
 
