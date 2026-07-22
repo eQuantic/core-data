@@ -364,3 +364,7 @@ healthchecksdb
 !build/*.props
 
 .DS_Store
+# DocFX build output
+docs/_site/
+docs/api/*.yml
+docs/api/.manifest

@@ -1,0 +1,96 @@
+- name: Getting started
+  items:
+    - name: PostgreSQL
+      href: getting-started/postgresql.md
+    - name: MySQL / MariaDB
+      href: getting-started/mysql.md
+    - name: SQL Server
+      href: getting-started/sqlserver.md
+    - name: MongoDB
+      href: getting-started/mongodb.md
+    - name: Azure Cosmos DB
+      href: getting-started/cosmosdb.md
+    - name: Apache Cassandra
+      href: getting-started/cassandra.md
+- name: Concepts
+  items:
+    - name: The contracts
+      href: concepts/contracts.md
+    - name: The lean write model
+      href: concepts/write-model.md
+    - name: Specifications
+      href: concepts/specifications.md
+- name: Modeling
+  items:
+    - name: Overview and precedence
+      href: modeling/overview.md
+    - name: The annotation vocabulary
+      href: modeling/annotations.md
+    - name: Fluent builders
+      href: modeling/fluent.md
+    - name: Conventions and lifecycle
+      href: modeling/conventions.md
+    - name: Explain — the model never lies
+      href: modeling/explain.md
+- name: Querying
+  items:
+    - name: Pushdown and the honest gates
+      href: querying/pushdown.md
+    - name: Sorting and paging
+      href: querying/paging.md
+    - name: Projections
+      href: querying/projections.md
+    - name: Aggregates and GROUP BY
+      href: querying/aggregates.md
+    - name: UNION and UNION ALL
+      href: querying/union.md
+    - name: Includes (navigations)
+      href: querying/includes.md
+- name: Writing
+  items:
+    - name: Commits and transactions
+      href: writing/transactions.md
+    - name: Optimistic concurrency
+      href: writing/concurrency.md
+    - name: Lifecycle — stamps and soft delete
+      href: writing/lifecycle.md
+    - name: Time to live
+      href: writing/ttl.md
+- name: Migrations
+  href: migrations/index.md
+- name: Providers
+  items:
+    - name: PostgreSQL
+      href: providers/postgresql.md
+    - name: MySQL / MariaDB
+      href: providers/mysql.md
+    - name: SQL Server
+      href: providers/sqlserver.md
+    - name: MongoDB
+      href: providers/mongodb.md
+    - name: Azure Cosmos DB
+      href: providers/cosmosdb.md
+    - name: Apache Cassandra
+      href: providers/cassandra.md
+- name: Operations
+  items:
+    - name: Observability
+      href: operations/observability.md
+    - name: Resilience
+      href: operations/resilience.md
+- name: Cookbook
+  items:
+    - name: Multi-tenancy
+      href: cookbook/multi-tenancy.md
+    - name: Value objects and conversions
+      href: cookbook/value-objects.md
+    - name: Auditing — who and when
+      href: cookbook/auditing.md
+    - name: Coming from Entity Framework
+      href: cookbook/coming-from-ef.md
+- name: Architecture
+  items:
+    - name: How the engine works
+      href: architecture/internals.md
+    - name: Extending — dialects and the SPI
+      href: architecture/extending.md

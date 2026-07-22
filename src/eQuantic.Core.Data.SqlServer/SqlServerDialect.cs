@@ -71,8 +71,8 @@ public class SqlServerDialect : SqlDialect
     public override string Literal(object? value) =>
         value is bool flag ? (flag ? "1" : "0") : base.Literal(value);
 
-    /// <inheritdoc />
-    /// <inheritdoc />
+    /// <summary>The sized text type — <c>nvarchar(n)</c> on SQL Server.</summary>
+    /// <param name="length">The maximum length.</param>
     protected override string SizedTextType(int length) => $"nvarchar({length})";
 
     public override string SqlType(Type type)

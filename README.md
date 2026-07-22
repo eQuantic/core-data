@@ -3,6 +3,10 @@
 **A provider-agnostic Repository + Unit of Work for .NET, where filtering, sorting and paging are
 authored typed and fluent — not as stringly-typed configuration.**
 
+📚 **[Documentation](https://equantic.github.io/core-data/)** — getting started per provider,
+concepts, the modeling vocabulary, the pushdown gates, migrations, per-store deep dives, cookbook
+and the full API reference.
+
 ```csharp
 var repo = unitOfWork.GetAsyncRepository<OrderData, Guid>();
 
