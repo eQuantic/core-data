@@ -88,6 +88,15 @@ public sealed class Document : IEntity<Guid>, IEntityTimeMark, IEntityTimeTrack,
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     An entity built on <c>eQuantic.Core.DataModel</c>'s richest base: Id + the full who/when audit
+///     (<c>CreatedAt/ById</c>, <c>UpdatedAt/ById</c>, <c>DeletedAt/ById</c>) — everything by convention.
+/// </summary>
+public sealed class AuditedTicket : eQuantic.Core.DataModel.EntityHistoryDataBase
+{
+    public string Label { get; set; } = "";
+}
+
 /// <summary>An entity whose foreign keys do <b>not</b> follow the conventions — the model declares them.</summary>
 public sealed class Invoice : IEntity<Guid>
 {
@@ -177,6 +186,7 @@ internal static class TestSchema
         .Entity<Subscriber>(entity => entity
             .Converts(x => x.Email, email => email.Value, EmailAddress.Create)
             .Converts(x => x.Status, status => status.ToString(), value => Enum.Parse<SubscriberStatus>(value)))
+        .Entity<AuditedTicket>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
 }
 
@@ -198,6 +208,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Subscriber>(subscriber => subscriber
             .EnsureCollection())
         .For<Invoice>(invoice => invoice
+            .EnsureCollection())
+        .For<AuditedTicket>(audited => audited
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
             .EnsureCollection());

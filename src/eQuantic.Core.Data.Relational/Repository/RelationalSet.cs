@@ -84,9 +84,9 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
         // A soft-delete entity's set-based delete stamps DeletedAt instead — the rows survive, scoped out of reads.
-        if (EntityLifecycle.IsSoftDelete(typeof(TEntity)))
+        if (EntityLifecycle.IsSoftDelete(typeof(TEntity), _unitOfWork.Conventions))
         {
-            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(), cancellationToken).ConfigureAwait(false);
+            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(_unitOfWork.Conventions, _unitOfWork.Services), cancellationToken).ConfigureAwait(false);
         }
 
         // The global filter scopes set-based writes too (a tenant-scoped delete stays tenant-scoped).
@@ -106,7 +106,7 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         var set = SqlUpdateRenderer.Render(_dialect, _configuration, updateExpression, parameters);
 
         // A time-tracked entity's set-based update stamps UpdatedAt unless the caller assigned it explicitly.
-        if (EntityLifecycle.UpdateStamp(typeof(TEntity)) is { } stamp
+        if (EntityLifecycle.UpdateStamp(typeof(TEntity), _unitOfWork.Conventions) is { } stamp
             && _configuration.ColumnFor(stamp.Name) is { } stampColumn
             && !set.Contains(_dialect.Quote(stampColumn.Name) + " ="))
         {

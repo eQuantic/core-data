@@ -210,12 +210,16 @@ indexing policy).
   per-request factory receives the scope's `IServiceProvider` (resolve the current tenant there),
   and `IgnoringQueryFilters()` opts a read out. A tenant filter on the Cosmos partition key
   auto-scopes the query to that partition.
-- **Entity lifecycle by convention** (`eQuantic.Core.Domain`) — an entity implementing
-  `IEntityTimeMark`/`IEntityTimeTrack`/`IEntityTimeEnded` gets `CreatedAt`/`UpdatedAt` stamped on
-  every provider (set-based updates included), and its deletes become **soft deletes**:
-  `Remove`/`DeleteMany` stamp `DeletedAt`, the row survives, and every read and set-based write is
-  scoped to live rows automatically — `IgnoringQueryFilters()` opts a read out. No configuration,
-  no hooks to wire.
+- **Entity lifecycle by convention** (`eQuantic.Core.Domain` / `eQuantic.Core.DataModel`) — an
+  entity implementing `IEntityTimeMark`/`IEntityTimeTrack`/`IEntityTimeEnded` (or extending the
+  `DataModel` bases, which do) gets `CreatedAt`/`UpdatedAt` stamped on every provider (set-based
+  updates included), and its deletes become **soft deletes**: `Remove`/`DeleteMany` stamp
+  `DeletedAt`, the row survives, and every read and set-based write is scoped to live rows
+  automatically — `IgnoringQueryFilters()` opts a read out. Register a `DataConventions` singleton
+  to tune it: `Clock` (a `TimeProvider` — inject a fixed one in tests), `LifecycleStamps`/
+  `SoftDelete` toggles, and `CurrentUserId` — a per-request accessor that also stamps the **who**
+  (`CreatedById`/`UpdatedById`/`DeletedById`, the `eQuantic.Core.DataModel` shapes) by
+  property-name convention.
 - **Optimistic concurrency** — `ConcurrencyToken(x => x.Version)` on the relational model makes
   every update and delete match the token it read (`WHERE … AND version = @old`) and bump it; a
   commit that misses rows throws `ConcurrencyConflictException` and rolls back — the lost update

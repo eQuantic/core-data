@@ -75,9 +75,9 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
         // A soft-delete entity's set-based delete stamps DeletedAt instead — the documents survive, scoped out of reads.
-        if (EntityLifecycle.IsSoftDelete(typeof(TEntity)))
+        if (EntityLifecycle.IsSoftDelete(typeof(TEntity), _unitOfWork.Conventions))
         {
-            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(), cancellationToken).ConfigureAwait(false);
+            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(_unitOfWork.Conventions, _unitOfWork.Services), cancellationToken).ConfigureAwait(false);
         }
 
         var session = _unitOfWork.Session;
@@ -102,19 +102,19 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     }
 
     /// <summary>Stamps <c>UpdatedAt</c> into a set-based update when the entity tracks it and the caller did not assign it.</summary>
-    private static UpdateDefinition<TEntity> WithUpdateStamp(UpdateDefinition<TEntity> update,
+    private UpdateDefinition<TEntity> WithUpdateStamp(UpdateDefinition<TEntity> update,
         Expression<Func<TEntity, TEntity>> updateExpression)
     {
-        if (!EntityLifecycle.IsTimeTracked(typeof(TEntity))
+        if (EntityLifecycle.UpdateStamp(typeof(TEntity), _unitOfWork.Conventions) is not { } stamp
             || (updateExpression.Body is MemberInitExpression init
-                && init.Bindings.Any(binding => binding.Member.Name == nameof(Core.Domain.Entities.IEntityTimeTrack.UpdatedAt))))
+                && init.Bindings.Any(binding => binding.Member.Name == stamp.Name)))
         {
             return update;
         }
 
         var parameter = Expression.Parameter(typeof(TEntity), "x");
         var selector = Expression.Lambda<Func<TEntity, DateTime?>>(
-            Expression.Property(parameter, nameof(Core.Domain.Entities.IEntityTimeTrack.UpdatedAt)), parameter);
-        return Builders<TEntity>.Update.Combine(update, Builders<TEntity>.Update.Set(selector, DateTime.UtcNow));
+            Expression.Property(parameter, stamp.Name), parameter);
+        return Builders<TEntity>.Update.Combine(update, Builders<TEntity>.Update.Set(selector, (DateTime?)(DateTime)stamp.Value!));
     }
 }

@@ -455,6 +455,67 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That(fresh.Version, Is.EqualTo(2), "reload + retry succeeds and bumps again");
     }
 
+    // ---------------------------------------------------------------- DataConventions + eQuantic.Core.DataModel
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    [Test]
+    public async Task DataModel_bases_get_the_full_who_and_when_audit_by_convention()
+    {
+        var moment = new DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero);
+        using var db = await NewSchemaAsync(services => services.AddSingleton(new DataConventions
+        {
+            Clock = new FixedTimeProvider(moment),
+            CurrentUserId = _ => 42,
+        }));
+        var repo = db.Resolve<IAsyncRepository<AuditedTicket, int>>();
+        var uow = Uow(db);
+
+        var ticket = new AuditedTicket { Label = "audited" };
+        await repo.AddAsync(ticket);
+        await uow.CommitAsync();
+        Assert.That(ticket.Id, Is.GreaterThan(0), "the DataModel base rides the generated-key backfill");
+        Assert.That(ticket.CreatedAt, Is.EqualTo(moment.UtcDateTime), "the injected clock stamped CreatedAt");
+        Assert.That(ticket.CreatedById, Is.EqualTo(42), "the current user stamped CreatedById");
+
+        ticket.Label = "edited";
+        await repo.ModifyAsync(ticket);
+        await uow.CommitAsync();
+        Assert.That((ticket.UpdatedAt, ticket.UpdatedById), Is.EqualTo(((DateTime?)moment.UtcDateTime, (int?)42)),
+            "the update stamped when and who");
+
+        await repo.RemoveAsync(ticket);
+        await uow.CommitAsync();
+        Assert.That(await repo.GetAsync(ticket.Id), Is.Null, "soft-deleted and scoped out of reads");
+        var survivor = (await repo.GetAllAsync(new QueryOptions<AuditedTicket>().IgnoringQueryFilters())).Single();
+        Assert.That((survivor.DeletedAt, survivor.DeletedById), Is.EqualTo(((DateTime?)moment.UtcDateTime, (int?)42)),
+            "the row survived carrying the full who+when audit");
+    }
+
+    [Test]
+    public async Task Conventions_toggles_turn_the_lifecycle_off()
+    {
+        using var db = await NewSchemaAsync(services => services.AddSingleton(new DataConventions
+        {
+            LifecycleStamps = false,
+            SoftDelete = false,
+        }));
+        var docs = db.Resolve<IAsyncRepository<Document, Guid>>();
+
+        var doc = new Document { Id = Guid.NewGuid(), Title = "raw" };
+        await docs.AddAsync(doc);
+        await Uow(db).CommitAsync();
+        Assert.That(doc.CreatedAt, Is.EqualTo(default(DateTime)), "stamps off — nothing touched the entity");
+
+        await docs.RemoveAsync(doc);
+        await Uow(db).CommitAsync();
+        Assert.That((await docs.GetAllAsync(new QueryOptions<Document>().IgnoringQueryFilters())).Count(), Is.Zero,
+            "soft delete off — the delete was a real delete");
+    }
+
     // ---------------------------------------------------------------- declared navigations + resilience wiring
 
     [Test]

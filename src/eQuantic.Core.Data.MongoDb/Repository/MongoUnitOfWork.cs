@@ -43,6 +43,14 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
+    private DataConventions? _conventions;
+
+    /// <summary>The active write conventions — the registered <see cref="DataConventions" />, or the defaults.</summary>
+    internal DataConventions Conventions =>
+        _conventions ??= ServiceProvider.GetService(typeof(DataConventions)) as DataConventions ?? new DataConventions();
+
+    /// <summary>The scope's service provider (handed to per-request convention accessors).</summary>
+    internal IServiceProvider Services => ServiceProvider;
 
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
     /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
@@ -56,7 +64,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
         return EntityLifecycle.And(
             _queryFilters?.FilterFor<TEntity>(ServiceProvider),
-            EntityLifecycle.SoftDeleteFilter<TEntity>());
+            EntityLifecycle.SoftDeleteFilter<TEntity>(Conventions));
     }
 
     // -------------------------------------------------------------- union reads
@@ -172,26 +180,26 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
     internal void StageInsert<TEntity>(TEntity item) where TEntity : class
     {
-        EntityLifecycle.StampForInsert(item);
+        EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
     }
 
     internal void StageReplace<TEntity>(TEntity item) where TEntity : class
     {
-        EntityLifecycle.StampForUpdate(item);
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
     }
 
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
     {
-        EntityLifecycle.StampForUpdate(item);
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = true });
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
     {
         // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
-        if (EntityLifecycle.TrySoftDelete(item))
+        if (EntityLifecycle.TrySoftDelete(item, Conventions, ServiceProvider))
         {
             Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
             return;

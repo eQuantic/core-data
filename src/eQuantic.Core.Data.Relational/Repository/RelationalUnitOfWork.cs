@@ -30,6 +30,14 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
     private DbTransaction? _transaction;
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
+    private DataConventions? _conventions;
+
+    /// <summary>The active write conventions — the registered <see cref="DataConventions" />, or the defaults.</summary>
+    internal DataConventions Conventions =>
+        _conventions ??= ServiceProvider.GetService(typeof(DataConventions)) as DataConventions ?? new DataConventions();
+
+    /// <summary>The scope's service provider (handed to per-request convention accessors).</summary>
+    internal IServiceProvider Services => ServiceProvider;
     private bool _disposed;
 
     protected RelationalUnitOfWork(IServiceProvider serviceProvider, DbDataSource dataSource, SqlDialect dialect, RelationalModel model)
@@ -90,7 +98,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
         return EntityLifecycle.And(
             _queryFilters?.FilterFor(entityType, ServiceProvider),
-            EntityLifecycle.SoftDeleteFilter(entityType));
+            EntityLifecycle.SoftDeleteFilter(entityType, Conventions));
     }
 
     // -------------------------------------------------------------- union reads
@@ -174,18 +182,18 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
     internal void StageInsert<TEntity>(TEntity item) where TEntity : class
     {
-        EntityLifecycle.StampForInsert(item);
+        EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Insert, item));
     }
 
     internal void StageUpdate<TEntity>(TEntity item) where TEntity : class
     {
-        EntityLifecycle.StampForUpdate(item);
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Update, item));
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
-        _pending.Add(EntityLifecycle.TrySoftDelete(item)
+        _pending.Add(EntityLifecycle.TrySoftDelete(item, Conventions, ServiceProvider)
             ? new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Update, item)
             : new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Delete, item));
 
