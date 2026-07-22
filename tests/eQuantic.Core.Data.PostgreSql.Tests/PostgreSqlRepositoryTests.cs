@@ -388,6 +388,72 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"));
     }
 
+    // ---------------------------------------------------------------- lifecycle conventions + optimistic concurrency
+
+    [Test]
+    public async Task Lifecycle_interfaces_stamp_soft_delete_and_scope_reads_by_convention()
+    {
+        using var db = await NewSchemaAsync();
+        var docs = db.Resolve<IAsyncRepository<Document, Guid>>();
+
+        var doc = new Document { Id = Guid.NewGuid(), Title = "draft" };
+        await docs.AddAsync(doc);
+        await Uow(db).CommitAsync();
+        Assert.That(doc.CreatedAt, Is.Not.EqualTo(default(DateTime)), "CreatedAt stamped on insert");
+        Assert.That(doc.UpdatedAt, Is.Null, "UpdatedAt untouched on insert");
+
+        doc.Title = "revised";
+        await docs.ModifyAsync(doc);
+        await Uow(db).CommitAsync();
+        Assert.That(doc.UpdatedAt, Is.Not.Null, "UpdatedAt stamped on update");
+
+        await docs.RemoveAsync(doc);
+        await Uow(db).CommitAsync();
+        Assert.That(await docs.GetAsync(doc.Id), Is.Null, "the live-rows filter scopes reads");
+        var all = await docs.GetAllAsync(new QueryOptions<Document>().IgnoringQueryFilters());
+        Assert.That(all.Single().DeletedAt, Is.Not.Null, "the row survived as a soft delete");
+
+        var second = new Document { Id = Guid.NewGuid(), Title = "bulk" };
+        await docs.AddAsync(second);
+        await Uow(db).CommitAsync();
+        Assert.That(await docs.DeleteManyAsync(x => x.Title == "bulk"), Is.EqualTo(1),
+            "set-based deletes soft-delete too");
+        Assert.That(await docs.CountAsync(), Is.Zero);
+        Assert.That((await docs.GetAllAsync(new QueryOptions<Document>().IgnoringQueryFilters())).Count(), Is.EqualTo(2));
+    }
+
+    [Test]
+    public async Task Concurrency_token_catches_the_lost_update_and_bumps_on_success()
+    {
+        using var db = await NewSchemaAsync();
+        var docs = db.Resolve<IAsyncRepository<Document, Guid>>();
+        var id = Guid.NewGuid();
+        await docs.AddAsync(new Document { Id = id, Title = "v0" });
+        await Uow(db).CommitAsync();
+
+        var mine = (await docs.GetAsync(id))!;
+        var theirs = (await docs.GetAsync(id))!;
+
+        theirs.Title = "theirs";
+        await docs.ModifyAsync(theirs);
+        await Uow(db).CommitAsync();
+        Assert.That(theirs.Version, Is.EqualTo(1), "the winning write bumped the token on the entity");
+
+        mine.Title = "mine";
+        await docs.ModifyAsync(mine);
+        Assert.That(async () => await Uow(db).CommitAsync(),
+            Throws.TypeOf<ConcurrencyConflictException>(),
+            "the stale write missed its row and the flush rolled back");
+
+        Assert.That((await docs.GetAsync(id))!.Title, Is.EqualTo("theirs"), "nothing from the stale flush applied");
+
+        var fresh = (await docs.GetAsync(id))!;
+        fresh.Title = "retried";
+        await docs.ModifyAsync(fresh);
+        await Uow(db).CommitAsync();
+        Assert.That(fresh.Version, Is.EqualTo(2), "reload + retry succeeds and bumps again");
+    }
+
     // ---------------------------------------------------------------- migration evolution + rich indexes
 
     [Test]

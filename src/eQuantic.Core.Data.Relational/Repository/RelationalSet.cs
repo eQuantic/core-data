@@ -83,6 +83,12 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
 
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
+        // A soft-delete entity's set-based delete stamps DeletedAt instead — the rows survive, scoped out of reads.
+        if (EntityLifecycle.IsSoftDelete(typeof(TEntity)))
+        {
+            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(), cancellationToken).ConfigureAwait(false);
+        }
+
         // The global filter scopes set-based writes too (a tenant-scoped delete stays tenant-scoped).
         var (where, parameters) = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         var sql = $"DELETE FROM {_dialect.Quote(_configuration.TableName)} WHERE {where}";
@@ -98,6 +104,16 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     {
         var parameters = new List<object?>();
         var set = SqlUpdateRenderer.Render(_dialect, _configuration, updateExpression, parameters);
+
+        // A time-tracked entity's set-based update stamps UpdatedAt unless the caller assigned it explicitly.
+        if (EntityLifecycle.UpdateStamp(typeof(TEntity)) is { } stamp
+            && _configuration.ColumnFor(stamp.Name) is { } stampColumn
+            && !set.Contains(_dialect.Quote(stampColumn.Name) + " ="))
+        {
+            parameters.Add(_dialect.BindValue(stamp.Value));
+            set += $", {_dialect.Quote(stampColumn.Name)} = @p{parameters.Count - 1}";
+        }
+
         var (where, whereParameters) = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
 
         // The WHERE was rendered with its own @p0-based numbering; rebase it after the SET parameters.

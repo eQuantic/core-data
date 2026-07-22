@@ -45,6 +45,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     private bool _queryFiltersResolved;
 
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
     internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
     {
         if (!_queryFiltersResolved)
@@ -53,7 +54,9 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
             _queryFiltersResolved = true;
         }
 
-        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+        return EntityLifecycle.And(
+            _queryFilters?.FilterFor<TEntity>(ServiceProvider),
+            EntityLifecycle.SoftDeleteFilter<TEntity>());
     }
 
     // -------------------------------------------------------------- union reads
@@ -167,17 +170,35 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
     // -------------------------------------------------------------- write staging (called by MongoSet)
 
-    internal void StageInsert<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageInsert<TEntity>(TEntity item) where TEntity : class
+    {
+        EntityLifecycle.StampForInsert(item);
         Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
+    }
 
-    internal void StageReplace<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageReplace<TEntity>(TEntity item) where TEntity : class
+    {
+        EntityLifecycle.StampForUpdate(item);
         Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
+    }
 
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
+    {
+        EntityLifecycle.StampForUpdate(item);
         Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = true });
+    }
 
-    internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageDelete<TEntity>(TEntity item) where TEntity : class
+    {
+        // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
+        if (EntityLifecycle.TrySoftDelete(item))
+        {
+            Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
+            return;
+        }
+
         Buffer<TEntity>().Add(new DeleteOneModel<TEntity>(IdFilter(item)));
+    }
 
     private PendingCollectionWrites<TEntity> Buffer<TEntity>() where TEntity : class
     {

@@ -39,6 +39,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     private bool _queryFiltersResolved;
 
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
     internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
     {
         if (!_queryFiltersResolved)
@@ -47,7 +48,9 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
             _queryFiltersResolved = true;
         }
 
-        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+        return EntityLifecycle.And(
+            _queryFilters?.FilterFor<TEntity>(ServiceProvider),
+            EntityLifecycle.SoftDeleteFilter<TEntity>());
     }
 
     // -------------------------------------------------------------- write staging
@@ -62,11 +65,23 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
                 "UpdateMany increments (x => new ... { N = x.N + n }).");
         }
 
+        // Cassandra writes are upserts, so both stamps apply: CreatedAt only when unset, UpdatedAt always.
+        EntityLifecycle.StampForInsert(item);
+        EntityLifecycle.StampForUpdate(item);
         _pending.Add(CassandraMapper.BuildUpsert(configuration, item));
     }
 
-    internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageDelete<TEntity>(TEntity item) where TEntity : class
+    {
+        // A soft-delete entity's Remove stamps DeletedAt and stages an upsert — the row survives.
+        if (EntityLifecycle.TrySoftDelete(item))
+        {
+            StageUpsert(item);
+            return;
+        }
+
         _pending.Add(CassandraMapper.BuildDelete(Configuration<TEntity>(), item));
+    }
 
     // -------------------------------------------------------------- commit
 

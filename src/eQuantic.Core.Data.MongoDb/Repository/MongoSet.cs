@@ -70,17 +70,16 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     }
 
     // ---------------------------------------------------------------- set-based writes (immediate)
-    public long DeleteMany(Expression<Func<TEntity, bool>> filter)
-    {
-        var session = _unitOfWork.Session;
-        var result = session is null
-            ? _collection.DeleteMany(Scoped(filter))
-            : _collection.DeleteMany(session, Scoped(filter));
-        return result.DeletedCount;
-    }
+    public long DeleteMany(Expression<Func<TEntity, bool>> filter) => DeleteManyAsync(filter).GetAwaiter().GetResult();
 
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
+        // A soft-delete entity's set-based delete stamps DeletedAt instead — the documents survive, scoped out of reads.
+        if (EntityLifecycle.IsSoftDelete(typeof(TEntity)))
+        {
+            return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(), cancellationToken).ConfigureAwait(false);
+        }
+
         var session = _unitOfWork.Session;
         var result = session is null
             ? await _collection.DeleteManyAsync(Scoped(filter), cancellationToken).ConfigureAwait(false)
@@ -88,24 +87,34 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         return result.DeletedCount;
     }
 
-    public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression)
-    {
-        var update = MongoUpdate.Build(updateExpression);
-        var session = _unitOfWork.Session;
-        var result = session is null
-            ? _collection.UpdateMany(Scoped(filter), update)
-            : _collection.UpdateMany(session, Scoped(filter), update);
-        return result.ModifiedCount;
-    }
+    public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression) =>
+        UpdateManyAsync(filter, updateExpression).GetAwaiter().GetResult();
 
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
-        var update = MongoUpdate.Build(updateExpression);
+        var update = WithUpdateStamp(MongoUpdate.Build(updateExpression), updateExpression);
         var session = _unitOfWork.Session;
         var result = session is null
             ? await _collection.UpdateManyAsync(Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false)
             : await _collection.UpdateManyAsync(session, Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.ModifiedCount;
+    }
+
+    /// <summary>Stamps <c>UpdatedAt</c> into a set-based update when the entity tracks it and the caller did not assign it.</summary>
+    private static UpdateDefinition<TEntity> WithUpdateStamp(UpdateDefinition<TEntity> update,
+        Expression<Func<TEntity, TEntity>> updateExpression)
+    {
+        if (!EntityLifecycle.IsTimeTracked(typeof(TEntity))
+            || (updateExpression.Body is MemberInitExpression init
+                && init.Bindings.Any(binding => binding.Member.Name == nameof(Core.Domain.Entities.IEntityTimeTrack.UpdatedAt))))
+        {
+            return update;
+        }
+
+        var parameter = Expression.Parameter(typeof(TEntity), "x");
+        var selector = Expression.Lambda<Func<TEntity, DateTime?>>(
+            Expression.Property(parameter, nameof(Core.Domain.Entities.IEntityTimeTrack.UpdatedAt)), parameter);
+        return Builders<TEntity>.Update.Combine(update, Builders<TEntity>.Update.Set(selector, DateTime.UtcNow));
     }
 }

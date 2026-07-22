@@ -18,13 +18,14 @@ public abstract class RelationalEntityConfiguration
 {
     /// <summary>Initializes the configuration.</summary>
     protected RelationalEntityConfiguration(Type entityType, string tableName, IReadOnlyList<RelationalColumn> columns,
-        RelationalColumn key, bool keyIsGenerated)
+        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null)
     {
         EntityType = entityType;
         TableName = tableName;
         Columns = columns;
         Key = key;
         KeyIsGenerated = keyIsGenerated;
+        ConcurrencyToken = concurrencyToken;
     }
 
     /// <summary>The entity type.</summary>
@@ -42,6 +43,12 @@ public abstract class RelationalEntityConfiguration
     /// <summary>Whether the key is database-generated (identity): inserts omit it and read it back.</summary>
     public bool KeyIsGenerated { get; }
 
+    /// <summary>
+    ///     The optimistic-concurrency column, or <c>null</c>: updates and deletes match it in the WHERE and bump
+    ///     it, and a commit whose writes miss rows throws <c>ConcurrencyConflictException</c>.
+    /// </summary>
+    public RelationalColumn? ConcurrencyToken { get; }
+
     /// <summary>Resolves a member (property) name to its column, or <c>null</c> when the member is not mapped.</summary>
     public RelationalColumn? ColumnFor(string memberName) =>
         Columns.FirstOrDefault(column => string.Equals(column.Property.Name, memberName, StringComparison.OrdinalIgnoreCase));
@@ -53,8 +60,8 @@ public sealed class RelationalEntityConfiguration<TEntity> : RelationalEntityCon
     where TEntity : class
 {
     internal RelationalEntityConfiguration(string tableName, IReadOnlyList<RelationalColumn> columns,
-        RelationalColumn key, bool keyIsGenerated)
-        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated)
+        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null)
+        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken)
     {
     }
 }
@@ -111,6 +118,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
+    private string? _concurrencyMember;
 
     internal RelationalEntityBuilder(SqlDialect dialect) => _dialect = dialect;
 
@@ -152,6 +160,20 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Declares the <b>optimistic-concurrency token</b> (an <c>int</c>, <c>long</c> or <c>Guid</c> member):
+    ///     every update and delete of the entity matches the token it read (<c>WHERE … AND version = @old</c>)
+    ///     and bumps it; a commit whose writes miss rows throws <c>ConcurrencyConflictException</c> and rolls
+    ///     back — the lost update is caught, not silently overwritten.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    public RelationalEntityBuilder<TEntity> ConcurrencyToken<TMember>(Expression<Func<TEntity, TMember>> selector)
+    {
+        _concurrencyMember = selector.GetMemberName();
+        return this;
+    }
+
     internal RelationalEntityConfiguration<TEntity> Build()
     {
         // Scalar members (and collections of scalars, for stores with array columns) map to columns; entity
@@ -171,8 +193,23 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                   ?? throw new InvalidOperationException(
                       $"Entity '{typeof(TEntity).Name}' has no mapped member '{keyMember}'; declare the key with Key(x => ...).");
 
+        RelationalColumn? concurrencyToken = null;
+        if (_concurrencyMember is not null)
+        {
+            concurrencyToken = columns.FirstOrDefault(column =>
+                                   string.Equals(column.Property.Name, _concurrencyMember, StringComparison.OrdinalIgnoreCase))
+                               ?? throw new InvalidOperationException(
+                                   $"Entity '{typeof(TEntity).Name}' has no mapped member '{_concurrencyMember}' to use as the concurrency token.");
+            var type = Nullable.GetUnderlyingType(concurrencyToken.Property.PropertyType) ?? concurrencyToken.Property.PropertyType;
+            if (type != typeof(int) && type != typeof(long) && type != typeof(Guid))
+            {
+                throw new InvalidOperationException(
+                    $"The concurrency token '{_concurrencyMember}' must be an int, long or Guid (it is bumped on every write).");
+            }
+        }
+
         return new RelationalEntityConfiguration<TEntity>(
-            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated);
+            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken);
     }
 
     private bool IsMapped(Type type)

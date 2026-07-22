@@ -42,6 +42,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     private bool _queryFiltersResolved;
 
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
+    /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
     internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
     {
         if (!_queryFiltersResolved)
@@ -50,13 +51,16 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
             _queryFiltersResolved = true;
         }
 
-        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+        return EntityLifecycle.And(
+            _queryFilters?.FilterFor<TEntity>(ServiceProvider),
+            EntityLifecycle.SoftDeleteFilter<TEntity>());
     }
 
     // -------------------------------------------------------------- write staging (called by the repository/set)
 
     internal void StageInsert<TEntity>(TEntity item) where TEntity : class
     {
+        EntityLifecycle.StampForInsert(item);
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
         _pending.Add(new CosmosPendingWrite(
@@ -68,6 +72,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
     {
+        EntityLifecycle.StampForUpdate(item);
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
 
@@ -94,6 +99,13 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
     internal void StageDelete<TEntity>(TEntity item, string id) where TEntity : class
     {
+        // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
+        if (EntityLifecycle.TrySoftDelete(item))
+        {
+            StageUpsert(item);
+            return;
+        }
+
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
         _pending.Add(new CosmosPendingWrite(

@@ -2,6 +2,7 @@ using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Relational.Migration;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Domain.Entities;
 
 namespace eQuantic.Core.Data.PostgreSql.Tests;
 
@@ -61,6 +62,30 @@ public sealed class OrderItem : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     A full-lifecycle entity: the <c>eQuantic.Core.Domain</c> interfaces bring stamped <c>CreatedAt</c>/
+///     <c>UpdatedAt</c>, soft deletes with the automatic live-rows filter, and <c>Version</c> is the
+///     optimistic-concurrency token.
+/// </summary>
+public sealed class Document : IEntity<Guid>, IEntityTimeMark, IEntityTimeTrack, IEntityTimeEnded
+{
+    public Guid Id { get; set; }
+
+    public string Title { get; set; } = "";
+
+    public int Version { get; set; }
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime? UpdatedAt { get; set; }
+
+    public DateTime? DeletedAt { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>An entity whose table starts <b>bare</b> (created by a Run step): AddField/DropField evolve it.</summary>
 public sealed class LegacyNote : IEntity<Guid>
 {
@@ -95,6 +120,7 @@ internal static class TestSchema
         .Entity<Buyer>(_ => { })
         .Entity<OrderItem>(_ => { })
         .Entity<LegacyNote>(entity => entity.Table("legacy_notes"))
+        .Entity<Document>(entity => entity.ConcurrencyToken(x => x.Version))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
 }
 
@@ -110,6 +136,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Buyer>(buyer => buyer
             .EnsureCollection())
         .For<OrderItem>(item => item
+            .EnsureCollection())
+        .For<Document>(document => document
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
             .EnsureCollection());

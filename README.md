@@ -210,6 +210,17 @@ indexing policy).
   per-request factory receives the scope's `IServiceProvider` (resolve the current tenant there),
   and `IgnoringQueryFilters()` opts a read out. A tenant filter on the Cosmos partition key
   auto-scopes the query to that partition.
+- **Entity lifecycle by convention** (`eQuantic.Core.Domain`) — an entity implementing
+  `IEntityTimeMark`/`IEntityTimeTrack`/`IEntityTimeEnded` gets `CreatedAt`/`UpdatedAt` stamped on
+  every provider (set-based updates included), and its deletes become **soft deletes**:
+  `Remove`/`DeleteMany` stamp `DeletedAt`, the row survives, and every read and set-based write is
+  scoped to live rows automatically — `IgnoringQueryFilters()` opts a read out. No configuration,
+  no hooks to wire.
+- **Optimistic concurrency** — `ConcurrencyToken(x => x.Version)` on the relational model makes
+  every update and delete match the token it read (`WHERE … AND version = @old`) and bump it; a
+  commit that misses rows throws `ConcurrencyConflictException` and rolls back — the lost update
+  is caught, never silently overwritten. Cosmos does the same with
+  `ConcurrencyToken(x => x.ETag)` as a conditional `If-Match` replace.
 - **OpenTelemetry built in** — subscribe to the `eQuantic.Core.Data` `ActivitySource` and every
   provider emits spans with the statement (placeholders, never values) plus the engine's own facts:
   client evaluation, split-query count, partition scoping, staged write counts.

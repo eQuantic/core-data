@@ -46,6 +46,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         (Expression<Func<TEntity, bool>>?)GlobalFilter(typeof(TEntity));
 
     /// <summary>The global filter registered for <paramref name="entityType" /> in this scope, or <c>null</c> — union branches resolve per branch.</summary>
+    /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
     internal LambdaExpression? GlobalFilter(Type entityType)
     {
         if (!_queryFiltersResolved)
@@ -54,7 +55,9 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             _queryFiltersResolved = true;
         }
 
-        return _queryFilters?.FilterFor(entityType, ServiceProvider);
+        return EntityLifecycle.And(
+            _queryFilters?.FilterFor(entityType, ServiceProvider),
+            EntityLifecycle.SoftDeleteFilter(entityType));
     }
 
     // -------------------------------------------------------------- union reads
@@ -133,14 +136,22 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
     // -------------------------------------------------------------- write staging
 
-    internal void StageInsert<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageInsert<TEntity>(TEntity item) where TEntity : class
+    {
+        EntityLifecycle.StampForInsert(item);
         _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Insert, item));
+    }
 
-    internal void StageUpdate<TEntity>(TEntity item) where TEntity : class =>
+    internal void StageUpdate<TEntity>(TEntity item) where TEntity : class
+    {
+        EntityLifecycle.StampForUpdate(item);
         _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Update, item));
+    }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
-        _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Delete, item));
+        _pending.Add(EntityLifecycle.TrySoftDelete(item)
+            ? new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Update, item)
+            : new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Delete, item));
 
     // -------------------------------------------------------------- commit (atomic flush)
 
@@ -177,10 +188,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             batch.Transaction = _transaction ?? local;
 
             var returning = new List<PendingWrite>();
+            var bumped = new List<(PendingWrite Write, object NewVersion)>();
             foreach (var write in writes)
             {
                 var command = batch.CreateBatchCommand();
-                if (Render(write, command))
+                if (Render(write, command, bumped))
                 {
                     returning.Add(write);
                 }
@@ -188,22 +200,41 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
                 batch.BatchCommands.Add(command);
             }
 
+            long affected;
             if (returning.Count == 0)
             {
-                await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                affected = await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                await using var reader = await batch.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                foreach (var write in returning)
+                var reader = await batch.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                await using (reader.ConfigureAwait(false))
                 {
-                    if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    foreach (var write in returning)
                     {
-                        AssignGeneratedKey(write, reader.GetValue(0));
+                        if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                        {
+                            AssignGeneratedKey(write, reader.GetValue(0));
+                        }
+
+                        await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
                     }
 
-                    await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
+                    await reader.CloseAsync().ConfigureAwait(false);
+                    affected = reader.RecordsAffected;
                 }
+            }
+
+            // The optimistic-concurrency check: every staged write targets exactly one row, so a shortfall means
+            // a versioned row changed (or vanished) under us. Nothing is durably applied — this flush rolls back.
+            if (bumped.Count > 0 && affected >= 0 && affected < writes.Count)
+            {
+                throw new ConcurrencyConflictException(writes.Count, affected);
+            }
+
+            foreach (var (write, newVersion) in bumped)
+            {
+                write.Configuration.ConcurrencyToken!.Property.SetValue(write.Entity, newVersion);
             }
 
             if (local is not null)
@@ -326,10 +357,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
     // -------------------------------------------------------------- write rendering
 
     /// <summary>Renders one staged write into a batch command; true when the command reads back a generated key.</summary>
-    private bool Render(PendingWrite write, DbBatchCommand command)
+    private bool Render(PendingWrite write, DbBatchCommand command, List<(PendingWrite Write, object NewVersion)> bumped)
     {
         var configuration = write.Configuration;
         var key = configuration.Key;
+        var token = configuration.ConcurrencyToken;
         var parameters = new List<object?>();
 
         string Bind(object? value)
@@ -356,20 +388,39 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
             case PendingWriteKind.Update:
             {
-                var columns = configuration.Columns.Where(column => column != key).ToList();
+                // The token it read goes into the WHERE; the bumped value goes into the SET (written back on success).
+                var columns = configuration.Columns.Where(column => column != key && column != token).ToList();
                 var set = string.Join(", ", columns.Select(column =>
                     $"{Dialect.Quote(column.Name)} = {Bind(column.Property.GetValue(write.Entity))}"));
+                var where = string.Empty;
+                if (token is not null)
+                {
+                    var current = token.Property.GetValue(write.Entity);
+                    var next = NextVersion(current, token.Property.PropertyType);
+                    bumped.Add((write, next));
+                    set += $", {Dialect.Quote(token.Name)} = {Bind(next)}";
+                    where = $" AND {Dialect.Quote(token.Name)} = {Bind(current)}";
+                }
+
                 command.CommandText =
                     $"UPDATE {Dialect.Quote(configuration.TableName)} SET {set} " +
-                    $"WHERE {Dialect.Quote(key.Name)} = {Bind(key.Property.GetValue(write.Entity))}";
+                    $"WHERE {Dialect.Quote(key.Name)} = {Bind(key.Property.GetValue(write.Entity))}" + where;
                 break;
             }
 
             case PendingWriteKind.Delete:
+            {
                 command.CommandText =
                     $"DELETE FROM {Dialect.Quote(configuration.TableName)} " +
                     $"WHERE {Dialect.Quote(key.Name)} = {Bind(key.Property.GetValue(write.Entity))}";
+                if (token is not null)
+                {
+                    bumped.Add((write, token.Property.GetValue(write.Entity)!));
+                    command.CommandText += $" AND {Dialect.Quote(token.Name)} = {Bind(token.Property.GetValue(write.Entity))}";
+                }
+
                 break;
+            }
         }
 
         for (var index = 0; index < parameters.Count; index++)
@@ -382,6 +433,23 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         }
 
         return returning;
+    }
+
+    /// <summary>The next token value: integers increment, Guids renew.</summary>
+    private static object NextVersion(object? current, Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        if (underlying == typeof(int))
+        {
+            return ((int?)current ?? 0) + 1;
+        }
+
+        if (underlying == typeof(long))
+        {
+            return ((long?)current ?? 0L) + 1L;
+        }
+
+        return Guid.NewGuid();
     }
 
     private static void AssignGeneratedKey(PendingWrite write, object value)
