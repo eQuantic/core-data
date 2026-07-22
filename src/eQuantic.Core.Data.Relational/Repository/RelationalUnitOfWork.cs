@@ -228,8 +228,10 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         // Inside an explicit transaction the flush joins it (durable on CommitTransactionAsync); otherwise the
-        // flush runs in its own transaction — a relational commit is atomic.
-        var local = _transaction is null
+        // flush runs in its own transaction — a relational commit is atomic. A single-statement flush skips the
+        // local transaction entirely: one statement is atomic on its own, so the semantics are identical and the
+        // BEGIN/COMMIT round trips are saved (the same optimization EF Core applies to one-statement saves).
+        var local = _transaction is null && writes.Count > 1
             ? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)
             : null;
         try

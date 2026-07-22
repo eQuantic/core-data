@@ -22,8 +22,21 @@ public class CompareWriteBenchmarks
 {
     private CompareStacks _stacks = null!;
 
+    /// <summary>
+    ///     Each benchmark runs in its own process, so this runs once per benchmark: the stacks come up and the
+    ///     rows earlier benchmarks inserted are removed — every stack's measurement starts from the same
+    ///     10 000-row table instead of inheriting whatever ran before it. (Growth *during* a benchmark's own
+    ///     iterations remains — bounded, and comparable across stacks; an <c>IterationSetup</c> would remove it
+    ///     but forces single-invocation iterations, which costs far more accuracy than it buys.)
+    /// </summary>
     [GlobalSetup]
-    public void Setup() => _stacks = new CompareStacks();
+    public void Setup()
+    {
+        _stacks = new CompareStacks();
+        using var command = _stacks.DataSource.CreateCommand(
+            $"DELETE FROM {BenchmarkEnvironment.Table} WHERE category LIKE 'inserted-%' OR category LIKE 'batch-%'");
+        command.ExecuteNonQuery();
+    }
 
     [GlobalCleanup]
     public void Cleanup() => _stacks.Dispose();

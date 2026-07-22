@@ -78,33 +78,39 @@ internal static class RelationalMaterializer
         return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 
-    private static void Assign(object entity, RelationalColumn column, object value)
+    /// <summary>
+    ///     Materializes one cell into the target CLR type, through the column's converter and the same
+    ///     impedance bridges the entity path applies — the shared per-cell pipeline behind entity assignment
+    ///     and reader-direct projections.
+    /// </summary>
+    internal static object? Cell(RelationalColumn column, object value, Type memberType)
     {
         // A converted column materializes through its converter — the stored scalar becomes the domain value.
         if (column.Converter is { } converter)
         {
-            column.Property.SetValue(entity, converter.FromStored(ChangeValue(value, converter.StoredType)));
-            return;
+            return converter.FromStored(ChangeValue(value, converter.StoredType));
         }
 
-        Assign(entity, column.Property, value);
+        return Coerce(value, memberType);
     }
 
-    private static void Assign(object entity, PropertyInfo property, object value)
+    private static void Assign(object entity, RelationalColumn column, object value) =>
+        column.Property.SetValue(entity, Cell(column, value, column.Property.PropertyType));
+
+    /// <summary>Coerces a provider value into a member type (nullable unwrap, jsonb, arrays, enum/numeric).</summary>
+    private static object? Coerce(object value, Type memberType)
     {
-        var target = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+        var target = Nullable.GetUnderlyingType(memberType) ?? memberType;
 
         if (target.IsInstanceOfType(value))
         {
-            property.SetValue(entity, value);
-            return;
+            return value;
         }
 
         // Document columns (jsonb) come back as JSON text; shape them into the member's dictionary.
         if (value is string json && typeof(System.Collections.IDictionary).IsAssignableFrom(target))
         {
-            property.SetValue(entity, System.Text.Json.JsonSerializer.Deserialize(json, target));
-            return;
+            return System.Text.Json.JsonSerializer.Deserialize(json, target);
         }
 
         // A driver hands collections back as arrays; shape them into the member's List<T>.
@@ -116,10 +122,9 @@ internal static class RelationalMaterializer
                 list.Add(item);
             }
 
-            property.SetValue(entity, list);
-            return;
+            return list;
         }
 
-        property.SetValue(entity, target.IsEnum ? Enum.ToObject(target, value) : Convert.ChangeType(value, target));
+        return target.IsEnum ? Enum.ToObject(target, value) : Convert.ChangeType(value, target);
     }
 }

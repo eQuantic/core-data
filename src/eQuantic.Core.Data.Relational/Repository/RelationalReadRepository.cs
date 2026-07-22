@@ -69,7 +69,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, null, null, false, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).ToList();
+        await SelectMappedAsync(NotNull(map), options, null, null, false, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
@@ -77,7 +77,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, null, false, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).FirstOrDefault();
+        (await SelectMappedAsync(NotNull(map), options, 1, null, false, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
@@ -95,8 +95,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     public async Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var rows = await SelectAsync(options, page.Take, page.Skip, true, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false);
-        return new PagedResult<TResult>(rows.Select(map.Compile()).ToList(), total, page.PageIndex, page.PageSize);
+        var rows = await SelectMappedAsync(NotNull(map), options, page.Take, page.Skip, true, cancellationToken).ConfigureAwait(false);
+        return new PagedResult<TResult>(rows, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
@@ -607,6 +607,56 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         UnitOfWork.RetryAsync(write: false,
             _ => SelectCoreAsync(options, limit, offset, orderByKeyWhenUnsorted, cancellationToken, extraFilter, mapColumns),
             cancellationToken);
+
+    /// <summary>
+    ///     A mapped read: projects straight off the reader when the map's member accesses are plain selected
+    ///     columns and nothing is residual (one materialization pass); otherwise falls back to fetching the
+    ///     narrowed entity columns and running the compiled map in memory — same results either way.
+    /// </summary>
+    private async Task<List<TResult>> SelectMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map,
+        QueryOptions<TEntity>? options, int? limit, int? offset, bool orderByKeyWhenUnsorted,
+        CancellationToken cancellationToken)
+    {
+        var mapColumns = MapColumns(map);
+
+        if (mapColumns is not null && options is not { IncludePaths.Count: > 0 })
+        {
+            var plan = GatedPlan(options, null);
+            if (plan.Residual.Count == 0)
+            {
+                var selected = SelectedColumns(mapColumns, plan);
+                if (RelationalMapCompiler.TryCompile(map, selected) is { } projector)
+                {
+                    return await UnitOfWork.RetryAsync(write: false, async _ =>
+                    {
+                        using var activity = DataActivitySource.Instance.StartActivity($"{_dialect.System}.select", ActivityKind.Client);
+                        activity?.SetTag("db.system", _dialect.System);
+                        activity?.SetTag("equantic.client_evaluation", false);
+
+                        var sql = SelectSql(selected, plan.Where, options, orderByKeyWhenUnsorted || offset is not null,
+                            limit, offset, plan.Parameters);
+                        await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+                        var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+                        var results = new List<TResult>();
+                        await using (reader.ConfigureAwait(false))
+                        {
+                            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                            {
+                                results.Add(projector(reader));
+                            }
+                        }
+
+                        return results;
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        var entities = await SelectAsync(options, limit, offset, orderByKeyWhenUnsorted, cancellationToken, null, mapColumns)
+            .ConfigureAwait(false);
+        return entities.Select(map.Compile()).ToList();
+    }
 
     private async Task<List<TEntity>> SelectCoreAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
         bool orderByKeyWhenUnsorted, CancellationToken cancellationToken,
