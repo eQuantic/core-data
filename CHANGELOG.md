@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.7.0](https://github.com/eQuantic/core-data/compare/v5.6.1...v5.7.0) (2026-07-22)
+
+### Features
+
+* **core,relational,cassandra:** complex-query surface — LIKE pushdown, Min/Max/Avg, relational Include and FromSql ([1ed14f9](https://github.com/eQuantic/core-data/commit/1ed14f9daafac8ececb9e74ce3c92f72aae28a93))
+* **core,relational:** extensible database functions — Db markers, FunctionFilter and the dialect registry ([e269dc9](https://github.com/eQuantic/core-data/commit/e269dc951b3b0422a8173cccc8c9793d7d20106b))
+* **core,relational:** typed GroupBy with server-side aggregate projection ([6ef627c](https://github.com/eQuantic/core-data/commit/6ef627ceb1cff50bf29ce7fb862bea16ed8cc3d6))
+* **core,relational:** typed UNION/UNION ALL across entities and HAVING for grouped reads ([8d57354](https://github.com/eQuantic/core-data/commit/8d57354d097feb6985e6cb83b4c31696a24a167f))
+* **mongodb,cassandra,cosmosdb:** grouped, union and aggregate reads across the document and wide-column providers ([a7d14a3](https://github.com/eQuantic/core-data/commit/a7d14a3c5c6ed0d7e0bcc9016054d0fc4af3b681))
+* **mysql,sqlserver:** native MySQL and SQL Server providers as dialects ([6439b63](https://github.com/eQuantic/core-data/commit/6439b63be2627f54e7e7dd798cfb112949ddfe35))
+* **postgresql:** native PostgreSQL provider over a shared relational engine ([c322a64](https://github.com/eQuantic/core-data/commit/c322a64a3c500f913cb34967ca0ea2b83692b7b4))
+
 ## [5.6.1](https://github.com/eQuantic/core-data/compare/v5.6.0...v5.6.1) (2026-07-21)
 
 ### Performance Improvements
