@@ -207,9 +207,9 @@ indexing policy).
 - **Typed `GroupBy` with `HAVING`, and aggregates on the store** (`IGroupedReadRepository<T>`,
   `IAggregateReadRepository<T>`) —
   `GroupByAsync(x => x.Customer, g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total) })`
-  renders to a native `GROUP BY` on the relational providers, a `$group` pipeline on MongoDB, a
-  primary-key-restricted CQL `GROUP BY` on Cassandra, and a single-member server-side `GROUP BY`
-  on Cosmos DB (which has no `HAVING` — the contract says so). The filter pushes before grouping, the
+  renders to a native `GROUP BY` on the relational providers, a `$group` pipeline on MongoDB, and a
+  primary-key-restricted CQL `GROUP BY` on Cassandra (Cosmos DB rejects it honestly for now — its
+  SDK cannot combine an object projection with `GROUP BY`; group client-side there). The filter pushes before grouping, the
   typed `having` predicate — `g => g.Sum(x => x.Total) > 100 && g.Count() >= 2` — runs as SQL
   `HAVING` / a Mongo `$match` over the groups / against Cassandra's cluster-computed aggregate
   cells (CQL has no `HAVING`; no extra rows travel), and only the grouped rows come back.

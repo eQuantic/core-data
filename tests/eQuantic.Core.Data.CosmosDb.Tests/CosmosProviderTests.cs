@@ -97,25 +97,28 @@ public sealed class CosmosProviderTests : CosmosIntegrationTest
     }
 
     [Test]
-    public async Task Typed_group_by_runs_as_a_server_side_group()
+    public async Task Typed_group_by_is_rejected_honestly_and_the_shape_contract_still_holds()
     {
         await Seed(
             CosmosProduct.New("A", Partition, 1, 10m),
-            CosmosProduct.New("B", Partition, 3, 20m),
-            CosmosProduct.New("C", Partition + "f", 4, 5m));
+            CosmosProduct.New("B", Partition, 3, 20m));
 
         var grouped = (IGroupedReadRepository<CosmosProduct>)Repo;
-        var groups = await grouped.GroupByAsync(x => x.Category,
-            g => new { Category = g.Key, Items = g.Count(), Value = g.Sum(x => x.Price) },
-            options: InPartition);
 
-        Assert.That(groups.Single(), Is.EqualTo(new { Category = Partition, Items = 2, Value = 30m }),
-            "the SDK translated the rebuilt (key, values) projection to a GROUP BY");
+        // GroupBy does not push down on Cosmos yet (the SDK emits SELECT VALUE {…}, invalid with GROUP BY).
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Category,
+                g => new { Category = g.Key, Items = g.Count(), Value = g.Sum(x => x.Price) }, options: InPartition),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("client-side"),
+            "the honest rejection points at the client-side and native-provider paths");
 
-        Assert.That(async () => await grouped.GroupByAsync(x => x.Category, g => new { g.Key },
-                having: g => g.Count() > 1),
-            Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"),
-            "Cosmos SQL has no HAVING and the contract says so");
+        // The uniform shape contract still runs first: an unsupported projection is rejected the same way everywhere.
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Category, g => new { Doubled = g.Count() * 2 }),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("Supported shapes"));
+
+        // The client-side path the message recommends works today.
+        var groups = (await Repo.GetAllAsync(InPartition)).GroupBy(x => x.Category)
+            .Select(g => new { Category = g.Key, Items = g.Count(), Value = g.Sum(x => x.Price) }).ToList();
+        Assert.That(groups.Single(), Is.EqualTo(new { Category = Partition, Items = 2, Value = 30m }));
     }
 
     [Test]
