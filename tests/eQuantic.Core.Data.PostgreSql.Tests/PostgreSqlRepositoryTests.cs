@@ -454,6 +454,47 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That(fresh.Version, Is.EqualTo(2), "reload + retry succeeds and bumps again");
     }
 
+    // ---------------------------------------------------------------- value converters
+
+    [Test]
+    public async Task Value_converters_keep_domain_types_out_of_the_driver()
+    {
+        using var db = await NewSchemaAsync();
+        var subs = db.Resolve<IAsyncRepository<Subscriber, Guid>>();
+
+        var sub = new Subscriber
+        {
+            Id = Guid.NewGuid(),
+            Email = EmailAddress.Create("Edgar@eQuantic.TECH"),
+            Status = SubscriberStatus.Active,
+        };
+        await subs.AddAsync(sub);
+        await subs.AddAsync(new Subscriber { Id = Guid.NewGuid(), Email = EmailAddress.Create("other@x.io") });
+        await Uow(db).CommitAsync();
+
+        var loaded = (await subs.GetAsync(sub.Id))!;
+        Assert.That(loaded.Email, Is.EqualTo(EmailAddress.Create("edgar@equantic.tech")), "the VO round-trips through its converter");
+        Assert.That(loaded.Status, Is.EqualTo(SubscriberStatus.Active));
+
+        var byVo = await subs.GetFilteredAsync(x => x.Email == EmailAddress.Create("edgar@equantic.tech"));
+        Assert.That(byVo.Single().Id, Is.EqualTo(sub.Id), "filtering by the VO binds its stored form");
+
+        var byStatus = await subs.GetFilteredAsync(x => x.Status == SubscriberStatus.Active);
+        Assert.That(byStatus.Single().Id, Is.EqualTo(sub.Id), "the enum filter binds the stored string");
+
+        var dataSource = db.Resolve<System.Data.Common.DbDataSource>();
+        await using var command = dataSource.CreateCommand(
+            "SELECT email, status FROM subscriber WHERE email = 'edgar@equantic.tech'");
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.That(await reader.ReadAsync(), Is.True, "the column stores the scalar, not the domain type");
+        Assert.That(reader.GetString(1), Is.EqualTo("Active"), "the enum stored as its name");
+
+        var cancelled = await subs.UpdateManyAsync(x => x.Status == SubscriberStatus.Active,
+            x => new Subscriber { Status = SubscriberStatus.Cancelled });
+        Assert.That(cancelled, Is.EqualTo(1), "set-based updates convert the assigned value too");
+        Assert.That((await subs.GetAsync(sub.Id))!.Status, Is.EqualTo(SubscriberStatus.Cancelled));
+    }
+
     // ---------------------------------------------------------------- migration evolution + rich indexes
 
     [Test]

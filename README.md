@@ -221,6 +221,11 @@ indexing policy).
   commit that misses rows throws `ConcurrencyConflictException` and rolls back — the lost update
   is caught, never silently overwritten. Cosmos does the same with
   `ConcurrencyToken(x => x.ETag)` as a conditional `If-Match` replace.
+- **Value converters (relational)** —
+  `.Converts(x => x.Email, email => email.Value, EmailAddress.Create)` maps a Value Object, an
+  enum-as-string or any domain type to a stored scalar, applied everywhere the member crosses the
+  engine: the DDL column type, inserts and updates (set-based included), filter values and
+  materialization. The domain type never leaks to the driver.
 - **OpenTelemetry built in** — subscribe to the `eQuantic.Core.Data` `ActivitySource` and every
   provider emits spans with the statement (placeholders, never values) plus the engine's own facts:
   client evaluation, split-query count, partition scoping, staged write counts.

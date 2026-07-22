@@ -4,10 +4,31 @@ using eQuantic.Linq.Expressions;
 
 namespace eQuantic.Core.Data.Relational;
 
-/// <summary>A mapped column: the entity property and its stored name.</summary>
+/// <summary>A member's value converter: how a domain type (a Value Object, an enum-as-string) maps to its stored scalar.</summary>
+/// <param name="StoredType">The stored CLR type (drives the DDL column type and parameter binding).</param>
+/// <param name="ToStored">Converts the member value into the stored value.</param>
+/// <param name="FromStored">Converts the stored value back into the member value.</param>
+public sealed record RelationalConverter(Type StoredType, Func<object?, object?> ToStored, Func<object?, object?> FromStored);
+
+/// <summary>A mapped column: the entity property, its stored name and (optionally) its value converter.</summary>
 /// <param name="Property">The entity property.</param>
 /// <param name="Name">The column name (already through the dialect's naming convention or an explicit override).</param>
-public sealed record RelationalColumn(PropertyInfo Property, string Name);
+/// <param name="Converter">The value converter, or <c>null</c> when the member stores as-is.</param>
+public sealed record RelationalColumn(PropertyInfo Property, string Name, RelationalConverter? Converter = null)
+{
+    /// <summary>The stored CLR type — the converter's, or the member's own.</summary>
+    public Type StoredType => Converter?.StoredType ?? Property.PropertyType;
+
+    /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
+    public object? Read(object entity)
+    {
+        var value = Property.GetValue(entity);
+        return Converter is null ? value : Converter.ToStored(value);
+    }
+
+    /// <summary>Converts a value that is about to bind against this column into its stored form.</summary>
+    public object? Store(object? value) => Converter is null ? value : Converter.ToStored(value);
+}
 
 /// <summary>
 ///     The relational mapping for an entity: its table, key column, columns (named through the dialect's
@@ -115,6 +136,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly SqlDialect _dialect;
     private readonly Dictionary<string, string> _columnOverrides = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, RelationalConverter> _converters = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
@@ -161,6 +183,29 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares a <b>value converter</b>: the member (a Value Object, an enum-as-string — any domain type)
+    ///     stores as the scalar <typeparamref name="TStored" />. The conversion applies everywhere the member
+    ///     crosses the engine — DDL column type, inserts and updates (set-based included), filter values and
+    ///     materialization — so the domain type never leaks to the driver.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <typeparam name="TStored">The stored scalar type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="toStored">Converts the member value into the stored value.</param>
+    /// <param name="fromStored">Converts the stored value back into the member value.</param>
+    public RelationalEntityBuilder<TEntity> Converts<TMember, TStored>(
+        Expression<Func<TEntity, TMember>> selector,
+        Func<TMember, TStored> toStored,
+        Func<TStored, TMember> fromStored)
+    {
+        _converters[selector.GetMemberName()] = new RelationalConverter(
+            typeof(TStored),
+            value => value is null ? null : toStored((TMember)value),
+            value => value is null ? null : fromStored((TStored)value));
+        return this;
+    }
+
+    /// <summary>
     ///     Declares the <b>optimistic-concurrency token</b> (an <c>int</c>, <c>long</c> or <c>Guid</c> member):
     ///     every update and delete of the entity matches the token it read (<c>WHERE … AND version = @old</c>)
     ///     and bumps it; a commit whose writes miss rows throws <c>ConcurrencyConflictException</c> and rolls
@@ -183,10 +228,26 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             .Where(property => property is { CanRead: true, CanWrite: true }
                                && property.GetIndexParameters().Length == 0
                                && !_ignored.Contains(property.Name)
-                               && IsMapped(property.PropertyType))
+                               && (IsMapped(property.PropertyType) || _converters.ContainsKey(property.Name)))
             .Select(property => new RelationalColumn(property,
-                _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name)))
+                _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name),
+                _converters.TryGetValue(property.Name, out var converter) ? converter : null))
             .ToList();
+
+        foreach (var converted in _converters)
+        {
+            if (columns.All(column => !string.Equals(column.Property.Name, converted.Key, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}' has no member '{converted.Key}' to convert.");
+            }
+
+            if (!IsScalar(converted.Value.StoredType))
+            {
+                throw new InvalidOperationException(
+                    $"The converter for '{converted.Key}' must store a scalar type; '{converted.Value.StoredType.Name}' is not.");
+            }
+        }
 
         var keyMember = _keyMember ?? "Id";
         var key = columns.FirstOrDefault(column => string.Equals(column.Property.Name, keyMember, StringComparison.OrdinalIgnoreCase))

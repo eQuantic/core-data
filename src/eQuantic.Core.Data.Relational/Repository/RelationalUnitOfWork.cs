@@ -379,7 +379,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
                     ? configuration.Columns.Where(column => column != key).ToList()
                     : configuration.Columns.ToList();
                 var names = string.Join(", ", columns.Select(column => Dialect.Quote(column.Name)));
-                var values = string.Join(", ", columns.Select(column => Bind(column.Property.GetValue(write.Entity))));
+                var values = string.Join(", ", columns.Select(column => Bind(column.Read(write.Entity))));
                 command.CommandText = Dialect.InsertSql(Dialect.Quote(configuration.TableName), names, values,
                     configuration.KeyIsGenerated ? Dialect.Quote(key.Name) : null);
                 returning = configuration.KeyIsGenerated;
@@ -391,7 +391,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
                 // The token it read goes into the WHERE; the bumped value goes into the SET (written back on success).
                 var columns = configuration.Columns.Where(column => column != key && column != token).ToList();
                 var set = string.Join(", ", columns.Select(column =>
-                    $"{Dialect.Quote(column.Name)} = {Bind(column.Property.GetValue(write.Entity))}"));
+                    $"{Dialect.Quote(column.Name)} = {Bind(column.Read(write.Entity))}"));
                 var where = string.Empty;
                 if (token is not null)
                 {

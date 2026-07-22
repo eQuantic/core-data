@@ -23,7 +23,8 @@ internal static class SqlUpdateRenderer
             switch (assignment)
             {
                 case SetAssignment set:
-                    fragments.Add($"{column} = {Bind(set.Value)}");
+                    // A converted member's assigned value binds as its stored form.
+                    fragments.Add($"{column} = {Bind(configuration.ColumnFor(assignment.Name)?.Store(set.Value) ?? set.Value)}");
                     break;
                 case IncrementAssignment increment:
                     fragments.Add($"{column} = {column} + {Bind(increment.Delta)}");

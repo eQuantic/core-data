@@ -87,7 +87,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                     var column = Column(configuration, add.Field.GetMemberName());
                     await ExecuteAsync(connection,
                         _dialect.AddColumnSql(_dialect.Quote(configuration.TableName), _dialect.Quote(column.Name),
-                            _dialect.SqlType(column.Property.PropertyType)), [], cancellationToken).ConfigureAwait(false);
+                            _dialect.SqlType(column.StoredType)), [], cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -124,7 +124,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
     {
         var columns = configuration.Columns.Select(column =>
         {
-            var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column.Property.PropertyType)}";
+            var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column.StoredType)}";
             if (column == configuration.Key)
             {
                 if (configuration.KeyIsGenerated)

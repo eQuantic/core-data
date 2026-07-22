@@ -29,7 +29,7 @@ internal static class RelationalMaterializer
                 continue;
             }
 
-            Assign(entity, selected[ordinal].Property, reader.GetValue(ordinal));
+            Assign(entity, selected[ordinal], reader.GetValue(ordinal));
         }
 
         return entity;
@@ -54,7 +54,7 @@ internal static class RelationalMaterializer
                 string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase));
             if (column is not null)
             {
-                Assign(entity, column.Property, reader.GetValue(ordinal));
+                Assign(entity, column, reader.GetValue(ordinal));
             }
         }
 
@@ -76,6 +76,18 @@ internal static class RelationalMaterializer
         }
 
         return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
+    }
+
+    private static void Assign(object entity, RelationalColumn column, object value)
+    {
+        // A converted column materializes through its converter — the stored scalar becomes the domain value.
+        if (column.Converter is { } converter)
+        {
+            column.Property.SetValue(entity, converter.FromStored(ChangeValue(value, converter.StoredType)));
+            return;
+        }
+
+        Assign(entity, column.Property, value);
     }
 
     private static void Assign(object entity, PropertyInfo property, object value)

@@ -86,6 +86,37 @@ public sealed class Document : IEntity<Guid>, IEntityTimeMark, IEntityTimeTrack,
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A DDD value object: self-validating, immutable, stored as text through a value converter.</summary>
+public sealed record EmailAddress
+{
+    private EmailAddress(string value) => Value = value;
+
+    public string Value { get; }
+
+    public static EmailAddress Create(string value) => new(value.Trim().ToLowerInvariant());
+}
+
+public enum SubscriberStatus
+{
+    Pending,
+    Active,
+    Cancelled,
+}
+
+/// <summary>An entity whose domain types cross into columns only through converters.</summary>
+public sealed class Subscriber : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+
+    public EmailAddress Email { get; set; } = EmailAddress.Create("nobody@nowhere");
+
+    public SubscriberStatus Status { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>An entity whose table starts <b>bare</b> (created by a Run step): AddField/DropField evolve it.</summary>
 public sealed class LegacyNote : IEntity<Guid>
 {
@@ -121,6 +152,9 @@ internal static class TestSchema
         .Entity<OrderItem>(_ => { })
         .Entity<LegacyNote>(entity => entity.Table("legacy_notes"))
         .Entity<Document>(entity => entity.ConcurrencyToken(x => x.Version))
+        .Entity<Subscriber>(entity => entity
+            .Converts(x => x.Email, email => email.Value, EmailAddress.Create)
+            .Converts(x => x.Status, status => status.ToString(), value => Enum.Parse<SubscriberStatus>(value)))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
 }
 
@@ -138,6 +172,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<OrderItem>(item => item
             .EnsureCollection())
         .For<Document>(document => document
+            .EnsureCollection())
+        .For<Subscriber>(subscriber => subscriber
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
             .EnsureCollection());

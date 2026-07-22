@@ -51,8 +51,8 @@ internal static class SqlFilterRenderer
 
             // C# != matches NULL rows too; SQL <> filters them out — keep the C# semantics explicit.
             return comparison.Operator == ComparisonOperator.NotEqual
-                ? $"({column} <> {Bind(comparison.Value)} OR {column} IS NULL)"
-                : $"{column} {Operator(comparison.Operator)} {Bind(comparison.Value)}";
+                ? $"({column} <> {Bind(Stored(comparison.Member, comparison.Value))} OR {column} IS NULL)"
+                : $"{column} {Operator(comparison.Operator)} {Bind(Stored(comparison.Member, comparison.Value))}";
         }
 
         string Like(StringFilter text)
@@ -100,13 +100,16 @@ internal static class SqlFilterRenderer
                 return hasNull ? $"{column} IS NULL" : dialect.FalseLiteral;
             }
 
-            var list = $"{column} IN ({string.Join(", ", values.Select(Bind))})";
+            var list = $"{column} IN ({string.Join(", ", values.Select(value => Bind(Stored(inFilter.Member, value))))})";
             return hasNull ? $"({list} OR {column} IS NULL)" : list;
         }
 
         string Column(string member) =>
             dialect.Quote((configuration.ColumnFor(member)
                            ?? throw new NotSupportedException($"'{configuration.EntityType.Name}' has no mapped member '{member}'.")).Name);
+
+        // A converted member's filter values bind as their stored form — the domain type never reaches the driver.
+        object? Stored(string member, object? value) => configuration.ColumnFor(member)?.Store(value) ?? value;
 
         string Bind(object? value)
         {
