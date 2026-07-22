@@ -52,9 +52,24 @@ public class SqlServerDialect : SqlDialect
         $"IF OBJECT_ID(N'{quotedTable}', 'U') IS NULL CREATE TABLE {quotedTable} ({columnsDdl})";
 
     /// <inheritdoc />
-    public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique) =>
+    public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique,
+        eQuantic.Core.Data.Migration.IndexMethod method, string? filter)
+    {
+        if (method != eQuantic.Core.Data.Migration.IndexMethod.Default)
+        {
+            throw new NotSupportedException(
+                $"SQL Server has no '{method}' index structure; use a default index, or the store's native tooling via Run(...).");
+        }
+
         // SQL Server has no CREATE INDEX IF NOT EXISTS; the migration history guards re-runs.
-        $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {quotedName} ON {quotedTable} ({columns})";
+        return $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {quotedName} ON {quotedTable} ({columns})"
+               + (filter is not null ? $" WHERE {filter}" : string.Empty);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>SQL Server booleans are <c>bit</c>: literals inline as <c>1</c>/<c>0</c>.</remarks>
+    public override string Literal(object? value) =>
+        value is bool flag ? (flag ? "1" : "0") : base.Literal(value);
 
     /// <inheritdoc />
     public override string SqlType(Type type)

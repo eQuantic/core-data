@@ -81,7 +81,61 @@ public abstract class SqlDialect
     /// <param name="columns">The quoted key column list (with directions).</param>
     /// <param name="unique">Whether the index enforces uniqueness.</param>
     public virtual string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique) =>
-        $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX IF NOT EXISTS {quotedName} ON {quotedTable} ({columns})";
+        CreateIndexSql(quotedName, quotedTable, columns, unique, eQuantic.Core.Data.Migration.IndexMethod.Default, filter: null);
+
+    /// <summary>
+    ///     The DDL creating an index with a structure and an optional filtered predicate (already rendered as a
+    ///     SQL fragment with inlined literals). The base dialect builds default-structure indexes, filtered or
+    ///     not; a method it has no structure for is rejected with guidance.
+    /// </summary>
+    /// <param name="quotedName">The quoted index name.</param>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columns">The rendered key column list.</param>
+    /// <param name="unique">Whether the index enforces uniqueness.</param>
+    /// <param name="method">The index structure.</param>
+    /// <param name="filter">The rendered partial-index predicate, or <c>null</c>.</param>
+    public virtual string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique,
+        eQuantic.Core.Data.Migration.IndexMethod method, string? filter)
+    {
+        if (method != eQuantic.Core.Data.Migration.IndexMethod.Default)
+        {
+            throw new NotSupportedException(
+                $"{GetType().Name} has no '{method}' index structure; use a default index, or the store's native tooling via Run(...).");
+        }
+
+        return $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX IF NOT EXISTS {quotedName} ON {quotedTable} ({columns})"
+               + (filter is not null ? $" WHERE {filter}" : string.Empty);
+    }
+
+    /// <summary>The DDL adding a column to an existing table (added nullable, matching create-table semantics).</summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="quotedColumn">The quoted column.</param>
+    /// <param name="sqlType">The column's SQL type.</param>
+    public virtual string AddColumnSql(string quotedTable, string quotedColumn, string sqlType) =>
+        $"ALTER TABLE {quotedTable} ADD {quotedColumn} {sqlType}";
+
+    /// <summary>The DDL dropping a column from an existing table.</summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="quotedColumn">The quoted column.</param>
+    public virtual string DropColumnSql(string quotedTable, string quotedColumn) =>
+        $"ALTER TABLE {quotedTable} DROP COLUMN {quotedColumn}";
+
+    /// <summary>
+    ///     Renders a value as an inline SQL literal — DDL (a filtered index's predicate) cannot carry bind
+    ///     parameters. Values a dialect cannot inline are rejected with guidance.
+    /// </summary>
+    /// <param name="value">The value (already normalized by <see cref="BindValue" />).</param>
+    public virtual string Literal(object? value) => value switch
+    {
+        null => "NULL",
+        string text => "'" + text.Replace("'", "''") + "'",
+        bool flag => flag ? "TRUE" : "FALSE",
+        Guid guid => $"'{guid}'",
+        DateTime dateTime => $"'{dateTime:yyyy-MM-dd HH:mm:ss.fffffff}'",
+        global::System.IFormattable number => number.ToString(null, global::System.Globalization.CultureInfo.InvariantCulture)!,
+        _ => throw new NotSupportedException(
+            $"Cannot inline a '{value.GetType().Name}' literal into DDL; simplify the filtered-index predicate."),
+    };
 
     /// <summary>
     ///     Renders a collection-membership test (<c>member CONTAINS value</c> / <c>CONTAINS KEY</c>) for stores

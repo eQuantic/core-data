@@ -46,6 +46,34 @@ public sealed class MigrationBuilder : IMigrationBuilder
             return this;
         }
 
+        public ICollectionMigration<TEntity> Index<TField>(Expression<Func<TEntity, TField>> field, Action<IIndexOptions<TEntity>> options)
+        {
+            var builder = new IndexOptions<TEntity>();
+            options(builder);
+            ops.Add(new EnsureIndexOperation(typeof(TEntity), new IndexKey[] { new(field, builder.IsDescending) })
+            {
+                Unique = builder.IsUnique,
+                Name = builder.IndexName,
+                Filter = builder.FilterPredicate,
+                Method = builder.IndexMethod,
+                ExpireAfter = builder.ExpireAfter,
+            });
+            return this;
+        }
+
+        public ICollectionMigration<TEntity> AddField<TField>(Expression<Func<TEntity, TField>> field)
+        {
+            ops.Add(new AddFieldOperation(typeof(TEntity), field));
+            return this;
+        }
+
+        public ICollectionMigration<TEntity> DropField(string field)
+        {
+            ops.Add(new DropFieldOperation(typeof(TEntity),
+                !string.IsNullOrWhiteSpace(field) ? field : throw new ArgumentException("The stored field name is required.", nameof(field))));
+            return this;
+        }
+
         public ICollectionMigration<TEntity> CompositeIndex(Action<IIndexKeyBuilder<TEntity>> keys, bool unique = false)
         {
             var builder = new IndexKeyBuilder<TEntity>();
@@ -71,6 +99,63 @@ public sealed class MigrationBuilder : IMigrationBuilder
             var builder = new UpdateBuilder<TEntity>();
             update(builder);
             ops.Add(new UpdateOperation(typeof(TEntity), predicate, builder.Sets));
+            return this;
+        }
+    }
+
+    private sealed class IndexOptions<TEntity> : IIndexOptions<TEntity> where TEntity : class
+    {
+        public bool IsUnique { get; private set; }
+
+        public bool IsDescending { get; private set; }
+
+        public string? IndexName { get; private set; }
+
+        public LambdaExpression? FilterPredicate { get; private set; }
+
+        public IndexMethod IndexMethod { get; private set; }
+
+        public TimeSpan? ExpireAfter { get; private set; }
+
+        public IIndexOptions<TEntity> Unique()
+        {
+            IsUnique = true;
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Descending()
+        {
+            IsDescending = true;
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Named(string name)
+        {
+            IndexName = name;
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Filtered(Expression<Func<TEntity, bool>> predicate)
+        {
+            FilterPredicate = predicate ?? throw new ArgumentNullException(nameof(predicate));
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Gin()
+        {
+            IndexMethod = IndexMethod.Gin;
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Text()
+        {
+            IndexMethod = IndexMethod.Text;
+            return this;
+        }
+
+        public IIndexOptions<TEntity> Ttl(TimeSpan expireAfter)
+        {
+            ExpireAfter = expireAfter;
             return this;
         }
     }

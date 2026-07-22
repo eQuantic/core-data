@@ -42,10 +42,36 @@ public interface ICollectionMigration<TEntity> where TEntity : class
     /// <param name="unique">Whether the index enforces uniqueness.</param>
     ICollectionMigration<TEntity> Index<TField>(Expression<Func<TEntity, TField>> field, bool descending = false, bool unique = false);
 
+    /// <summary>
+    ///     Ensures a single-key index exists with rich, provider-interpreted options — a typed partial filter
+    ///     (<c>o.Filtered(x =&gt; x.DeletedAt == null)</c>), a structure (<c>o.Gin()</c>, <c>o.Text()</c>), a TTL
+    ///     (<c>o.Ttl(...)</c>) — each rejected with guidance by providers that cannot build it.
+    /// </summary>
+    /// <typeparam name="TField">The field type.</typeparam>
+    /// <param name="field">The field selector.</param>
+    /// <param name="options">The fluent index options.</param>
+    ICollectionMigration<TEntity> Index<TField>(Expression<Func<TEntity, TField>> field, Action<IIndexOptions<TEntity>> options);
+
     /// <summary>Ensures a composite (multi-key) index exists.</summary>
     /// <param name="keys">The fluent key builder (e.g. <c>k =&gt; k.Descending(x =&gt; x.A).Ascending(x =&gt; x.B)</c>).</param>
     /// <param name="unique">Whether the index enforces uniqueness.</param>
     ICollectionMigration<TEntity> CompositeIndex(Action<IIndexKeyBuilder<TEntity>> keys, bool unique = false);
+
+    /// <summary>
+    ///     Adds the stored column for an entity member to an existing table. The member already exists on the
+    ///     entity (and therefore in the model); this evolves the live schema to match. Document stores gain
+    ///     fields on write, so the operation is a no-op there.
+    /// </summary>
+    /// <typeparam name="TField">The field type.</typeparam>
+    /// <param name="field">The member selector.</param>
+    ICollectionMigration<TEntity> AddField<TField>(Expression<Func<TEntity, TField>> field);
+
+    /// <summary>
+    ///     Drops a stored column/field by its <b>stored name</b> — the CLR member is usually already gone, so
+    ///     the name is a string here by design. On document stores this unsets the field across documents.
+    /// </summary>
+    /// <param name="field">The stored column/field name.</param>
+    ICollectionMigration<TEntity> DropField(string field);
 
     /// <summary>Converts a field's stored type across existing documents (type/schema evolution).</summary>
     /// <typeparam name="TField">The field type.</typeparam>
@@ -64,6 +90,39 @@ public interface ICollectionMigration<TEntity> where TEntity : class
     /// <param name="predicate">The predicate selecting the documents.</param>
     /// <param name="update">The fluent assignment builder.</param>
     ICollectionMigration<TEntity> Update(Expression<Func<TEntity, bool>> predicate, Action<IUpdateBuilder<TEntity>> update);
+}
+
+/// <summary>Fluent options for a single-key index — providers reject the ones they cannot build, with guidance.</summary>
+/// <typeparam name="TEntity">The entity type.</typeparam>
+public interface IIndexOptions<TEntity> where TEntity : class
+{
+    /// <summary>Makes the index enforce uniqueness.</summary>
+    IIndexOptions<TEntity> Unique();
+
+    /// <summary>Orders the key descending.</summary>
+    IIndexOptions<TEntity> Descending();
+
+    /// <summary>Gives the index an explicit name.</summary>
+    /// <param name="name">The index name.</param>
+    IIndexOptions<TEntity> Named(string name);
+
+    /// <summary>
+    ///     Makes the index <b>partial/filtered</b>: only rows matching the typed predicate are indexed
+    ///     (PostgreSQL/SQL Server <c>WHERE</c>, MongoDB partial filter). The predicate goes through the same
+    ///     interpretation as query filters.
+    /// </summary>
+    /// <param name="predicate">The typed row predicate.</param>
+    IIndexOptions<TEntity> Filtered(Expression<Func<TEntity, bool>> predicate);
+
+    /// <summary>Builds a PostgreSQL <c>GIN</c> index — what makes <c>jsonb</c> and array predicates fast.</summary>
+    IIndexOptions<TEntity> Gin();
+
+    /// <summary>Builds a text-search index (MongoDB <c>text</c>).</summary>
+    IIndexOptions<TEntity> Text();
+
+    /// <summary>Makes the index a TTL index: documents expire this long after the key's date value (MongoDB).</summary>
+    /// <param name="expireAfter">The time to live.</param>
+    IIndexOptions<TEntity> Ttl(TimeSpan expireAfter);
 }
 
 /// <summary>Builds the ordered keys of a composite index with typed selectors.</summary>

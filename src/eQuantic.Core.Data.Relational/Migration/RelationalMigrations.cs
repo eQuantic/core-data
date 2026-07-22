@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Linq.Expressions;
 using System.Reflection;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Query;
@@ -80,6 +81,26 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                     break;
                 }
 
+                case AddFieldOperation add:
+                {
+                    var configuration = _model.For(add.EntityType);
+                    var column = Column(configuration, add.Field.GetMemberName());
+                    await ExecuteAsync(connection,
+                        _dialect.AddColumnSql(_dialect.Quote(configuration.TableName), _dialect.Quote(column.Name),
+                            _dialect.SqlType(column.Property.PropertyType)), [], cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case DropFieldOperation drop:
+                {
+                    // The stored name comes as a string by design: the CLR member is usually already gone.
+                    var configuration = _model.For(drop.EntityType);
+                    await ExecuteAsync(connection,
+                        _dialect.DropColumnSql(_dialect.Quote(configuration.TableName), _dialect.Quote(drop.Field)),
+                        [], cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
                 case ConvertFieldOperation convert:
                 {
                     var configuration = _model.For(convert.EntityType);
@@ -135,7 +156,39 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                    ?? $"ix_{configuration.TableName}_{string.Join("_", keys.Select(key => key.Column.Name))}";
         var list = string.Join(", ", keys.Select(key => $"{_dialect.Quote(key.Column.Name)}{(key.Descending ? " DESC" : string.Empty)}"));
 
-        return _dialect.CreateIndexSql(_dialect.Quote(name), _dialect.Quote(configuration.TableName), list, operation.Unique);
+        return _dialect.CreateIndexSql(_dialect.Quote(name), _dialect.Quote(configuration.TableName), list,
+            operation.Unique, operation.Method, FilterFragment(configuration, operation.Filter));
+    }
+
+    /// <summary>
+    ///     Renders a filtered-index predicate through the same interpretation as query filters, then inlines the
+    ///     bound values as literals — DDL cannot carry parameters.
+    /// </summary>
+    private string? FilterFragment(RelationalEntityConfiguration configuration, LambdaExpression? filter)
+    {
+        if (filter is null)
+        {
+            return null;
+        }
+
+        var parameters = new List<object?>();
+        string fragment;
+        try
+        {
+            fragment = SqlFilterRenderer.Render(_dialect, configuration, FilterInterpreter.Interpret(filter), parameters);
+        }
+        catch (NotSupportedException inner)
+        {
+            throw new NotSupportedException(
+                $"The filtered-index predicate must be fully expressible in SQL. {inner.Message}", inner);
+        }
+
+        for (var index = parameters.Count - 1; index >= 0; index--)
+        {
+            fragment = fragment.Replace("@p" + index, _dialect.Literal(parameters[index]));
+        }
+
+        return fragment;
     }
 
     private (string Sql, List<object?> Parameters) Update(UpdateOperation operation)

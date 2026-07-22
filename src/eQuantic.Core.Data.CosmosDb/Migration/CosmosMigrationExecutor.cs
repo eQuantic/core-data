@@ -50,6 +50,13 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
                 case EnsureIndexOperation index:
                     await EnsureCompositeIndexAsync(index, cancellationToken).ConfigureAwait(false);
                     break;
+                case AddFieldOperation:
+                    // Documents gain fields on write; there is nothing to declare up front.
+                    break;
+                case DropFieldOperation:
+                    throw new NotSupportedException(
+                        "Cosmos DB has no set-based update to unset a field; remove the property (writes drop it per " +
+                        "document), or rewrite the documents with a Run(...) step.");
                 case ConvertFieldOperation convert:
                     await ConvertFieldAsync(convert, cancellationToken).ConfigureAwait(false);
                     break;
@@ -85,6 +92,24 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
 
     private async Task EnsureCompositeIndexAsync(EnsureIndexOperation operation, CancellationToken cancellationToken)
     {
+        if (operation.Method != IndexMethod.Default)
+        {
+            throw new NotSupportedException(
+                $"Cosmos DB has no '{operation.Method}' index structure; indexing is declared on the container's policy via Run(...).");
+        }
+
+        if (operation.Filter is not null)
+        {
+            throw new NotSupportedException(
+                "Cosmos DB has no filtered indexes; include/exclude paths on the container's indexing policy via Run(...).");
+        }
+
+        if (operation.ExpireAfter is not null)
+        {
+            throw new NotSupportedException(
+                "Cosmos DB expires documents with the container's DefaultTimeToLive (declared on the model), not a TTL index.");
+        }
+
         // Cosmos indexes every path by default, so a single-key index needs no declaration; only composite
         // indexes (used by multi-field ORDER BY) must be added to the container's indexing policy.
         if (operation.Keys.Count < 2)

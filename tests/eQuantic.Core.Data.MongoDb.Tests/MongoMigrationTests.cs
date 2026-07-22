@@ -82,6 +82,46 @@ public sealed class MongoMigrationTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task Index_options_build_text_and_partial_indexes()
+    {
+        using var db = NewDatabase();
+        var builder = new MigrationBuilder();
+        builder.For<Product>(product => product
+            .Index(x => x.Name, options => options.Text().Named("name_text"))
+            .Index(x => x.Price, options => options.Filtered(x => x.Quantity > 0).Named("price_in_stock")));
+        await new MongoMigrationExecutor(db.Database).ApplyAsync(builder.Operations);
+
+        var indexes = await Indexes(db);
+        var text = indexes.Single(index => index.GetValue("name", "").AsString == "name_text");
+        Assert.That(text["key"].AsBsonDocument.Contains("_fts"), Is.True, "the text index built");
+
+        var partial = indexes.Single(index => index.GetValue("name", "").AsString == "price_in_stock");
+        Assert.That(partial["partialFilterExpression"].AsBsonDocument.Contains("Quantity"), Is.True,
+            "the typed predicate rendered into the partial filter");
+    }
+
+    [Test]
+    public async Task Drop_field_unsets_across_documents_and_add_field_is_a_noop()
+    {
+        using var db = NewDatabase();
+        var raw = db.Database.GetCollection<BsonDocument>("Product");
+        await raw.InsertManyAsync(
+        [
+            new BsonDocument { { "_id", "p1" }, { "Legacy", "x" }, { "Name", "a" } },
+            new BsonDocument { { "_id", "p2" }, { "Legacy", "y" }, { "Name", "b" } },
+        ]);
+
+        var builder = new MigrationBuilder();
+        builder.For<Product>(product => product
+            .AddField(x => x.Rating)
+            .DropField("Legacy"));
+        await new MongoMigrationExecutor(db.Database).ApplyAsync(builder.Operations);
+
+        var remaining = await raw.CountDocumentsAsync(Builders<BsonDocument>.Filter.Exists("Legacy"));
+        Assert.That(remaining, Is.Zero, "DropField unset the stored field across documents");
+    }
+
+    [Test]
     public async Task ConvertField_changes_the_stored_type()
     {
         using var db = NewDatabase();

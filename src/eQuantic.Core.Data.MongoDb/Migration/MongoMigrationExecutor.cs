@@ -3,6 +3,7 @@ using System.Reflection;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Linq.Expressions;
 using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 
 namespace eQuantic.Core.Data.MongoDb.Migration;
@@ -50,6 +51,15 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
                 case EnsureIndexOperation index:
                     await EnsureIndexAsync(index, cancellationToken).ConfigureAwait(false);
                     break;
+                case AddFieldOperation:
+                    // Documents gain fields on write; there is nothing to declare up front.
+                    break;
+                case DropFieldOperation drop:
+                    await Collection(drop.EntityType).UpdateManyAsync(
+                        FilterDefinition<BsonDocument>.Empty,
+                        Builders<BsonDocument>.Update.Unset(drop.Field),
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
                 case ConvertFieldOperation convert:
                     await ConvertFieldAsync(convert, cancellationToken).ConfigureAwait(false);
                     break;
@@ -85,15 +95,22 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
 
     private async Task EnsureIndexAsync(EnsureIndexOperation operation, CancellationToken cancellationToken)
     {
+        if (operation.Method == IndexMethod.Gin)
+        {
+            throw new NotSupportedException(
+                "MongoDB has no GIN structure (that is PostgreSQL); default indexes already cover documents and arrays.");
+        }
+
         var collection = Collection(operation.EntityType);
 
         var keys = new BsonDocument();
         foreach (var key in operation.Keys)
         {
-            keys.Add(MongoFieldNames.Resolve(operation.EntityType, key.Selector), key.Descending ? -1 : 1);
+            var field = MongoFieldNames.Resolve(operation.EntityType, key.Selector);
+            keys.Add(field, operation.Method == IndexMethod.Text ? "text" : key.Descending ? -1 : 1);
         }
 
-        var options = new CreateIndexOptions { Unique = operation.Unique };
+        var options = new CreateIndexOptions<BsonDocument> { Unique = operation.Unique };
         if (operation.ExpireAfter is { } expireAfter)
         {
             options.ExpireAfter = expireAfter;
@@ -104,8 +121,27 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
             options.Name = name;
         }
 
+        if (operation.Filter is { } filter)
+        {
+            // The typed predicate renders through the driver, exactly as a query filter would.
+            options.PartialFilterExpression = (FilterDefinition<BsonDocument>)RenderFilterMethod
+                .MakeGenericMethod(operation.EntityType).Invoke(null, [filter])!;
+        }
+
         var model = new CreateIndexModel<BsonDocument>(keys, options);
         await collection.Indexes.CreateOneAsync(model, cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly System.Reflection.MethodInfo RenderFilterMethod = typeof(MongoMigrationExecutor)
+        .GetMethod(nameof(RenderFilter), System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+
+    private static FilterDefinition<BsonDocument> RenderFilter<TEntity>(LambdaExpression filter)
+    {
+        var typed = (Expression<Func<TEntity, bool>>)filter;
+        var registry = BsonSerializer.SerializerRegistry;
+        var rendered = Builders<TEntity>.Filter.Where(typed)
+            .Render(new RenderArgs<TEntity>(registry.GetSerializer<TEntity>(), registry));
+        return new BsonDocumentFilterDefinition<BsonDocument>(rendered.AsBsonDocument);
     }
 
     private async Task ConvertFieldAsync(ConvertFieldOperation operation, CancellationToken cancellationToken)

@@ -117,7 +117,10 @@ read-your-writes). The relational providers are thin dialects over the shared
 the MariaDB dialect reads generated keys back with `INSERT … RETURNING`, the capability MySQL
 honestly rejects) and SQL Server (Microsoft.Data.SqlClient) differ only in their `SqlDialect`.
 All providers ship the same **fluent, typed migrations**, authored with member selectors instead of
-field strings:
+field strings — schema creation derived from the model, **live-schema evolution**
+(`AddField`/`DropField`), rich index options (typed **filtered/partial indexes**, PostgreSQL
+`GIN`, MongoDB `text` and TTL), typed data migrations (`Update`) and a `Run(...)` escape hatch
+with direct provider access:
 
 ```csharp
 services.AddMongoRepositories("mongodb://localhost:27017", "shop");
@@ -130,12 +133,21 @@ public sealed class AddProductIndexes : Migration
         migration.For<Product>(product => product
             .EnsureCollection()
             .Index(x => x.Category)
-            .CompositeIndex(keys => keys.Descending(x => x.Price).Ascending(x => x.Name)));
+            .Index(x => x.Price, o => o.Filtered(x => x.Quantity > 0))   // partial index, typed predicate
+            .CompositeIndex(keys => keys.Descending(x => x.Price).Ascending(x => x.Name))
+            .AddField(x => x.Rating)                                     // evolve a live schema
+            .DropField("legacy_score"));
 }
 
 // on startup: apply pending migrations, once each
 await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 ```
+
+The typed filtered-index predicate goes through the **same interpretation as query filters** —
+rendered to a SQL `WHERE` with inlined literals on PostgreSQL/SQL Server, a partial filter
+expression on MongoDB — and every option a store cannot build is rejected with guidance
+(MySQL has no filtered indexes, Cassandra points you to `SearchIndex(...)`, Cosmos to its
+indexing policy).
 
 ### The engine — what the providers add on top of the drivers
 

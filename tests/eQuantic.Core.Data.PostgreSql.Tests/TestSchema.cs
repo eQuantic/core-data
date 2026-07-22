@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Relational;
+using eQuantic.Core.Data.Relational.Migration;
 using eQuantic.Core.Data.Repository;
 
 namespace eQuantic.Core.Data.PostgreSql.Tests;
@@ -60,6 +61,20 @@ public sealed class OrderItem : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>An entity whose table starts <b>bare</b> (created by a Run step): AddField/DropField evolve it.</summary>
+public sealed class LegacyNote : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+
+    public string? Text { get; set; }
+
+    public int Stars { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>An identity-keyed entity: the database generates the key and the commit reads it back.</summary>
 public sealed class Ticket : IEntity<long>
 {
@@ -79,6 +94,7 @@ internal static class TestSchema
         .Entity<SaleOrder>(entity => entity.Table("sale_orders"))
         .Entity<Buyer>(_ => { })
         .Entity<OrderItem>(_ => { })
+        .Entity<LegacyNote>(entity => entity.Table("legacy_notes"))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
 }
 
@@ -97,4 +113,34 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
             .EnsureCollection());
+}
+
+/// <summary>
+///     The evolution migration: a Run step leaves <c>legacy_notes</c> bare (key plus an obsolete column, the way a
+///     live table looks), then <c>AddField</c>/<c>DropField</c> evolve it, and the rich index options build a GIN
+///     index over the jsonb column and a filtered index with an inlined-literal predicate.
+/// </summary>
+[Migration("PostgreSQL schema evolution", 2026, 1, 1, 0, 0, 1)]
+public sealed class SchemaEvolutionMigration : Data.Migration.Migration
+{
+    /// <inheritdoc />
+    public override void Up(IMigrationBuilder migration) => migration
+        .Run(async (context, cancellationToken) =>
+        {
+            var command = context.AsRelational().Connection.CreateCommand();
+            await using (command)
+            {
+                command.CommandText = "CREATE TABLE IF NOT EXISTS legacy_notes (id uuid PRIMARY KEY, obsolete text)";
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        })
+        .For<LegacyNote>(note => note
+            .AddField(x => x.Text)
+            .AddField(x => x.Stars)
+            .DropField("obsolete"))
+        .For<SaleOrder>(order => order
+            .Index(x => x.Attributes, options => options.Gin().Named("ix_sale_orders_attributes_gin"))
+            .Index(x => x.Status, options => options
+                .Filtered(x => x.Status != null && x.Total > 0m)
+                .Named("ix_sale_orders_status_present")));
 }

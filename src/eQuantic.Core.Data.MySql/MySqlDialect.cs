@@ -38,9 +38,24 @@ public class MySqlDialect : SqlDialect
         $"ALTER TABLE {quotedTable} MODIFY {quotedColumn} {sqlType}";
 
     /// <inheritdoc />
-    public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique) =>
+    public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique,
+        eQuantic.Core.Data.Migration.IndexMethod method, string? filter)
+    {
+        if (method != eQuantic.Core.Data.Migration.IndexMethod.Default)
+        {
+            throw new NotSupportedException(
+                $"MySQL has no '{method}' index structure; use a default index, or the store's native tooling via Run(...).");
+        }
+
+        if (filter is not null)
+        {
+            throw new NotSupportedException(
+                "MySQL has no filtered indexes; index the whole column, or restructure with a generated column via Run(...).");
+        }
+
         // MySQL has no CREATE INDEX IF NOT EXISTS; the migration history guards re-runs.
-        $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {quotedName} ON {quotedTable} ({columns})";
+        return $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {quotedName} ON {quotedTable} ({columns})";
+    }
 
     /// <inheritdoc />
     public override string SqlType(Type type)

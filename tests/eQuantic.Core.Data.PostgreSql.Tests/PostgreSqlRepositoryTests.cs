@@ -388,6 +388,51 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"));
     }
 
+    // ---------------------------------------------------------------- migration evolution + rich indexes
+
+    [Test]
+    public async Task Migrations_evolve_a_live_table_and_build_rich_indexes()
+    {
+        using var db = await NewSchemaAsync();
+
+        // legacy_notes started bare (id + obsolete, from the Run step); AddField/DropField evolved it.
+        var notes = db.Resolve<IAsyncRepository<LegacyNote, Guid>>();
+        var note = new LegacyNote { Id = Guid.NewGuid(), Text = "evolved", Stars = 5 };
+        await notes.AddAsync(note);
+        await Uow(db).CommitAsync();
+        var loaded = (await notes.GetAsync(note.Id))!;
+        Assert.That((loaded.Text, loaded.Stars), Is.EqualTo(("evolved", 5)),
+            "AddField added the columns the bare table lacked");
+
+        var dataSource = db.Resolve<System.Data.Common.DbDataSource>();
+        await using (var columns = dataSource.CreateCommand(
+                         "SELECT column_name FROM information_schema.columns WHERE table_name = 'legacy_notes'"))
+        await using (var reader = await columns.ExecuteReaderAsync())
+        {
+            var names = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+
+            Assert.That(names, Is.EquivalentTo(new[] { "id", "text", "stars" }), "DropField removed the obsolete column");
+        }
+
+        await using var indexes = dataSource.CreateCommand(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'sale_orders'");
+        await using var definitions = await indexes.ExecuteReaderAsync();
+        var byName = new Dictionary<string, string>();
+        while (await definitions.ReadAsync())
+        {
+            byName[definitions.GetString(0)] = definitions.GetString(1);
+        }
+
+        Assert.That(byName["ix_sale_orders_attributes_gin"], Does.Contain("USING gin"), "the GIN index built");
+        Assert.That(byName["ix_sale_orders_status_present"],
+            Does.Contain("IS NOT NULL").And.Contain("0"),
+            "the filtered index carries the typed predicate with inlined literals");
+    }
+
     // ---------------------------------------------------------------- jsonb document columns
 
     [Test]

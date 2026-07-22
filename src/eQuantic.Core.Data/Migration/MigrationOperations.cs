@@ -59,6 +59,19 @@ public sealed class EnsureCollectionOperation(Type entityType) : MigrationOperat
 /// <param name="Descending">Whether the key is descending.</param>
 public sealed record IndexKey(LambdaExpression Selector, bool Descending);
 
+/// <summary>A specialized index structure a provider may support.</summary>
+public enum IndexMethod
+{
+    /// <summary>The store's default index structure (b-tree or equivalent).</summary>
+    Default,
+
+    /// <summary>A PostgreSQL <c>GIN</c> index — what makes <c>jsonb</c> and array predicates fast.</summary>
+    Gin,
+
+    /// <summary>A text-search index (MongoDB <c>text</c>).</summary>
+    Text,
+}
+
 /// <summary>Ensures an index (single-key or composite) exists.</summary>
 public sealed class EnsureIndexOperation(Type entityType, IReadOnlyList<IndexKey> keys) : MigrationOperation(entityType)
 {
@@ -73,6 +86,26 @@ public sealed class EnsureIndexOperation(Type entityType, IReadOnlyList<IndexKey
 
     /// <summary>An explicit index name, or <c>null</c> to let the provider derive one.</summary>
     public string? Name { get; init; }
+
+    /// <summary>The index structure; providers reject methods they cannot build.</summary>
+    public IndexMethod Method { get; init; }
+
+    /// <summary>When set, a partial/filtered index: only rows matching this typed predicate are indexed.</summary>
+    public LambdaExpression? Filter { get; init; }
+}
+
+/// <summary>Adds the column/field for an entity member to an existing table (document stores gain fields on write).</summary>
+public sealed class AddFieldOperation(Type entityType, LambdaExpression field) : MigrationOperation(entityType)
+{
+    /// <summary>The member selector — the member exists on the entity; the operation adds its stored column.</summary>
+    public LambdaExpression Field { get; } = field;
+}
+
+/// <summary>Drops a stored column/field by its <b>stored name</b> (the CLR member is usually already gone).</summary>
+public sealed class DropFieldOperation(Type entityType, string field) : MigrationOperation(entityType)
+{
+    /// <summary>The stored column/field name.</summary>
+    public string Field { get; } = field;
 }
 
 /// <summary>Converts a field's stored type (schema/type evolution) across existing documents.</summary>

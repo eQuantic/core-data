@@ -81,6 +81,32 @@ public sealed class PostgreSqlDialect : SqlDialect
         $"ALTER TABLE {quotedTable} ALTER COLUMN {quotedColumn} TYPE {sqlType} USING {quotedColumn}::{sqlType}";
 
     /// <inheritdoc />
+    public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique,
+        eQuantic.Core.Data.Migration.IndexMethod method, string? filter)
+    {
+        if (method == eQuantic.Core.Data.Migration.IndexMethod.Gin)
+        {
+            if (unique)
+            {
+                throw new NotSupportedException("PostgreSQL GIN indexes cannot enforce uniqueness.");
+            }
+
+            return $"CREATE INDEX IF NOT EXISTS {quotedName} ON {quotedTable} USING GIN ({columns})"
+                   + (filter is not null ? $" WHERE {filter}" : string.Empty);
+        }
+
+        return base.CreateIndexSql(quotedName, quotedTable, columns, unique, method, filter);
+    }
+
+    /// <inheritdoc />
+    public override string AddColumnSql(string quotedTable, string quotedColumn, string sqlType) =>
+        $"ALTER TABLE {quotedTable} ADD COLUMN IF NOT EXISTS {quotedColumn} {sqlType}";
+
+    /// <inheritdoc />
+    public override string DropColumnSql(string quotedTable, string quotedColumn) =>
+        $"ALTER TABLE {quotedTable} DROP COLUMN IF EXISTS {quotedColumn}";
+
+    /// <inheritdoc />
     public override string SqlType(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;

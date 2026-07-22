@@ -72,6 +72,23 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                 case EnsureIndexOperation index:
                     await ExecuteAsync(CreateIndex(index)).ConfigureAwait(false);
                     break;
+                case AddFieldOperation add:
+                {
+                    var configuration = _model.For(add.EntityType);
+                    var member = add.Field.GetMemberName();
+                    var column = configuration.Columns.FirstOrDefault(candidate =>
+                                     CassandraEntityConfiguration.Same(candidate.Name, member))
+                                 ?? throw new NotSupportedException(
+                                     $"'{add.EntityType.Name}' has no mapped column '{member}' to add.");
+                    await ExecuteAsync(new SimpleStatement(
+                        $"ALTER TABLE {configuration.TableName} ADD {column.Name} {column.CqlType}")).ConfigureAwait(false);
+                    break;
+                }
+
+                case DropFieldOperation drop:
+                    await ExecuteAsync(new SimpleStatement(
+                        $"ALTER TABLE {_model.For(drop.EntityType).TableName} DROP {drop.Field}")).ConfigureAwait(false);
+                    break;
                 case UpdateOperation update:
                     await ExecuteAsync(Update(update)).ConfigureAwait(false);
                     break;
@@ -114,6 +131,26 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
 
     private SimpleStatement CreateIndex(EnsureIndexOperation operation)
     {
+        if (operation.Method != IndexMethod.Default)
+        {
+            throw new NotSupportedException(
+                $"Cassandra has no '{operation.Method}' index structure; declare LIKE search with SearchIndex(...) on the model, " +
+                "or use the cluster's native tooling via Run(...).");
+        }
+
+        if (operation.Filter is not null)
+        {
+            throw new NotSupportedException(
+                "Cassandra has no filtered indexes; model the access pattern with the primary key instead.");
+        }
+
+        if (operation.ExpireAfter is not null)
+        {
+            throw new NotSupportedException(
+                "Cassandra has no TTL indexes; write expiring rows with CommitAsync(o => o.WithTtl(...)), or set the " +
+                "table's default_time_to_live via Run(...).");
+        }
+
         if (operation.Keys.Count != 1)
         {
             throw new NotSupportedException(
