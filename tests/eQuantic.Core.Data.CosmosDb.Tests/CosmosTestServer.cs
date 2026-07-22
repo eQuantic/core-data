@@ -1,18 +1,21 @@
+using DotNet.Testcontainers.Builders;
+using DotNet.Testcontainers.Containers;
 using eQuantic.Core.Data.CosmosDb.Extensions;
 using eQuantic.Core.Data.CosmosDb.Repository;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Repository;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.DependencyInjection;
-using Testcontainers.CosmosDb;
 
 namespace eQuantic.Core.Data.CosmosDb.Tests;
 
 /// <summary>
-///     Boots one Azure Cosmos DB Linux emulator for the whole test run (Testcontainers) and builds a single
-///     shared container + service provider. Cosmos container creation is slow and overwhelms the emulator, so the
-///     suite creates the container once and isolates tests by a unique partition-key value instead of a container
-///     per test. Skips gracefully when Docker/the emulator is unavailable.
+///     Boots one Azure Cosmos DB <b>vNext</b> emulator for the whole test run (Testcontainers) and builds a
+///     single shared container + service provider. The vNext emulator runs on every architecture (Linux/macOS/
+///     Windows, x64/ARM64), serves the gateway over plain HTTP and exposes a health probe, so readiness is gated
+///     on <c>/ready</c> instead of racing — no more spurious 408/503 collapses. Cosmos container creation is slow,
+///     so the suite creates the container once and isolates tests by a unique partition-key value. Skips
+///     gracefully when Docker is unavailable.
 /// </summary>
 [SetUpFixture]
 public sealed class CosmosTestServer
@@ -20,7 +23,10 @@ public sealed class CosmosTestServer
     public const string DatabaseName = "tests";
     public const string ContainerName = "products";
 
-    private static CosmosDbContainer? _container;
+    // The well-known emulator account key (identical across the classic and vNext emulators).
+    private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
+
+    private static IContainer? _container;
     private static CosmosClient? _client;
     private static ServiceProvider? _provider;
     private static Exception? _startupError;
@@ -33,21 +39,32 @@ public sealed class CosmosTestServer
     {
         try
         {
-            _container = new CosmosDbBuilder().Build();
+            // Gateway on 8081 (HTTP), health probe on 8080; the wait strategy blocks until /ready returns 200.
+            _container = new ContainerBuilder()
+                .WithImage("mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest")
+                .WithPortBinding(8081, true)
+                .WithPortBinding(8080, true)
+                .WithWaitStrategy(Wait.ForUnixContainer()
+                    .UntilHttpRequestIsSucceeded(request => request.ForPort(8080).ForPath("/ready")))
+                .Build();
             await _container.StartAsync();
 
+            var endpoint = $"http://{_container.Hostname}:{_container.GetMappedPublicPort(8081)}/";
             var options = new CosmosClientOptions
             {
                 ConnectionMode = ConnectionMode.Gateway,
-                HttpClientFactory = () => _container.HttpClient,
+                LimitToEndpoint = true,
                 UseSystemTextJsonSerializerWithOptions = CosmosClientFactory.SerializerOptions,
-                AllowBulkExecution = true,
-                RequestTimeout = TimeSpan.FromMinutes(5),
+                RequestTimeout = TimeSpan.FromMinutes(2),
             };
-            _client = new CosmosClient(_container.GetConnectionString(), options);
+            _client = new CosmosClient(endpoint, EmulatorKey, options);
 
-            var database = (await _client.CreateDatabaseIfNotExistsAsync(DatabaseName)).Database;
-            await database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/category"));
+            // The gateway health probe flips to ready before the vNext data-plane (the pgcosmos engine) finishes
+            // starting, which answers early requests with 503 "extension is still starting; retry shortly". Gate
+            // the bootstrap on the data plane being genuinely up rather than racing it.
+            var database = await BootstrapAsync(async () =>
+                (await _client.CreateDatabaseIfNotExistsAsync(DatabaseName)).Database);
+            await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/category")));
 
             var services = new ServiceCollection();
             services.AddSingleton(_client);
@@ -85,6 +102,30 @@ public sealed class CosmosTestServer
             await _container.DisposeAsync();
         }
     }
+
+    /// <summary>Runs a bootstrap step, retrying the "pgcosmos still starting" 503 until the data plane is up.</summary>
+    private static async Task<T> BootstrapAsync<T>(Func<Task<T>> step)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        while (true)
+        {
+            try
+            {
+                return await step();
+            }
+            catch (CosmosException exception) when (
+                exception.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+        }
+    }
+
+    private static Task BootstrapAsync(Func<Task> step) => BootstrapAsync(async () =>
+    {
+        await step();
+        return true;
+    });
 
     /// <summary>Skips the calling test when the emulator could not start.</summary>
     public static void EnsureAvailable()
