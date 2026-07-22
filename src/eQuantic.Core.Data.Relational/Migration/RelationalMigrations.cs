@@ -117,7 +117,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             return declaration;
         });
 
-        return $"CREATE TABLE IF NOT EXISTS {_dialect.Quote(configuration.TableName)} ({string.Join(", ", columns)})";
+        return _dialect.CreateTableSql(_dialect.Quote(configuration.TableName), string.Join(", ", columns));
     }
 
     private string CreateIndex(EnsureIndexOperation operation)
@@ -135,8 +135,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                    ?? $"ix_{configuration.TableName}_{string.Join("_", keys.Select(key => key.Column.Name))}";
         var list = string.Join(", ", keys.Select(key => $"{_dialect.Quote(key.Column.Name)}{(key.Descending ? " DESC" : string.Empty)}"));
 
-        return $"CREATE {(operation.Unique ? "UNIQUE " : string.Empty)}INDEX IF NOT EXISTS {_dialect.Quote(name)} " +
-               $"ON {_dialect.Quote(configuration.TableName)} ({list})";
+        return _dialect.CreateIndexSql(_dialect.Quote(name), _dialect.Quote(configuration.TableName), list, operation.Unique);
     }
 
     private (string Sql, List<object?> Parameters) Update(UpdateOperation operation)
@@ -207,12 +206,11 @@ public sealed class RelationalMigrationHistory : IMigrationHistory
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText =
-            $"CREATE TABLE IF NOT EXISTS {Table} (" +
+        command.CommandText = _dialect.CreateTableSql(Table,
             $"{_dialect.Quote("id")} {_dialect.SqlType(typeof(string))} PRIMARY KEY, " +
             $"{_dialect.Quote("title")} {_dialect.SqlType(typeof(string))}, " +
             $"{_dialect.Quote("date")} {_dialect.SqlType(typeof(DateTime))}, " +
-            $"{_dialect.Quote("applied_at")} {_dialect.SqlType(typeof(DateTime))})";
+            $"{_dialect.Quote("applied_at")} {_dialect.SqlType(typeof(DateTime))}");
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 

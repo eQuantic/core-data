@@ -61,7 +61,7 @@ internal static class SqlFilterRenderer
 
             if (values.Count == 0)
             {
-                return hasNull ? $"{column} IS NULL" : "FALSE";
+                return hasNull ? $"{column} IS NULL" : dialect.FalseLiteral;
             }
 
             var list = $"{column} IN ({string.Join(", ", values.Select(Bind))})";

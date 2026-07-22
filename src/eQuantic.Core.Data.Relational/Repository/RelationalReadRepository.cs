@@ -395,7 +395,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             sql += $" WHERE {where}";
         }
 
-        sql += OrderBy(options, orderByKeyWhenUnsorted);
+        // A dialect whose limit syntax demands an ORDER BY (OFFSET/FETCH) gets a deterministic key order.
+        sql += OrderBy(options, orderByKeyWhenUnsorted || (limit is not null && _dialect.RequiresOrderByForLimit));
 
         if (limit is not null && parameters is not null)
         {

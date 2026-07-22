@@ -300,14 +300,9 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork
                     : configuration.Columns.ToList();
                 var names = string.Join(", ", columns.Select(column => Dialect.Quote(column.Name)));
                 var values = string.Join(", ", columns.Select(column => Bind(column.Property.GetValue(write.Entity))));
-                var sql = $"INSERT INTO {Dialect.Quote(configuration.TableName)} ({names}) VALUES ({values})";
-                if (configuration.KeyIsGenerated && Dialect.InsertReturningClause(Dialect.Quote(key.Name)) is { } clause)
-                {
-                    sql += " " + clause;
-                    returning = true;
-                }
-
-                command.CommandText = sql;
+                command.CommandText = Dialect.InsertSql(Dialect.Quote(configuration.TableName), names, values,
+                    configuration.KeyIsGenerated ? Dialect.Quote(key.Name) : null);
+                returning = configuration.KeyIsGenerated;
                 break;
             }
 

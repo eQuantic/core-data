@@ -103,16 +103,18 @@ This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`,
 `IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
 implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
 
-## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra, PostgreSQL
+## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra, PostgreSQL, MySQL, SQL Server
 
 The same contracts implemented **directly on each official driver — no Entity Framework** — with a
 lean write model: `Add`/`Modify`/`Remove` buffer typed writes and one native batch runs on `Commit`
 (no change tracking or snapshotting). Explicit transactions are opt-in: multi-document sessions on
 MongoDB (reads inside the transaction see its writes), a single-partition `TransactionalBatch` on
 Cosmos, an atomic `LOGGED BATCH` on Cassandra — and on PostgreSQL the commit itself is **atomic**
-(one batched flush in a transaction, generated keys read back with `RETURNING`, explicit
-transactions spanning commits with read-your-writes). The relational provider is a thin dialect
-over the shared `eQuantic.Core.Data.Relational` engine — MySQL and SQL Server follow the same seam.
+(one batched flush in a transaction, generated keys read back — `RETURNING` on PostgreSQL,
+`OUTPUT INSERTED` on SQL Server — and explicit transactions spanning commits with
+read-your-writes). The relational providers are thin dialects over the shared
+`eQuantic.Core.Data.Relational` engine: PostgreSQL (Npgsql), MySQL (MySqlConnector) and
+SQL Server (Microsoft.Data.SqlClient) differ only in their `SqlDialect`.
 All providers ship the same **fluent, typed migrations**, authored with member selectors instead of
 field strings:
 

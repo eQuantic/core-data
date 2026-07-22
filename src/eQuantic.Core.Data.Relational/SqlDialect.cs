@@ -27,6 +27,12 @@ public abstract class SqlDialect
     public virtual string LimitClause(string limitParameter, string? offsetParameter) =>
         offsetParameter is null ? $"LIMIT {limitParameter}" : $"LIMIT {limitParameter} OFFSET {offsetParameter}";
 
+    /// <summary>Whether a limited query must carry an ORDER BY (SQL Server's <c>OFFSET/FETCH</c>); the key is used when unsorted.</summary>
+    public virtual bool RequiresOrderByForLimit => false;
+
+    /// <summary>The literal for an always-false predicate (an empty <c>IN</c>); some dialects have no <c>FALSE</c>.</summary>
+    public virtual string FalseLiteral => "FALSE";
+
     /// <summary>The DDL type for a CLR type (used by <c>CREATE TABLE</c> migrations).</summary>
     public abstract string SqlType(Type type);
 
@@ -34,10 +40,33 @@ public abstract class SqlDialect
     public abstract string GeneratedKeyDdl { get; }
 
     /// <summary>
-    ///     The clause an insert uses to read back a generated key, or <c>null</c> when the dialect cannot
-    ///     (the provider then falls back to its own mechanism).
+    ///     Builds an INSERT, reading the generated key back when <paramref name="returningKey" /> is supplied
+    ///     (<c>RETURNING</c> / <c>OUTPUT INSERTED</c>). The base dialect cannot read keys back — declare a
+    ///     client-generated key, or use a dialect that can.
     /// </summary>
-    public virtual string? InsertReturningClause(string keyColumn) => null;
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columns">The quoted column list.</param>
+    /// <param name="values">The bound value list.</param>
+    /// <param name="returningKey">The quoted generated-key column to read back, or <c>null</c>.</param>
+    public virtual string InsertSql(string quotedTable, string columns, string values, string? returningKey) =>
+        returningKey is null
+            ? $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})"
+            : throw new NotSupportedException(
+                $"{GetType().Name} cannot read a generated key back from an insert; declare a client-generated key instead.");
+
+    /// <summary>Builds an idempotent CREATE TABLE statement.</summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columnsDdl">The column declaration list.</param>
+    public virtual string CreateTableSql(string quotedTable, string columnsDdl) =>
+        $"CREATE TABLE IF NOT EXISTS {quotedTable} ({columnsDdl})";
+
+    /// <summary>Builds a CREATE INDEX statement (idempotent where the dialect supports it; migration history guards re-runs otherwise).</summary>
+    /// <param name="quotedName">The quoted index name.</param>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columns">The quoted key column list (with directions).</param>
+    /// <param name="unique">Whether the index enforces uniqueness.</param>
+    public virtual string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique) =>
+        $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX IF NOT EXISTS {quotedName} ON {quotedTable} ({columns})";
 
     /// <summary>
     ///     Renders a collection-membership test (<c>member CONTAINS value</c> / <c>CONTAINS KEY</c>) for stores
