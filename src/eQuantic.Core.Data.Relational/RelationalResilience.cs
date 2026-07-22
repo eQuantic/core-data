@@ -35,8 +35,8 @@ public sealed class RelationalResilienceOptions
     public bool RetryCommits { get; set; }
 }
 
-/// <summary>Runs an operation under the retry policy. The unit of work delegates here; the loop is test-visible.</summary>
-public static class RelationalResilience
+/// <summary>Runs an operation under the retry policy. The unit of work delegates here.</summary>
+internal static class RelationalResilience
 {
     /// <summary>Executes <paramref name="operation" />, retrying driver-transient failures per the policy.</summary>
     /// <typeparam name="T">The result type.</typeparam>

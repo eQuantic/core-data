@@ -246,6 +246,14 @@ The rule behind all of it: **a query never lies about its cost.** Anything beyon
 native access path is explicit and opt-in, and `Explain()` shows exactly what will run. Providers
 target `net10.0`.
 
+**Public surface, deliberately layered**: the contracts (`Repository`, `Options`, `Migration`) and
+the composers (`Db`, `Union`, the model builders) are the application-facing API. The
+`eQuantic.Core.Data.Query` namespace — the interpreters and the dialect-agnostic
+filter/update/group/union models — is the **provider SPI**: public so third-party providers and
+dialects can build on the same engine, hidden from IntelliSense (`EditorBrowsable`), and versioned
+with the engine rather than with the contracts. Provider engine internals (renderers, mappers,
+materializers) are `internal`.
+
 ## Install
 
 ```bash

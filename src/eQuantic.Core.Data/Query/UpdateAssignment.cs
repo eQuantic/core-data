@@ -12,6 +12,7 @@ namespace eQuantic.Core.Data.Query;
 ///     Cosmos <c>PatchOperation.Set</c>/<c>Increment</c>/<c>Add</c>, CQL <c>col = ?</c> / <c>col = col + ?</c>.
 ///     A provider that cannot apply an assignment atomically rejects it with the reason.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public abstract class UpdateAssignment
 {
     /// <summary>Initializes the assignment for the target member.</summary>
@@ -85,6 +86,7 @@ public abstract class UpdateAssignment
 }
 
 /// <summary>Assigns a constant value: <c>member = value</c>.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class SetAssignment(MemberInfo member, object? value) : UpdateAssignment(member)
 {
     /// <summary>The value to set.</summary>
@@ -92,6 +94,7 @@ public sealed class SetAssignment(MemberInfo member, object? value) : UpdateAssi
 }
 
 /// <summary>Adds a constant delta to the member's current value: <c>member = member + delta</c> (delta is negative for a subtraction).</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class IncrementAssignment(MemberInfo member, object delta) : UpdateAssignment(member)
 {
     /// <summary>The delta (negative for a subtraction).</summary>
@@ -99,6 +102,7 @@ public sealed class IncrementAssignment(MemberInfo member, object delta) : Updat
 }
 
 /// <summary>Multiplies the member's current value by a constant factor: <c>member = member * factor</c>.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class MultiplyAssignment(MemberInfo member, object factor) : UpdateAssignment(member)
 {
     /// <summary>The factor.</summary>
@@ -106,6 +110,7 @@ public sealed class MultiplyAssignment(MemberInfo member, object factor) : Updat
 }
 
 /// <summary>Adds items to the member's current collection (append, prepend, or unique/set union).</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class CollectionAddAssignment(MemberInfo member, IReadOnlyList<object?> items, bool prepend, bool unique)
     : UpdateAssignment(member)
 {
@@ -123,6 +128,7 @@ public sealed class CollectionAddAssignment(MemberInfo member, IReadOnlyList<obj
 }
 
 /// <summary>Removes items from the member's current collection.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class CollectionRemoveAssignment(MemberInfo member, IReadOnlyList<object?> items) : UpdateAssignment(member)
 {
     /// <summary>The items to remove.</summary>

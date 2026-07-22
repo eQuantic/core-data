@@ -3,6 +3,7 @@ using System.Collections.Generic;
 namespace eQuantic.Core.Data.Query;
 
 /// <summary>A comparison operator in the dialect-agnostic filter model.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public enum ComparisonOperator
 {
     /// <summary><c>=</c></summary>
@@ -25,6 +26,7 @@ public enum ComparisonOperator
 }
 
 /// <summary>A logical combinator in the dialect-agnostic filter model.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public enum LogicalOperator
 {
     /// <summary>Conjunction.</summary>
@@ -42,12 +44,14 @@ public enum LogicalOperator
 ///     from a typed predicate and rendered to a target query (CQL, SQL, …) by a provider. Members are referenced
 ///     by their resolved path so a renderer can map them to columns.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public abstract class QueryFilter;
 
 /// <summary>A member compared to a constant: <c>member op value</c>.</summary>
 /// <param name="member">The member path (e.g. <c>Total</c> or <c>Customer.Name</c>).</param>
 /// <param name="op">The comparison operator.</param>
 /// <param name="value">The compared value.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class ComparisonFilter(string member, ComparisonOperator op, object? value) : QueryFilter
 {
     /// <summary>The member path.</summary>
@@ -61,6 +65,7 @@ public sealed class ComparisonFilter(string member, ComparisonOperator op, objec
 }
 
 /// <summary>A substring position in the dialect-agnostic filter model.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public enum StringOperator
 {
     /// <summary>The member starts with the value.</summary>
@@ -80,6 +85,7 @@ public enum StringOperator
 /// <param name="member">The member path.</param>
 /// <param name="op">The substring position.</param>
 /// <param name="value">The tested substring.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class StringFilter(string member, StringOperator op, string value) : QueryFilter
 {
     /// <summary>The member path.</summary>
@@ -103,6 +109,7 @@ public sealed class StringFilter(string member, StringOperator op, string value)
 /// <param name="arguments">The constant arguments after the member, in order.</param>
 /// <param name="op">The comparison operator, or <c>null</c> when the function itself is the predicate.</param>
 /// <param name="value">The compared value when <paramref name="op" /> is present.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class FunctionFilter(string function, string member, IReadOnlyList<object?> arguments,
     ComparisonOperator? op, object? value) : QueryFilter
 {
@@ -125,6 +132,7 @@ public sealed class FunctionFilter(string function, string member, IReadOnlyList
 /// <summary>A member constrained to a set of values: <c>member IN (values)</c>.</summary>
 /// <param name="member">The member path.</param>
 /// <param name="values">The candidate values.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class InFilter(string member, IReadOnlyList<object?> values) : QueryFilter
 {
     /// <summary>The member path.</summary>
@@ -141,6 +149,7 @@ public sealed class InFilter(string member, IReadOnlyList<object?> values) : Que
 /// <param name="member">The collection member path.</param>
 /// <param name="value">The value (or key) tested for membership.</param>
 /// <param name="key">Whether the test is for a map key (<c>CONTAINS KEY</c>) rather than a value (<c>CONTAINS</c>).</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class CollectionFilter(string member, object? value, bool key) : QueryFilter
 {
     /// <summary>The collection member path.</summary>
@@ -157,6 +166,7 @@ public sealed class CollectionFilter(string member, object? value, bool key) : Q
 /// <param name="members">The member paths, in order.</param>
 /// <param name="op">The comparison operator.</param>
 /// <param name="values">The values, in order.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class TupleComparisonFilter(IReadOnlyList<string> members, ComparisonOperator op, IReadOnlyList<object?> values) : QueryFilter
 {
     /// <summary>The member paths, in order.</summary>
@@ -172,6 +182,7 @@ public sealed class TupleComparisonFilter(IReadOnlyList<string> members, Compari
 /// <summary>A logical combination of filters (<c>And</c>/<c>Or</c>, or a single-operand <c>Not</c>).</summary>
 /// <param name="op">The logical operator.</param>
 /// <param name="operands">The operands (one for <see cref="LogicalOperator.Not" />).</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class LogicalFilter(LogicalOperator op, IReadOnlyList<QueryFilter> operands) : QueryFilter
 {
     /// <summary>The logical operator.</summary>

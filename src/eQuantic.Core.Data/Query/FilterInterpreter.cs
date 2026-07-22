@@ -18,6 +18,7 @@ namespace eQuantic.Core.Data.Query;
 ///     member); collection <c>CONTAINS</c>/<c>CONTAINS KEY</c>; boolean members (<c>x =&gt; x.Flag</c>); and
 ///     negation, pushed into the comparison where possible. Providers render the result to their query dialect.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class FilterInterpreter
 {
     /// <summary>Interprets a predicate into the filter model.</summary>

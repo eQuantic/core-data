@@ -7,6 +7,7 @@ using eQuantic.Linq.Expressions.Nodes;
 namespace eQuantic.Core.Data.Query;
 
 /// <summary>A grouped aggregate in the dialect-agnostic model.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public enum GroupAggregate
 {
     /// <summary><c>COUNT(*)</c>.</summary>
@@ -28,9 +29,11 @@ public enum GroupAggregate
 /// <summary>One member of the grouping key: its entity path and, for composite keys, its name on the key type.</summary>
 /// <param name="Path">The entity member path.</param>
 /// <param name="Name">The member's name on the composite key type, or <c>null</c> for a single-member key.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed record GroupKeyMember(string Path, string? Name);
 
 /// <summary>One projected member of a grouped result.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public abstract class GroupBinding
 {
     /// <summary>Initializes the binding.</summary>
@@ -42,6 +45,7 @@ public abstract class GroupBinding
 }
 
 /// <summary>Projects the grouping key — whole (<c>g.Key</c>) or one member of a composite key (<c>g.Key.A</c>).</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class GroupKeyBinding(string target, string? keyName) : GroupBinding(target)
 {
     /// <summary>The composite key member's name, or <c>null</c> for the whole key.</summary>
@@ -49,6 +53,7 @@ public sealed class GroupKeyBinding(string target, string? keyName) : GroupBindi
 }
 
 /// <summary>Projects an aggregate over the group (<c>g.Count()</c>, <c>g.Sum(x =&gt; x.Member)</c>, …).</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class GroupAggregateBinding(string target, GroupAggregate aggregate, string? member) : GroupBinding(target)
 {
     /// <summary>The aggregate.</summary>
@@ -62,14 +67,17 @@ public sealed class GroupAggregateBinding(string target, GroupAggregate aggregat
 /// <param name="Key">The grouping key members, in order.</param>
 /// <param name="Bindings">The projected bindings, in order.</param>
 /// <param name="ConstructorProjection">Whether the result is built positionally (anonymous/ctor) rather than by member init.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed record GroupQuery(IReadOnlyList<GroupKeyMember> Key, IReadOnlyList<GroupBinding> Bindings, bool ConstructorProjection);
 
 /// <summary>A predicate over a group — the dialect-agnostic <c>HAVING</c> model.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public abstract class GroupPredicate
 {
 }
 
 /// <summary>Compares an aggregate — or a key member — against a value.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class GroupComparison(GroupAggregate? aggregate, string? member, ComparisonOperator op, object? value) : GroupPredicate
 {
     /// <summary>The aggregate, or <c>null</c> when the comparison is over a key member.</summary>
@@ -86,6 +94,7 @@ public sealed class GroupComparison(GroupAggregate? aggregate, string? member, C
 }
 
 /// <summary>Combines group predicates with <c>AND</c>/<c>OR</c>.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class GroupLogical(LogicalOperator op, IReadOnlyList<GroupPredicate> operands) : GroupPredicate
 {
     /// <summary>The logical operator.</summary>
@@ -103,6 +112,7 @@ public sealed class GroupLogical(LogicalOperator op, IReadOnlyList<GroupPredicat
 ///     Anything else is rejected with the supported shapes — a grouped read never silently degrades to
 ///     fetching the table.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class GroupInterpreter
 {
     /// <summary>Interprets the selectors into the grouped-query model.</summary>

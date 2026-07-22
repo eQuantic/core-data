@@ -11,6 +11,7 @@ namespace eQuantic.Core.Data.Query;
 ///     (each conjunct can run on a different side — pushed down or residual), while an <c>OR</c> cannot be
 ///     half-pushed but can be split into one native query per branch when every branch is expressible.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class NodePredicates
 {
     /// <summary>The flattened top-level conjuncts of the body (<c>A &amp;&amp; B &amp;&amp; C</c> → <c>[A, B, C]</c>), in order.</summary>

@@ -17,7 +17,10 @@ namespace eQuantic.Core.Data.Repository;
 ///             live rows; <c>IgnoringQueryFilters()</c> opts a read out, exactly like a global filter.
 ///         </item>
 ///     </list>
+///     <b>Provider SPI</b>: providers invoke these conventions at their staging and filter points; application
+///     code never needs to call it.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class EntityLifecycle
 {
     /// <summary>Stamps <c>CreatedAt</c> for an insert when the entity tracks it and no explicit value was set.</summary>

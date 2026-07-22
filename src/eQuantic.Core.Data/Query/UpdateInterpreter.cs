@@ -18,6 +18,7 @@ namespace eQuantic.Core.Data.Query;
 ///     (optionally wrapped in <c>ToList</c>/<c>ToArray</c>/<c>ToHashSet</c>). Anything else is rejected with the
 ///     supported shapes, so an update never silently degrades to a read-modify-write.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class UpdateInterpreter
 {
     /// <summary>Interprets the update factory into the assignment model.</summary>

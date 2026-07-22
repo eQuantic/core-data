@@ -6,6 +6,7 @@ using eQuantic.Linq.Expressions.Nodes;
 namespace eQuantic.Core.Data.Query;
 
 /// <summary>One projected member of a union branch.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public abstract class UnionBinding
 {
     /// <summary>Initializes the binding.</summary>
@@ -17,6 +18,7 @@ public abstract class UnionBinding
 }
 
 /// <summary>Projects an entity member.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class UnionColumnBinding(string target, string member) : UnionBinding(target)
 {
     /// <summary>The entity member path.</summary>
@@ -24,6 +26,7 @@ public sealed class UnionColumnBinding(string target, string member) : UnionBind
 }
 
 /// <summary>Projects a constant — typically a per-branch tag naming where a row came from.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed class UnionConstantBinding(string target, object? value) : UnionBinding(target)
 {
     /// <summary>The constant value.</summary>
@@ -33,6 +36,7 @@ public sealed class UnionConstantBinding(string target, object? value) : UnionBi
 /// <summary>The interpreted branch projection: the bindings in projection order.</summary>
 /// <param name="Bindings">The projected bindings, in order.</param>
 /// <param name="ConstructorProjection">Whether the result is built positionally (anonymous/ctor) rather than by member init.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public sealed record UnionProjection(IReadOnlyList<UnionBinding> Bindings, bool ConstructorProjection);
 
 /// <summary>
@@ -41,6 +45,7 @@ public sealed record UnionProjection(IReadOnlyList<UnionBinding> Bindings, bool 
 ///     every store can place in a combined select. Anything else is rejected with the supported shapes; a union
 ///     never silently degrades to fetching the tables.
 /// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
 public static class UnionInterpreter
 {
     /// <summary>
