@@ -21,32 +21,34 @@ internal static class CassandraUpdate
 
         foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
         {
+            // The interpreter names CLR members; the CQL wants the stored column names.
+            var column = configuration.ColumnFor(assignment.Name);
             switch (assignment)
             {
-                case SetAssignment set when configuration.IsCounter(set.Name):
+                case SetAssignment set when configuration.IsCounter(column):
                     throw new NotSupportedException(
                         $"A counter column cannot be set ('{set.Name}'); counters only move by increments (x => new ... {{ {set.Name} = x.{set.Name} + n }}).");
                 case SetAssignment set:
-                    assignments.Add($"{set.Name} = ?");
+                    assignments.Add($"{column} = ?");
                     values.Add(set.Value);
                     break;
-                case IncrementAssignment increment when configuration.IsCounter(increment.Name):
-                    assignments.Add($"{increment.Name} = {increment.Name} + ?");
+                case IncrementAssignment increment when configuration.IsCounter(column):
+                    assignments.Add($"{column} = {column} + ?");
                     values.Add(Convert.ToInt64(increment.Delta));
                     break;
                 case CollectionAddAssignment add when add.Unique && !add.IsSetMember():
                     throw new NotSupportedException(
                         $"CQL '+' on a list appends duplicates; Union needs a set column and '{add.Name}' is not one.");
                 case CollectionAddAssignment { Prepend: true } add:
-                    assignments.Add($"{add.Name} = ? + {add.Name}");
+                    assignments.Add($"{column} = ? + {column}");
                     values.Add(add.ToTypedCollection());
                     break;
                 case CollectionAddAssignment add:
-                    assignments.Add($"{add.Name} = {add.Name} + ?");
+                    assignments.Add($"{column} = {column} + ?");
                     values.Add(add.ToTypedCollection());
                     break;
                 case CollectionRemoveAssignment remove:
-                    assignments.Add($"{remove.Name} = {remove.Name} - ?");
+                    assignments.Add($"{column} = {column} - ?");
                     values.Add(remove.ToTypedCollection());
                     break;
                 case IncrementAssignment increment:

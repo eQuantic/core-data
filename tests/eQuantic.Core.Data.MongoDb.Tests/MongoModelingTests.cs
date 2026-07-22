@@ -49,4 +49,36 @@ public sealed class MongoModelingTests : MongoIntegrationTest
         var found = await repo.GetFilteredAsync(x => x.Title == "hello");
         Assert.That(found.Single().Id, Is.EqualTo("n1"), "queries render against the stored element name");
     }
+
+    [Test]
+    public async Task EntityKey_annotation_makes_the_member_the_document_id()
+    {
+        using var db = NewDatabase();
+        var repo = db.Resolve<IAsyncRepository<KeyedNote, string>>();
+
+        await repo.AddAsync(new KeyedNote { Code = "k1", Body = "keyed" });
+        await Uow(db).CommitAsync();
+
+        var raw = await db.Database.GetCollection<BsonDocument>("keyed_notes")
+            .Find(Builders<BsonDocument>.Filter.Eq("_id", "k1")).FirstOrDefaultAsync();
+        Assert.That(raw, Is.Not.Null, "[EntityKey] stored the member as _id — no duplicate ObjectId key");
+        Assert.That(raw.Contains("Code"), Is.False, "the member does not persist twice");
+
+        var found = await repo.GetAsync("k1");
+        Assert.That(found?.Body, Is.EqualTo("keyed"), "point lookups resolve through the id member");
+    }
+}
+
+/// <summary>An entity whose key member is not named <c>Id</c> — <c>[EntityKey]</c> declares it.</summary>
+[Entity("keyed_notes")]
+public sealed class KeyedNote : IEntity<string>
+{
+    [EntityKey]
+    public string Code { get; set; } = default!;
+
+    public string Body { get; set; } = "";
+
+    public string GetKey() => Code;
+
+    public void SetKey(string key) => Code = key;
 }

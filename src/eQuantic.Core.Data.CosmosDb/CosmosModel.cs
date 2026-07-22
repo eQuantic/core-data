@@ -23,6 +23,12 @@ public abstract class CosmosEntityConfiguration
     /// <summary>The container's default time-to-live in seconds, or <c>null</c> for none.</summary>
     public int? DefaultTimeToLiveSeconds { get; protected init; }
 
+    /// <summary>Where the document id comes from (for <see cref="CosmosModel.Explain" />).</summary>
+    public string IdDescription { get; protected init; } = "Id (convention)";
+
+    /// <summary>Whether the mapping declares a concurrency token (the document's <c>_etag</c>).</summary>
+    public bool HasConcurrencyToken { get; protected init; }
+
     /// <summary>Initializes the configuration.</summary>
     protected CosmosEntityConfiguration(Type entityType, string containerName, string partitionKeyPath)
     {
@@ -59,13 +65,18 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
 
     internal CosmosEntityConfiguration(string containerName, string partitionKeyPath,
         Func<TEntity, PartitionKey> partitionKey, Func<TEntity, string> id, int? ttlSeconds,
-        Func<TEntity, string?>? etag = null)
+        Func<TEntity, string?>? etag = null, string? idDescription = null)
         : base(typeof(TEntity), containerName, partitionKeyPath)
     {
         _partitionKey = partitionKey;
         _id = id;
         _etag = etag;
         DefaultTimeToLiveSeconds = ttlSeconds;
+        HasConcurrencyToken = etag is not null;
+        if (idDescription is not null)
+        {
+            IdDescription = idDescription;
+        }
     }
 
     /// <inheritdoc />
@@ -99,6 +110,33 @@ public sealed class CosmosModel
                 $"No Cosmos configuration is registered for '{entityType.Name}'. Register it with Entity<{entityType.Name}>(...).");
 
     internal void Add(CosmosEntityConfiguration configuration) => _configurations[configuration.EntityType] = configuration;
+
+    /// <summary>
+    ///     Describes every mapping decision the model made — container, partition key path, document id source,
+    ///     TTL and concurrency — the way <c>Explain()</c> describes a query. Read this instead of guessing what
+    ///     the mapping ended up being.
+    /// </summary>
+    public string Explain()
+    {
+        var report = new System.Text.StringBuilder();
+        foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
+        {
+            report.AppendLine($"{configuration.EntityType.Name} -> container \"{configuration.ContainerName}\"");
+            report.AppendLine($"  partition key: \"{configuration.PartitionKeyPath}\"");
+            report.AppendLine($"  id: {configuration.IdDescription}");
+            if (configuration.DefaultTimeToLiveSeconds is { } ttl)
+            {
+                report.AppendLine($"  default TTL: {ttl}s (container-level; documents expire unless they override it)");
+            }
+
+            if (configuration.HasConcurrencyToken)
+            {
+                report.AppendLine("  concurrency token: _etag (writes replace conditionally with If-Match)");
+            }
+        }
+
+        return report.ToString();
+    }
 }
 
 /// <summary>Fluent builder for the <see cref="CosmosModel" /> — one <c>Entity</c> call per mapped type.</summary>
@@ -131,6 +169,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     private Func<TEntity, string>? _id;
     private Func<TEntity, string?>? _etag;
     private int? _ttlSeconds;
+    private string? _idDescription;
 
     internal CosmosEntityBuilder()
     {
@@ -156,6 +195,14 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
                 _partitionKey = entity => ToPartitionKey(partitionProperty.GetValue(entity));
             }
 
+            if (property.GetCustomAttributes(typeof(Data.Modeling.EntityKeyAttribute), inherit: true).Length > 0)
+            {
+                var keyProperty = property;
+                _id = entity => keyProperty.GetValue(entity)?.ToString()
+                                ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has a null id.");
+                _idDescription = $"{property.Name} ([EntityKey])";
+            }
+
             if (property.GetCustomAttributes(typeof(Data.Modeling.ConcurrencyTokenAttribute), inherit: true).Length > 0
                 && property.PropertyType == typeof(string))
             {
@@ -174,8 +221,9 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
-    ///     Declares the document id selector. Defaults to the entity's <c>Id</c> property (which serializes to the
-    ///     Cosmos <c>id</c> field); override it when the key is exposed differently.
+    ///     Declares the document id selector. Defaults to the member annotated <c>[EntityKey]</c>, or the entity's
+    ///     <c>Id</c> property (which serializes to the Cosmos <c>id</c> field); override it when the key is exposed
+    ///     differently.
     /// </summary>
     /// <typeparam name="TKey">The id member type.</typeparam>
     /// <param name="selector">The id selector.</param>
@@ -183,6 +231,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     {
         var read = selector.Compile();
         _id = entity => read(entity)?.ToString() ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has a null id.");
+        _idDescription = selector.GetMemberPath();
         return this;
     }
 
@@ -232,7 +281,8 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
         }
 
         return new CosmosEntityConfiguration<TEntity>(
-            _container ?? typeof(TEntity).Name, _partitionKeyPath, _partitionKey, _id ?? DefaultId(), _ttlSeconds, _etag);
+            _container ?? typeof(TEntity).Name, _partitionKeyPath, _partitionKey, _id ?? DefaultId(), _ttlSeconds, _etag,
+            _idDescription);
     }
 
     private static Func<TEntity, string> DefaultId()

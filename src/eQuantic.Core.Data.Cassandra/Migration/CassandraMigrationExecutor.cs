@@ -77,7 +77,7 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                     var configuration = _model.For(add.EntityType);
                     var member = add.Field.GetMemberName();
                     var column = configuration.Columns.FirstOrDefault(candidate =>
-                                     CassandraEntityConfiguration.Same(candidate.Name, member))
+                                     CassandraEntityConfiguration.Same(candidate.Member, member))
                                  ?? throw new NotSupportedException(
                                      $"'{add.EntityType.Name}' has no mapped column '{member}' to add.");
                     await ExecuteAsync(new SimpleStatement(
@@ -93,9 +93,13 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                     await ExecuteAsync(Update(update)).ConfigureAwait(false);
                     break;
                 case RenameFieldOperation rename:
+                {
+                    var configuration = _model.For(rename.EntityType);
                     await ExecuteAsync(new SimpleStatement(
-                        $"ALTER TABLE {_model.For(rename.EntityType).TableName} RENAME {rename.Field.GetMemberName()} TO {rename.NewName}")).ConfigureAwait(false);
+                        $"ALTER TABLE {configuration.TableName} RENAME {configuration.ColumnFor(rename.Field.GetMemberName())} TO {rename.NewName}")).ConfigureAwait(false);
                     break;
+                }
+
                 case ConvertFieldOperation:
                     throw new NotSupportedException(
                         "Cassandra cannot change a column's type; add a new column and backfill it with a Run step instead.");
@@ -157,8 +161,9 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                 "Cassandra secondary indexes are single-column; a composite index is not supported (model the access pattern with the primary key or a Run step).");
         }
 
-        var table = _model.For(operation.EntityType).TableName;
-        return new SimpleStatement($"CREATE INDEX IF NOT EXISTS ON {table} ({operation.Keys[0].Selector.GetMemberName()})");
+        var configuration = _model.For(operation.EntityType);
+        return new SimpleStatement(
+            $"CREATE INDEX IF NOT EXISTS ON {configuration.TableName} ({configuration.ColumnFor(operation.Keys[0].Selector.GetMemberName())})");
     }
 
     private static SimpleStatement CreateSearchIndex(CassandraEntityConfiguration configuration, CassandraSearchColumn search) =>
@@ -176,7 +181,7 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
             throw new NotSupportedException("A Cassandra migration Update requires the primary key; it cannot filter on non-key columns.");
         }
 
-        var set = string.Join(", ", operation.Sets.Select(assignment => $"{assignment.Field.GetMemberName()} = ?"));
+        var set = string.Join(", ", operation.Sets.Select(assignment => $"{configuration.ColumnFor(assignment.Field.GetMemberName())} = ?"));
         var values = operation.Sets.Select(assignment => assignment.Value).Concat(whereValues).ToArray();
         return new SimpleStatement($"UPDATE {configuration.TableName} SET {set} WHERE {where}", values);
     }

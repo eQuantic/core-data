@@ -19,7 +19,7 @@ internal static class CassandraMapper
         var columns = configuration.Columns;
         var names = string.Join(", ", columns.Select(column => column.Name));
         var placeholders = string.Join(", ", columns.Select(_ => "?"));
-        var values = columns.Select(column => Read(entity, column.Name)).ToArray();
+        var values = columns.Select(column => Read(entity, column.Member)).ToArray();
         return ($"INSERT INTO {configuration.TableName} ({names}) VALUES ({placeholders})", values);
     }
 
@@ -28,7 +28,7 @@ internal static class CassandraMapper
     {
         var keys = PrimaryKey(configuration);
         var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
-        var values = keys.Select(key => Read(entity, key)).ToArray();
+        var values = keys.Select(key => Read(entity, configuration.MemberFor(key))).ToArray();
         return ($"DELETE FROM {configuration.TableName} WHERE {where}", values);
     }
 
@@ -50,7 +50,7 @@ internal static class CassandraMapper
                 continue;
             }
 
-            var property = Property(typeof(TEntity), column.Name);
+            var property = Property(typeof(TEntity), column.Member);
 
             // Cassandra folds unquoted identifiers to lower case, so a row exposes each column under its
             // lower-cased name; the driver's by-name lookup is case-sensitive, so read with that name (the

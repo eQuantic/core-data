@@ -45,9 +45,9 @@ internal static class CassandraCqlRenderer
     public static bool PinsPartition(CassandraEntityConfiguration configuration, QueryFilter filter) => filter switch
     {
         ComparisonFilter { Operator: ComparisonOperator.Equal } comparison =>
-            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, comparison.Member)),
+            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, configuration.ColumnFor(comparison.Member))),
         InFilter inFilter =>
-            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, inFilter.Member)),
+            configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, configuration.ColumnFor(inFilter.Member))),
         LogicalFilter { Operator: LogicalOperator.And } and =>
             and.Operands.Any(operand => PinsPartition(configuration, operand)),
         _ => false,
@@ -71,28 +71,20 @@ internal static class CassandraCqlRenderer
             case LogicalFilter { Operator: LogicalOperator.Not }:
                 throw new NotSupportedException("Cassandra CQL has no NOT in a WHERE.");
             case ComparisonFilter comparison:
-                EnsureColumn(configuration, comparison.Member);
-                clauses.Add(Comparison(comparison, configuration, values, ref requiresFiltering));
+                clauses.Add(Comparison(comparison, Column(configuration, comparison.Member), configuration, values, ref requiresFiltering));
                 return;
             case InFilter inFilter:
-                EnsureColumn(configuration, inFilter.Member);
-                clauses.Add(In(inFilter, configuration, values, ref requiresFiltering));
+                clauses.Add(In(inFilter, Column(configuration, inFilter.Member), configuration, values, ref requiresFiltering));
                 return;
             case CollectionFilter collection:
-                EnsureColumn(configuration, collection.Member);
-                clauses.Add(Collection(collection, values, ref requiresFiltering));
+                clauses.Add(Collection(collection, Column(configuration, collection.Member), values, ref requiresFiltering));
                 return;
             case TupleComparisonFilter tuple:
-                foreach (var member in tuple.Members)
-                {
-                    EnsureColumn(configuration, member);
-                }
-
-                clauses.Add(Tuple(tuple, configuration, values, ref requiresFiltering));
+                clauses.Add(Tuple(tuple, tuple.Members.Select(member => Column(configuration, member)).ToList(),
+                    configuration, values, ref requiresFiltering));
                 return;
             case StringFilter text:
-                EnsureColumn(configuration, text.Member);
-                clauses.Add(Like(configuration, text.Member, text.Operator switch
+                clauses.Add(Like(configuration, text.Member, Column(configuration, text.Member), text.Operator switch
                 {
                     StringOperator.StartsWith => EscapedFragment(text.Value) + "%",
                     StringOperator.EndsWith => "%" + EscapedFragment(text.Value),
@@ -100,8 +92,7 @@ internal static class CassandraCqlRenderer
                 }, prefixOnly: text.Operator == StringOperator.StartsWith, values));
                 return;
             case FunctionFilter { Function: "Like", Operator: null, Arguments: [string pattern] } like:
-                EnsureColumn(configuration, like.Member);
-                clauses.Add(Like(configuration, like.Member, pattern,
+                clauses.Add(Like(configuration, like.Member, Column(configuration, like.Member), pattern,
                     prefixOnly: !pattern.StartsWith('%') && pattern.EndsWith('%') && pattern.IndexOf('%') == pattern.Length - 1,
                     values));
                 return;
@@ -110,24 +101,23 @@ internal static class CassandraCqlRenderer
         }
     }
 
-    /// <summary>A member that is not a mapped column (a nested path, a computed pseudo-member) cannot render — it refuses into residual.</summary>
-    private static void EnsureColumn(CassandraEntityConfiguration configuration, string member)
-    {
-        if (!configuration.Columns.Any(column => CassandraEntityConfiguration.Same(column.Name, member)))
-        {
-            throw new NotSupportedException($"'{member}' is not a mapped column; the clause runs client-side.");
-        }
-    }
+    /// <summary>
+    ///     Resolves a CLR member to its stored column name. A member no column stores (a nested path, a computed
+    ///     pseudo-member) cannot render — it refuses into residual.
+    /// </summary>
+    private static string Column(CassandraEntityConfiguration configuration, string member) =>
+        configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Member, member))?.Name
+        ?? throw new NotSupportedException($"'{member}' is not a mapped column; the clause runs client-side.");
 
     /// <summary>
     ///     Renders a <c>LIKE</c> — only on a column the model declared a search index for, and only when the
     ///     index's mode can serve the pattern; every refusal degrades to the gated client-side residual. The
     ///     index serves the match, so <c>ALLOW FILTERING</c> is not required.
     /// </summary>
-    private static string Like(CassandraEntityConfiguration configuration, string member, string pattern,
+    private static string Like(CassandraEntityConfiguration configuration, string member, string column, string pattern,
         bool prefixOnly, List<object?> values)
     {
-        if (!configuration.CanLike(member, out var mode))
+        if (!configuration.CanLike(column, out var mode))
         {
             throw new NotSupportedException(
                 $"'{member}' has no search index; declare one with SearchIndex(x => x.{member}) to push LIKE down, " +
@@ -142,7 +132,7 @@ internal static class CassandraCqlRenderer
         }
 
         values.Add(pattern);
-        return $"{member} LIKE ?";
+        return $"{column} LIKE ?";
     }
 
     /// <summary>SASI's <c>LIKE</c> has no escape clause — a literal wildcard in the value cannot push down.</summary>
@@ -152,20 +142,19 @@ internal static class CassandraCqlRenderer
             : throw new NotSupportedException(
                 "The value contains a literal '%' or '_' and Cassandra LIKE has no escape syntax; run the match client-side.");
 
-    private static string Comparison(ComparisonFilter filter, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
+    private static string Comparison(ComparisonFilter filter, string column, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
     {
-        var column = filter.Member;
         var isPartition = configuration.PartitionKeys.Any(key => CassandraEntityConfiguration.Same(key, column));
 
         if (filter.Value is null)
         {
             throw new NotSupportedException(
-                $"Cassandra CQL cannot compare '{column}' to NULL (an unset column is simply absent from the row); filter on a concrete value.");
+                $"Cassandra CQL cannot compare '{filter.Member}' to NULL (an unset column is simply absent from the row); filter on a concrete value.");
         }
 
         if (filter.Operator is ComparisonOperator.NotEqual)
         {
-            throw new NotSupportedException($"Cassandra CQL has no '<>' operator; '{column} <> ?' is not expressible.");
+            throw new NotSupportedException($"Cassandra CQL has no '<>' operator; '{filter.Member} <> ?' is not expressible.");
         }
 
         if (filter.Operator is ComparisonOperator.Equal)
@@ -195,7 +184,7 @@ internal static class CassandraCqlRenderer
         return $"{column} {Operator(filter.Operator)} ?";
     }
 
-    private static string In(InFilter filter, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
+    private static string In(InFilter filter, string column, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
     {
         if (filter.Values.Any(value => value is null))
         {
@@ -203,16 +192,16 @@ internal static class CassandraCqlRenderer
                 $"Cassandra CQL cannot match '{filter.Member}' against a set containing NULL (an unset column is simply absent from the row).");
         }
 
-        if (!configuration.IsKey(filter.Member))
+        if (!configuration.IsKey(column))
         {
             requiresFiltering = true;
         }
 
         values.AddRange(filter.Values);
-        return $"{filter.Member} IN ({string.Join(", ", filter.Values.Select(_ => "?"))})";
+        return $"{column} IN ({string.Join(", ", filter.Values.Select(_ => "?"))})";
     }
 
-    private static string Collection(CollectionFilter filter, List<object?> values, ref bool requiresFiltering)
+    private static string Collection(CollectionFilter filter, string column, List<object?> values, ref bool requiresFiltering)
     {
         if (filter.Value is null)
         {
@@ -223,18 +212,18 @@ internal static class CassandraCqlRenderer
         // CONTAINS / CONTAINS KEY need a secondary index or ALLOW FILTERING.
         requiresFiltering = true;
         values.Add(filter.Value);
-        return filter.Key ? $"{filter.Member} CONTAINS KEY ?" : $"{filter.Member} CONTAINS ?";
+        return filter.Key ? $"{column} CONTAINS KEY ?" : $"{column} CONTAINS ?";
     }
 
-    private static string Tuple(TupleComparisonFilter filter, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
+    private static string Tuple(TupleComparisonFilter filter, IReadOnlyList<string> columns, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
     {
-        if (!filter.Members.All(configuration.IsClusteringKey))
+        if (!columns.All(configuration.IsClusteringKey))
         {
             requiresFiltering = true;
         }
 
         values.AddRange(filter.Values);
-        return $"({string.Join(", ", filter.Members)}) {Operator(filter.Operator)} ({string.Join(", ", filter.Values.Select(_ => "?"))})";
+        return $"({string.Join(", ", columns)}) {Operator(filter.Operator)} ({string.Join(", ", filter.Values.Select(_ => "?"))})";
     }
 
     private static string Operator(ComparisonOperator op) => op switch

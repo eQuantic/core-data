@@ -12,7 +12,11 @@ public sealed record CassandraClusteringColumn(string Column, bool Descending);
 /// <summary>A table column and its CQL type (used to author <c>CREATE TABLE</c> migrations).</summary>
 /// <param name="Name">The column name.</param>
 /// <param name="CqlType">The CQL type (e.g. <c>text</c>, <c>uuid</c>, <c>timestamp</c>).</param>
-public sealed record CassandraColumn(string Name, string CqlType);
+public sealed record CassandraColumn(string Name, string CqlType)
+{
+    /// <summary>The CLR member the column stores (the column name itself when no rename applies).</summary>
+    public string Member { get; init; } = Name;
+}
 
 /// <summary>
 ///     The Cassandra mapping for an entity: its table, the partition key (one or more columns), the clustering
@@ -78,6 +82,14 @@ public abstract class CassandraEntityConfiguration
     /// <summary>Whether <paramref name="column" /> is a clustering key (supports range predicates).</summary>
     public bool IsClusteringKey(string column) => ClusteringKeys.Any(key => Same(key.Column, column));
 
+    /// <summary>The stored column name for a CLR member (the member itself when no column stores it).</summary>
+    public string ColumnFor(string member) =>
+        Columns.FirstOrDefault(column => Same(column.Member, member))?.Name ?? member;
+
+    /// <summary>The CLR member behind a stored column name (the column itself when no mapping declares it).</summary>
+    public string MemberFor(string column) =>
+        Columns.FirstOrDefault(candidate => Same(candidate.Name, column))?.Member ?? column;
+
     internal static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 }
 
@@ -126,6 +138,44 @@ public sealed class CassandraModel
                 $"No Cassandra configuration is registered for '{entityType.Name}'. Register it with Entity<{entityType.Name}>(...).");
 
     internal void Add(CassandraEntityConfiguration configuration) => _configurations[configuration.EntityType] = configuration;
+
+    /// <summary>
+    ///     Describes every mapping decision the model made — table, partition and clustering keys, columns with
+    ///     their CQL types and renames, counters and search indexes — the way <c>Explain()</c> describes a query.
+    ///     Read this instead of guessing what the CQL ends up naming.
+    /// </summary>
+    public string Explain()
+    {
+        var report = new System.Text.StringBuilder();
+        foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
+        {
+            report.AppendLine($"{configuration.EntityType.Name} -> table \"{configuration.TableName}\"");
+            report.AppendLine($"  partition key: ({string.Join(", ", configuration.PartitionKeys)})");
+            if (configuration.ClusteringKeys.Count > 0)
+            {
+                report.AppendLine("  clustering keys: " + string.Join(", ",
+                    configuration.ClusteringKeys.Select(key => $"{key.Column} {(key.Descending ? "DESC" : "ASC")}")));
+            }
+
+            report.AppendLine($"  key column: \"{configuration.KeyColumn}\" (point lookups)");
+            foreach (var column in configuration.Columns)
+            {
+                report.AppendLine($"  column: {column.Member} \"{column.Name}\" ({column.CqlType})");
+            }
+
+            foreach (var counter in configuration.CounterColumns)
+            {
+                report.AppendLine($"  counter: \"{counter}\" (mutates through increments, never inserts)");
+            }
+
+            foreach (var search in configuration.SearchColumns)
+            {
+                report.AppendLine($"  search index: \"{search.Column}\" (SASI {search.Mode}; LIKE pushes down)");
+            }
+        }
+
+        return report.ToString();
+    }
 }
 
 /// <summary>Fluent builder for the <see cref="CassandraModel" />.</summary>
@@ -157,6 +207,7 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     private readonly List<string> _counterColumns = [];
     private readonly List<CassandraSearchColumn> _searchColumns = [];
     private readonly HashSet<string> _unmapped = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _storedNames = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyColumn;
 
@@ -192,6 +243,11 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
                 _unmapped.Add(property.Name);
             }
 
+            if (property.GetCustomAttribute<Data.Modeling.StoredAsAttribute>() is { } stored)
+            {
+                _storedNames[property.Name] = stored.Name;
+            }
+
             if (property.GetCustomAttribute<Data.Modeling.EntityKeyAttribute>() is not null)
             {
                 _keyColumn = property.Name;
@@ -215,6 +271,19 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     public CassandraEntityBuilder<TEntity> Table(string name)
     {
         _table = name;
+        return this;
+    }
+
+    /// <summary>
+    ///     Sets the member's column name when the convention (the member name itself) does not fit. Every CQL
+    ///     the provider generates — DDL, reads, writes, filters — uses the stored name; the entity keeps its own.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="columnName">The column name.</param>
+    public CassandraEntityBuilder<TEntity> Column<TMember>(Expression<Func<TEntity, TMember>> selector, string columnName)
+    {
+        _storedNames[selector.GetMemberName()] = columnName;
         return this;
     }
 
@@ -285,14 +354,18 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
                 $"Entity '{typeof(TEntity).Name}' must declare a partition key (e.g. PartitionKey(x => x.CustomerId)).");
         }
 
+        // The builder collects CLR member names throughout (annotations and fluent calls alike); the stored
+        // rename map is applied here, once, so a Column()/[StoredAs] declared after PartitionKey(...) still lands.
+        string Stored(string member) => _storedNames.GetValueOrDefault(member, member);
+
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(property => property.CanRead && property.GetIndexParameters().Length == 0
                                && !_unmapped.Contains(property.Name))
-            .Select(property => new CassandraColumn(property.Name,
+            .Select(property => new CassandraColumn(Stored(property.Name),
                 _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
                     ? "counter"
-                    : CassandraTypes.Cql(property.PropertyType)))
+                    : CassandraTypes.Cql(property.PropertyType)) { Member = property.Name })
             .ToList();
 
         if (_counterColumns.Count > 0)
@@ -305,8 +378,8 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             }
 
             var invalid = columns.Where(column =>
-                    !keys.Any(key => CassandraEntityConfiguration.Same(key, column.Name)) && column.CqlType != "counter")
-                .Select(column => column.Name)
+                    !keys.Any(key => CassandraEntityConfiguration.Same(key, column.Member)) && column.CqlType != "counter")
+                .Select(column => column.Member)
                 .ToList();
             if (invalid.Count > 0)
             {
@@ -317,8 +390,13 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         }
 
         return new CassandraEntityConfiguration<TEntity>(
-            _table ?? typeof(TEntity).Name, _partitionKeys, _clusteringKeys, columns, _keyColumn ?? _partitionKeys[0],
-            _counterColumns, _searchColumns);
+            _table ?? typeof(TEntity).Name,
+            _partitionKeys.Select(Stored).ToList(),
+            _clusteringKeys.Select(key => key with { Column = Stored(key.Column) }).ToList(),
+            columns,
+            Stored(_keyColumn ?? _partitionKeys[0]),
+            _counterColumns.Select(Stored).ToList(),
+            _searchColumns.Select(search => search with { Column = Stored(search.Column) }).ToList());
     }
 }
 

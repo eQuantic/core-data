@@ -52,7 +52,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                      ?? throw new ArgumentException($"The unit of work must be a {nameof(CassandraUnitOfWork)}.", nameof(unitOfWork));
         Session = UnitOfWork.GetSession();
         _configuration = UnitOfWork.Configuration<TEntity>();
-        _keySelector = MemberPathExtensions.ToSelector<TEntity>(_configuration.KeyColumn);
+        _keySelector = MemberPathExtensions.ToSelector<TEntity>(_configuration.MemberFor(_configuration.KeyColumn));
     }
 
     // ---------------------------------------------------------------- asynchronous reads
@@ -365,7 +365,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     }
 
     private string ColumnNamed(string path, string purpose) =>
-        _configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Name, path))?.Name
+        _configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Member, path))?.Name
         ?? throw new NotSupportedException($"'{typeof(TEntity).Name}' has no mapped column '{path}' to {purpose}.");
 
     /// <summary>CQL groups by the primary key only: the full partition key, then clustering columns in order.</summary>
@@ -878,7 +878,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             return null;
         }
 
-        var selected = new HashSet<string>(mapColumns, StringComparer.OrdinalIgnoreCase);
+        // The collectors surface CLR member names; the selected set lives in stored-column space.
+        var selected = new HashSet<string>(mapColumns.Select(_configuration.ColumnFor), StringComparer.OrdinalIgnoreCase);
         if (plan.Alternatives.Count > 0)
         {
             // The split merge de-duplicates by primary key, so a projected read must fetch the key columns too.
@@ -893,7 +894,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                 return null;
             }
 
-            selected.UnionWith(residualColumns);
+            selected.UnionWith(residualColumns.Select(_configuration.ColumnFor));
         }
 
         if (selected.Count == 0)
@@ -908,7 +909,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     private IEnumerable<TEntity> DistinctByPrimaryKey(IEnumerable<TEntity> entities)
     {
         var properties = CassandraMapper.PrimaryKey(_configuration)
-            .Select(column => typeof(TEntity).GetProperty(column,
+            .Select(column => typeof(TEntity).GetProperty(_configuration.MemberFor(column),
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase))
             .Where(property => property is not null)
             .ToArray();
@@ -974,8 +975,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         return body is MemberExpression { Expression: ParameterExpression } member
-               && _configuration.Columns.Any(column => CassandraEntityConfiguration.Same(column.Name, member.Member.Name))
-            ? member.Member.Name
+            ? _configuration.Columns.FirstOrDefault(column =>
+                CassandraEntityConfiguration.Same(column.Member, member.Member.Name))?.Name
             : null;
     }
 
@@ -989,10 +990,11 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var parts = new List<string>();
         foreach (var sort in sortings)
         {
-            var column = sort.KeySelector.GetMemberName();
+            var member = sort.KeySelector.GetMemberName();
+            var column = _configuration.ColumnFor(member);
             if (!_configuration.IsClusteringKey(column))
             {
-                throw new NotSupportedException($"Cassandra can only ORDER BY clustering keys; '{column}' is not one.");
+                throw new NotSupportedException($"Cassandra can only ORDER BY clustering keys; '{member}' is not one.");
             }
 
             parts.Add($"{column} {(sort.Direction == SortDirection.Descending ? "DESC" : "ASC")}");
