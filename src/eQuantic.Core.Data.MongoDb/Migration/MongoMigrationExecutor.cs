@@ -32,7 +32,7 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
     public MongoMigrationExecutor(IMongoDatabase database, Func<Type, string>? collectionName = null)
     {
         _database = database;
-        _collectionName = collectionName ?? (type => type.Name);
+        _collectionName = collectionName ?? MongoModeling.CollectionName;
         _context = new MongoMigrationExecutionContext(database);
     }
 

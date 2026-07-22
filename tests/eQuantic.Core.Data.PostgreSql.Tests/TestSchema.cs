@@ -97,6 +97,27 @@ public sealed class AuditedTicket : eQuantic.Core.DataModel.EntityHistoryDataBas
     public string Label { get; set; } = "";
 }
 
+/// <summary>An entity modeled <b>entirely by annotations</b> — the store-neutral eQuantic vocabulary, no fluent.</summary>
+[eQuantic.Core.Data.Modeling.Entity("annotated_orders")]
+public sealed class AnnotatedOrder : IEntity<Guid>
+{
+    [eQuantic.Core.Data.Modeling.EntityKey]
+    public Guid Code { get; set; }
+
+    [eQuantic.Core.Data.Modeling.StoredAs("client_name")]
+    public string Name { get; set; } = "";
+
+    [eQuantic.Core.Data.Modeling.ConcurrencyToken]
+    public int Revision { get; set; }
+
+    [eQuantic.Core.Data.Modeling.Unmapped]
+    public string Scratch { get; set; } = "";
+
+    public Guid GetKey() => Code;
+
+    public void SetKey(Guid key) => Code = key;
+}
+
 /// <summary>An entity whose foreign keys do <b>not</b> follow the conventions — the model declares them.</summary>
 public sealed class Invoice : IEntity<Guid>
 {
@@ -186,6 +207,7 @@ internal static class TestSchema
         .Entity<Subscriber>(entity => entity
             .Converts(x => x.Email, email => email.Value, EmailAddress.Create)
             .Converts(x => x.Status, status => status.ToString(), value => Enum.Parse<SubscriberStatus>(value)))
+        .Entity<AnnotatedOrder>(_ => { })
         .Entity<AuditedTicket>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
 }
@@ -208,6 +230,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Subscriber>(subscriber => subscriber
             .EnsureCollection())
         .For<Invoice>(invoice => invoice
+            .EnsureCollection())
+        .For<AnnotatedOrder>(annotated => annotated
             .EnsureCollection())
         .For<AuditedTicket>(audited => audited
             .EnsureCollection())

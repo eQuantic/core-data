@@ -156,8 +156,59 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     private readonly List<CassandraClusteringColumn> _clusteringKeys = [];
     private readonly List<string> _counterColumns = [];
     private readonly List<CassandraSearchColumn> _searchColumns = [];
+    private readonly HashSet<string> _unmapped = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyColumn;
+
+    internal CassandraEntityBuilder()
+    {
+        // The eQuantic.Core.Data.Modeling annotations seed the builder; fluent calls override them
+        // (conventions < annotations < fluent). Annotations outside the Cassandra vocabulary are ignored.
+        if (Data.Modeling.EntityAttribute.NameFor(typeof(TEntity)) is { } name)
+        {
+            _table = name;
+        }
+
+        var properties = typeof(TEntity).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        foreach (var property in properties
+                     .Where(candidate => candidate.GetCustomAttribute<Data.Modeling.PartitionKeyAttribute>() is not null)
+                     .OrderBy(candidate => candidate.GetCustomAttribute<Data.Modeling.PartitionKeyAttribute>()!.Order))
+        {
+            _partitionKeys.Add(property.Name);
+        }
+
+        foreach (var property in properties
+                     .Where(candidate => candidate.GetCustomAttribute<Data.Modeling.ClusteringKeyAttribute>() is not null)
+                     .OrderBy(candidate => candidate.GetCustomAttribute<Data.Modeling.ClusteringKeyAttribute>()!.Order))
+        {
+            _clusteringKeys.Add(new CassandraClusteringColumn(property.Name,
+                property.GetCustomAttribute<Data.Modeling.ClusteringKeyAttribute>()!.Descending));
+        }
+
+        foreach (var property in properties)
+        {
+            if (property.GetCustomAttribute<Data.Modeling.UnmappedAttribute>() is not null)
+            {
+                _unmapped.Add(property.Name);
+            }
+
+            if (property.GetCustomAttribute<Data.Modeling.EntityKeyAttribute>() is not null)
+            {
+                _keyColumn = property.Name;
+            }
+
+            if (property.GetCustomAttribute<Data.Modeling.CounterAttribute>() is not null)
+            {
+                _counterColumns.Add(property.Name);
+            }
+
+            if (property.GetCustomAttribute<Data.Modeling.SearchIndexAttribute>() is { } search)
+            {
+                _searchColumns.Add(new CassandraSearchColumn(property.Name,
+                    search.Mode == Data.Modeling.SearchMode.Prefix ? CassandraSearchMode.Prefix : CassandraSearchMode.Contains));
+            }
+        }
+    }
 
     /// <summary>Sets the table name (defaults to the entity type name).</summary>
     /// <param name="name">The table name.</param>
@@ -236,7 +287,8 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
 
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+            .Where(property => property.CanRead && property.GetIndexParameters().Length == 0
+                               && !_unmapped.Contains(property.Name))
             .Select(property => new CassandraColumn(property.Name,
                 _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
                     ? "counter"

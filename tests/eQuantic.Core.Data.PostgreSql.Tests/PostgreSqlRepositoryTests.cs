@@ -455,6 +455,60 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That(fresh.Version, Is.EqualTo(2), "reload + retry succeeds and bumps again");
     }
 
+    // ---------------------------------------------------------------- store-neutral modeling annotations
+
+    [Test]
+    public void Annotations_seed_the_model_and_fluent_overrides_them()
+    {
+        var dialect = new PostgreSqlDialect();
+
+        // Pure annotations: [Entity], [EntityKey], [StoredAs], [ConcurrencyToken], [Unmapped].
+        var annotated = new RelationalModelBuilder(dialect);
+        annotated.Entity<AnnotatedOrder>(_ => { });
+        var configuration = annotated.Build().For(typeof(AnnotatedOrder));
+
+        Assert.That(configuration.TableName, Is.EqualTo("annotated_orders"));
+        Assert.That(configuration.Key.Property.Name, Is.EqualTo("Code"), "[EntityKey] declared a key not named Id");
+        Assert.That(configuration.ColumnFor("Name")!.Name, Is.EqualTo("client_name"), "[StoredAs] named the column");
+        Assert.That(configuration.ConcurrencyToken!.Property.Name, Is.EqualTo("Revision"));
+        Assert.That(configuration.ColumnFor("Scratch"), Is.Null, "[Unmapped] excluded the member");
+
+        // Precedence: conventions < annotations < fluent.
+        var overridden = new RelationalModelBuilder(dialect);
+        overridden.Entity<AnnotatedOrder>(entity => entity.Table("fluent_wins"));
+        Assert.That(overridden.Build().For(typeof(AnnotatedOrder)).TableName, Is.EqualTo("fluent_wins"));
+
+        // The model never lies: Explain() reports every decision.
+        var report = annotated.Build().Explain(dialect);
+        Assert.That(report, Does.Contain("annotated_orders").And.Contain("client_name").And.Contain("concurrency token: Revision"));
+    }
+
+    [Test]
+    public async Task Annotated_entities_round_trip_with_the_attribute_driven_schema()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = db.Resolve<IAsyncRepository<AnnotatedOrder, Guid>>();
+
+        var order = new AnnotatedOrder { Code = Guid.NewGuid(), Name = "annotated", Scratch = "volatile" };
+        await repo.AddAsync(order);
+        await Uow(db).CommitAsync();
+
+        var loaded = (await repo.GetAsync(order.Code))!;
+        Assert.That(loaded.Name, Is.EqualTo("annotated"));
+        Assert.That(loaded.Scratch, Is.Empty, "the unmapped member never stored");
+
+        loaded.Name = "revised";
+        await repo.ModifyAsync(loaded);
+        await Uow(db).CommitAsync();
+        Assert.That(loaded.Revision, Is.EqualTo(1), "the annotated concurrency token bumped");
+
+        var dataSource = db.Resolve<System.Data.Common.DbDataSource>();
+        await using var command = dataSource.CreateCommand(
+            "SELECT client_name FROM annotated_orders WHERE client_name = 'revised'");
+        Assert.That(await command.ExecuteScalarAsync(), Is.EqualTo("revised"),
+            "the [StoredAs]/[Entity] names are the real schema");
+    }
+
     // ---------------------------------------------------------------- DataConventions + eQuantic.Core.DataModel
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

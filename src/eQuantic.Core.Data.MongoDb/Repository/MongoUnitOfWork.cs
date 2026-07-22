@@ -35,8 +35,8 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         Database = database;
     }
 
-    /// <summary>Gets the collection name used for <typeparamref name="TEntity" /> (the type name by default).</summary>
-    protected virtual string CollectionName<TEntity>() => typeof(TEntity).Name;
+    /// <summary>Gets the collection name for <typeparamref name="TEntity" /> (<c>[Entity("...")]</c>, or the type name).</summary>
+    protected virtual string CollectionName<TEntity>() => MongoModeling.CollectionName(typeof(TEntity));
 
     internal IMongoCollection<TEntity> GetCollection<TEntity>() =>
         Database.GetCollection<TEntity>(CollectionName<TEntity>());

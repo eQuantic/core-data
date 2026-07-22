@@ -120,6 +120,50 @@ public sealed class RelationalModel
                 $"No relational configuration is registered for '{entityType.Name}'. Register it with Entity<{entityType.Name}>(...).");
 
     internal void Add(RelationalEntityConfiguration configuration) => _configurations[configuration.EntityType] = configuration;
+
+    /// <summary>
+    ///     Describes every mapping decision the model made — what convention decided, what annotations and
+    ///     fluent configuration declared — the way <c>Explain()</c> describes a query. The model never lies:
+    ///     read this instead of guessing what a column ended up being called.
+    /// </summary>
+    /// <param name="dialect">The dialect (for stored DDL types).</param>
+    public string Explain(SqlDialect dialect)
+    {
+        var report = new System.Text.StringBuilder();
+        foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
+        {
+            report.AppendLine($"{configuration.EntityType.Name} -> table \"{configuration.TableName}\"");
+            report.AppendLine($"  key: {configuration.Key.Property.Name} \"{configuration.Key.Name}\" " +
+                              $"({dialect.SqlType(configuration.Key.StoredType)})" +
+                              (configuration.KeyIsGenerated ? " database-generated" : " client-generated"));
+            if (configuration.ConcurrencyToken is { } token)
+            {
+                report.AppendLine($"  concurrency token: {token.Property.Name} \"{token.Name}\"");
+            }
+
+            foreach (var column in configuration.Columns.Where(column => column != configuration.Key))
+            {
+                var converted = column.Converter is not null
+                    ? $" (converted from {column.Property.PropertyType.Name})"
+                    : string.Empty;
+                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column.StoredType)}){converted}");
+            }
+
+            foreach (var navigation in configuration.Navigations)
+            {
+                report.AppendLine($"  navigation: {navigation.Member} ({(navigation.Collection ? "collection" : "reference")} " +
+                                  $"via {navigation.ForeignKey})");
+            }
+
+            if (eQuantic.Core.Data.Repository.EntityLifecycle.IsSoftDelete(
+                    configuration.EntityType, new eQuantic.Core.Data.Repository.DataConventions()))
+            {
+                report.AppendLine("  lifecycle: soft delete + live-rows filter (IEntityTimeEnded)");
+            }
+        }
+
+        return report.ToString();
+    }
 }
 
 /// <summary>Fluent builder for the <see cref="RelationalModel" /> — one <c>Entity</c> call per mapped type.</summary>
@@ -159,7 +203,41 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private bool _keyIsGenerated;
     private string? _concurrencyMember;
 
-    internal RelationalEntityBuilder(SqlDialect dialect) => _dialect = dialect;
+    internal RelationalEntityBuilder(SqlDialect dialect)
+    {
+        _dialect = dialect;
+
+        // The eQuantic.Core.Data.Modeling annotations seed the builder; fluent calls override them
+        // (conventions < annotations < fluent). Annotations outside the relational vocabulary are ignored.
+        if (Modeling.EntityAttribute.NameFor(typeof(TEntity)) is { } name)
+        {
+            _table = name;
+        }
+
+        foreach (var property in typeof(TEntity).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property.GetCustomAttribute<Modeling.UnmappedAttribute>() is not null)
+            {
+                _ignored.Add(property.Name);
+            }
+
+            if (property.GetCustomAttribute<Modeling.StoredAsAttribute>() is { } stored)
+            {
+                _columnOverrides[property.Name] = stored.Name;
+            }
+
+            if (property.GetCustomAttribute<Modeling.EntityKeyAttribute>() is { } key)
+            {
+                _keyMember = property.Name;
+                _keyIsGenerated = key.Generated;
+            }
+
+            if (property.GetCustomAttribute<Modeling.ConcurrencyTokenAttribute>() is not null)
+            {
+                _concurrencyMember = property.Name;
+            }
+        }
+    }
 
     /// <summary>Sets the table name (defaults to the entity type name through the dialect's naming convention).</summary>
     /// <param name="name">The table name.</param>

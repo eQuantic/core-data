@@ -103,6 +103,33 @@ This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`,
 `IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
 implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
 
+## Modeling — one store-neutral vocabulary
+
+Entities are modeled three ways with an **explicit, deterministic precedence** —
+`conventions < annotations < fluent`: conventions cover the common case, the eQuantic annotations
+declare the portable middle layer, and fluent configuration overrides everything. The annotations
+are **eQuantic-owned and interpreted by every provider** — no driver attributes on entities
+(`[BsonElement]`, EF's `[Column]`…), no rewrite when an entity moves between stores, and no name
+clashes with `System.ComponentModel.DataAnnotations`:
+
+```csharp
+[Entity("sale_orders")]
+public sealed class SaleOrder : IEntity<Guid>
+{
+    [EntityKey(Generated = false)] public Guid Code { get; set; }
+    [StoredAs("client_name")]      public string Name { get; set; } = "";  // column on SQL, BSON element on Mongo
+    [ConcurrencyToken]             public int Revision { get; set; }       // versioned column / Cosmos _etag
+    [PartitionKey]                 public string Region { get; set; } = ""; // Cassandra partition / Cosmos path
+    [ClusteringKey(Descending = true)] public DateTime At { get; set; }
+    [SearchIndex]                  public string Description { get; set; } = ""; // SASI LIKE pushdown
+    [Unmapped]                     public string Scratch { get; set; } = "";
+}
+```
+
+Each provider honours the subset that maps to its store and ignores the rest. And the model
+**never lies**: `model.Explain(dialect)` reports every mapping decision — names, stored types,
+keys, tokens, converters, navigations, lifecycle — the way `Explain()` reports a query.
+
 ## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra, PostgreSQL, MySQL, SQL Server
 
 The same contracts implemented **directly on each official driver — no Entity Framework** — with a

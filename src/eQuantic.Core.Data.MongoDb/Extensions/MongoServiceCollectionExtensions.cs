@@ -22,6 +22,7 @@ public static class MongoServiceCollectionExtensions
     /// <returns>The same service collection for chaining.</returns>
     public static IServiceCollection AddMongoDatabase(this IServiceCollection services, string connectionString, string databaseName)
     {
+        MongoModeling.Register();
         services.TryAddSingleton<IMongoClient>(_ => new MongoClient(connectionString));
         services.TryAddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(databaseName));
         return services;
@@ -46,6 +47,7 @@ public static class MongoServiceCollectionExtensions
     public static IServiceCollection AddMongoRepositories<TUnitOfWork>(this IServiceCollection services, ServiceLifetime lifetime = ServiceLifetime.Scoped)
         where TUnitOfWork : MongoUnitOfWork
     {
+        MongoModeling.Register();
         services.TryAdd(new ServiceDescriptor(typeof(TUnitOfWork), typeof(TUnitOfWork), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));

@@ -132,6 +132,39 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     private Func<TEntity, string?>? _etag;
     private int? _ttlSeconds;
 
+    internal CosmosEntityBuilder()
+    {
+        // The eQuantic.Core.Data.Modeling annotations seed the builder; fluent calls override them
+        // (conventions < annotations < fluent). Annotations outside the Cosmos vocabulary are ignored.
+        if (Data.Modeling.EntityAttribute.NameFor(typeof(TEntity)) is { } name)
+        {
+            _container = name;
+        }
+
+        if (System.Attribute.GetCustomAttribute(typeof(TEntity), typeof(Data.Modeling.TimeToLiveAttribute))
+            is Data.Modeling.TimeToLiveAttribute timeToLive)
+        {
+            _ttlSeconds = timeToLive.Seconds;
+        }
+
+        foreach (var property in typeof(TEntity).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            if (property.GetCustomAttributes(typeof(Data.Modeling.PartitionKeyAttribute), inherit: true).Length > 0)
+            {
+                _partitionKeyPath = "/" + CosmosNaming.CamelCase(property.Name);
+                var partitionProperty = property;
+                _partitionKey = entity => ToPartitionKey(partitionProperty.GetValue(entity));
+            }
+
+            if (property.GetCustomAttributes(typeof(Data.Modeling.ConcurrencyTokenAttribute), inherit: true).Length > 0
+                && property.PropertyType == typeof(string))
+            {
+                var etagProperty = property;
+                _etag = entity => (string?)etagProperty.GetValue(entity);
+            }
+        }
+    }
+
     /// <summary>Sets the container name (defaults to the entity type name).</summary>
     /// <param name="name">The container name.</param>
     public CosmosEntityBuilder<TEntity> Container(string name)
