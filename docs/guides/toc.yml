@@ -78,6 +78,8 @@
       href: operations/observability.md
     - name: Resilience
       href: operations/resilience.md
+    - name: Benchmarks
+      href: operations/benchmarks.md
 - name: Cookbook
   items:
     - name: Multi-tenancy

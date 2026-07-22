@@ -10,12 +10,17 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+        <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+        <PackageReference Include="Dapper" Version="2.1.79" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+        <PackageReference Include="Testcontainers.PostgreSql" Version="4.13.0" />
     </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="../../src/eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
         <ProjectReference Include="../../src/eQuantic.Core.Data.Cassandra/eQuantic.Core.Data.Cassandra.csproj" />
+        <ProjectReference Include="../../src/eQuantic.Core.Data.PostgreSql/eQuantic.Core.Data.PostgreSql.csproj" />
     </ItemGroup>
 
 </Project>
