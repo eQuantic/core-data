@@ -27,6 +27,7 @@ internal static class SqlFilterRenderer
                 "NOT (" + Visit(operand) + ")",
             ComparisonFilter comparison => Comparison(comparison),
             StringFilter text => Like(text),
+            FunctionFilter function => Function(function),
             InFilter inFilter => In(inFilter),
             CollectionFilter collection => dialect.CollectionContains(Column(collection.Member), Bind(collection.Value), collection.Key),
             TupleComparisonFilter tuple => dialect.TupleComparison(
@@ -66,6 +67,26 @@ internal static class SqlFilterRenderer
                 _ => "%" + escaped + "%",
             };
             return $"{Column(text.Member)} LIKE {Bind(pattern)} ESCAPE '!'";
+        }
+
+        string Function(FunctionFilter function)
+        {
+            var column = Column(function.Member);
+            var markers = function.Arguments.Select(Bind).ToList();
+            if (!dialect.Functions.TryRender(function.Function, column, markers, out var fragment))
+            {
+                throw new NotSupportedException(
+                    $"No SQL translation is registered for '{function.Function}'; map one with Functions.Map(\"{function.Function}\", ...) or run it client-side.");
+            }
+
+            if (function.Operator is not { } op)
+            {
+                return fragment;
+            }
+
+            return function.Value is null
+                ? throw new NotSupportedException($"A comparison of '{function.Function}({function.Member})' to NULL has no defined result.")
+                : $"{fragment} {Operator(op)} {Bind(function.Value)}";
         }
 
         string In(InFilter inFilter)

@@ -1,3 +1,4 @@
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository;
@@ -189,6 +190,36 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That((await repo.GetFilteredAsync(x => x.Customer.EndsWith("ton"))).Single().Customer, Is.EqualTo("100% cotton"));
         Assert.That((await repo.GetFilteredAsync(x => x.Customer.Contains("%"))).Single().Customer, Is.EqualTo("100% cotton"),
             "the wildcard in the value is escaped, not interpreted");
+    }
+
+    /// <summary>A developer marker with a mapped translation (see the functions test).</summary>
+    public static string Reversed(string value) => new(value.Reverse().ToArray());
+
+    /// <summary>A developer marker left unmapped — its real body runs in the gated residual.</summary>
+    public static bool IsShort(string value) => value.Length < 5;
+
+    [Test]
+    public async Task Database_functions_translate_natively_and_extend()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("Alpha"), NewOrder("beta"));
+
+        // The standard set — no opt-ins, everything server-side.
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.ToLower() == "alpha")).Single().Customer, Is.EqualTo("Alpha"));
+        Assert.That((await repo.GetFilteredAsync(x => Db.Like(x.Customer, "_lpha"))).Single().Customer, Is.EqualTo("Alpha"),
+            "Db.Like keeps the wildcards raw");
+        Assert.That((await repo.GetFilteredAsync(x => Db.Year(x.CreatedAt) == 2026)).Count(), Is.EqualTo(2));
+
+        // A developer-defined function: a marker with a real body plus a mapped translation.
+        db.Resolve<SqlDialect>().Functions.Map("Reversed", (column, _) => $"REVERSE({column})");
+        Assert.That((await repo.GetFilteredAsync(x => Reversed(x.Customer) == "ateb")).Single().Customer, Is.EqualTo("beta"));
+
+        // An unmapped marker degrades to the gated residual, where its real body runs.
+        Assert.That(async () => await repo.GetFilteredAsync(x => IsShort(x.Customer)),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
+        var shorts = await repo.GetFilteredAsync(x => IsShort(x.Customer), new QueryOptions<SaleOrder>().AllowClientEvaluation());
+        Assert.That(shorts.Single().Customer, Is.EqualTo("beta"));
     }
 
     [Test]

@@ -11,8 +11,23 @@ namespace eQuantic.Core.Data.Relational;
 /// </summary>
 public abstract class SqlDialect
 {
+    /// <summary>Initializes the dialect with the standard function translations.</summary>
+    protected SqlDialect() =>
+        Functions
+            .Map("ToLower", (column, _) => $"LOWER({column})")
+            .Map("ToUpper", (column, _) => $"UPPER({column})")
+            .Map("Trim", (column, _) => $"TRIM({column})")
+            .Map("Like", (column, arguments) => $"{column} LIKE {arguments[0]}")
+            .Map("IsNullOrEmpty", (column, _) => $"({column} IS NULL OR {column} = '')")
+            .Map("Year", (column, _) => $"EXTRACT(YEAR FROM {column})")
+            .Map("Month", (column, _) => $"EXTRACT(MONTH FROM {column})")
+            .Map("Day", (column, _) => $"EXTRACT(DAY FROM {column})");
+
     /// <summary>The OpenTelemetry <c>db.system</c> value (e.g. <c>postgresql</c>, <c>mysql</c>, <c>mssql</c>).</summary>
     public abstract string System { get; }
+
+    /// <summary>The function translations this dialect knows — extend it with <see cref="SqlFunctionRegistry.Map" />.</summary>
+    public SqlFunctionRegistry Functions { get; } = new();
 
     /// <summary>Quotes an identifier (table or column name).</summary>
     public abstract string Quote(string identifier);

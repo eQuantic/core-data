@@ -1,3 +1,4 @@
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
@@ -141,6 +142,18 @@ public sealed class SqlServerRepositoryTests : SqlServerIntegrationTest
 
         // StartsWith is native LIKE now — no opt-in.
         Assert.That((await repo.GetFilteredAsync(x => x.Customer.StartsWith("be"))).Single().Customer, Is.EqualTo("beta"));
+    }
+
+
+    [Test]
+    public async Task Date_functions_push_down()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("dated"));
+
+        Assert.That((await repo.GetFilteredAsync(x => Db.Year(x.CreatedAt) == 2026)).Count(), Is.EqualTo(1));
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.ToLower() == "dated")).Count(), Is.EqualTo(1));
     }
 
     [Test]

@@ -19,11 +19,13 @@ public static class MySqlServiceCollectionExtensions
     /// <param name="services">The service collection.</param>
     /// <param name="connectionString">The MySQL connection string.</param>
     /// <param name="model">Builds the entity model (tables, keys, column overrides).</param>
+    /// <param name="functions">Optional custom function translations (<c>Functions.Map(...)</c>).</param>
     /// <returns>The same service collection for chaining.</returns>
     public static IServiceCollection AddMySqlDatabase(this IServiceCollection services, string connectionString,
-        Action<RelationalModelBuilder> model)
+        Action<RelationalModelBuilder> model, Action<SqlFunctionRegistry>? functions = null)
     {
         var dialect = new MySqlDialect();
+        functions?.Invoke(dialect.Functions);
         services.TryAddSingleton<SqlDialect>(dialect);
 
         var builder = new RelationalModelBuilder(dialect);

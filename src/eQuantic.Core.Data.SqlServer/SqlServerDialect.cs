@@ -11,6 +11,13 @@ namespace eQuantic.Core.Data.SqlServer;
 /// </summary>
 public class SqlServerDialect : SqlDialect
 {
+    /// <summary>Initializes the dialect (T-SQL date parts instead of <c>EXTRACT</c>).</summary>
+    public SqlServerDialect() =>
+        Functions
+            .Map("Year", (column, _) => $"YEAR({column})")
+            .Map("Month", (column, _) => $"MONTH({column})")
+            .Map("Day", (column, _) => $"DAY({column})");
+
     /// <inheritdoc />
     public override string System => "mssql";
 

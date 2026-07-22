@@ -22,11 +22,13 @@ public static class PostgreSqlServiceCollectionExtensions
     /// <param name="services">The service collection.</param>
     /// <param name="connectionString">The PostgreSQL connection string.</param>
     /// <param name="model">Builds the entity model (tables, keys, column overrides).</param>
+    /// <param name="functions">Optional custom function translations (<c>Functions.Map(...)</c>).</param>
     /// <returns>The same service collection for chaining.</returns>
     public static IServiceCollection AddPostgreSqlDatabase(this IServiceCollection services, string connectionString,
-        Action<RelationalModelBuilder> model)
+        Action<RelationalModelBuilder> model, Action<SqlFunctionRegistry>? functions = null)
     {
         var dialect = new PostgreSqlDialect();
+        functions?.Invoke(dialect.Functions);
         services.TryAddSingleton<SqlDialect>(dialect);
 
         var builder = new RelationalModelBuilder(dialect);

@@ -148,6 +148,16 @@ public static class FilterInterpreter
             return new ComparisonFilter(rightMember, Flip(op), Value(binary.Left));
         }
 
+        if (TryFunction(binary.Left, out var function, out var member, out var arguments))
+        {
+            return new FunctionFilter(function, member, arguments, op, Value(binary.Right));
+        }
+
+        if (TryFunction(binary.Right, out function, out member, out arguments))
+        {
+            return new FunctionFilter(function, member, arguments, Flip(op), Value(binary.Left));
+        }
+
         throw new NotSupportedException("Each filter clause must compare a member to a value.");
     }
 
@@ -233,7 +243,64 @@ public static class FilterInterpreter
             return new CollectionFilter(mapMember, Value(keyArgument), key: true);
         }
 
+        // Any other call over a member — instance (member.Fn(args)) or marker-style static (Fn(member, args)) —
+        // becomes a named function: the dialect's registry decides whether it translates; unknown names degrade
+        // to the gated residual, where the method's real body runs.
+        if (TryFunction(call, out var function, out var functionMember, out var arguments))
+        {
+            return new FunctionFilter(function, functionMember, arguments, op: null, value: null);
+        }
+
         throw Unsupported(call);
+    }
+
+    /// <summary>
+    ///     Recognizes a function over a member: an instance call whose receiver is a member chain, or a static
+    ///     (marker) call whose first argument is one — every remaining argument must fold to a constant.
+    /// </summary>
+    private static bool TryFunction(ExpressionNode node, out string function, out string member, out IReadOnlyList<object?> arguments)
+    {
+        function = string.Empty;
+        member = string.Empty;
+        arguments = [];
+
+        if (Unwrap(node) is not MethodCallNode call)
+        {
+            return false;
+        }
+
+        if (call.Object is { } receiver && Path(receiver) is { } instanceMember)
+        {
+            return Collect(call, instanceMember, 0, ref function, ref member, ref arguments);
+        }
+
+        if (call.Object is null && call.Arguments is { Count: >= 1 } staticArguments && Path(staticArguments[0]) is { } markerMember)
+        {
+            return Collect(call, markerMember, 1, ref function, ref member, ref arguments);
+        }
+
+        return false;
+
+        static bool Collect(MethodCallNode call, string memberPath, int skip,
+            ref string function, ref string member, ref IReadOnlyList<object?> arguments)
+        {
+            var values = new List<object?>();
+            var callArguments = call.Arguments ?? [];
+            for (var index = skip; index < callArguments.Count; index++)
+            {
+                if (!NodeEvaluation.TryValue(callArguments[index], out var value))
+                {
+                    return false;
+                }
+
+                values.Add(value);
+            }
+
+            function = call.Method.Name;
+            member = memberPath;
+            arguments = values;
+            return true;
+        }
     }
 
     /// <summary>Whether the method is declared by <see cref="string" /> (disambiguates the two <c>Contains</c> shapes; the type reference may carry the alias or the full name).</summary>

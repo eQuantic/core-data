@@ -92,6 +92,36 @@ public sealed class StringFilter(string member, StringOperator op, string value)
     public string Value { get; } = value;
 }
 
+/// <summary>
+///     A function applied to a member — used directly as a predicate (<c>fn(member, args)</c>) or compared to a
+///     constant (<c>fn(member, args) op value</c>). The function is referenced by <b>name</b>: a dialect renders
+///     the names its registry knows (the standard set plus whatever the developer maps) and refuses the rest,
+///     which degrade to the gated client-side residual — where the marker method's real C# body runs.
+/// </summary>
+/// <param name="function">The function name (the marker method's name).</param>
+/// <param name="member">The member path the function applies to.</param>
+/// <param name="arguments">The constant arguments after the member, in order.</param>
+/// <param name="op">The comparison operator, or <c>null</c> when the function itself is the predicate.</param>
+/// <param name="value">The compared value when <paramref name="op" /> is present.</param>
+public sealed class FunctionFilter(string function, string member, IReadOnlyList<object?> arguments,
+    ComparisonOperator? op, object? value) : QueryFilter
+{
+    /// <summary>The function name.</summary>
+    public string Function { get; } = function;
+
+    /// <summary>The member path.</summary>
+    public string Member { get; } = member;
+
+    /// <summary>The constant arguments after the member, in order.</summary>
+    public IReadOnlyList<object?> Arguments { get; } = arguments;
+
+    /// <summary>The comparison operator, or <c>null</c> when the function itself is the predicate.</summary>
+    public ComparisonOperator? Operator { get; } = op;
+
+    /// <summary>The compared value when <see cref="Operator" /> is present.</summary>
+    public object? Value { get; } = value;
+}
+
 /// <summary>A member constrained to a set of values: <c>member IN (values)</c>.</summary>
 /// <param name="member">The member path.</param>
 /// <param name="values">The candidate values.</param>

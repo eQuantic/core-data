@@ -177,6 +177,37 @@ public sealed class FilterInterpreterTests
     }
 
     [Test]
+    public void Instance_function_over_a_member_becomes_a_function_filter()
+    {
+        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.ToLower() == "abc");
+
+        Assert.That(filter.Function, Is.EqualTo("ToLower"));
+        Assert.That(filter.Member, Is.EqualTo("Name"));
+        Assert.That(filter.Operator, Is.EqualTo(ComparisonOperator.Equal));
+        Assert.That(filter.Value, Is.EqualTo("abc"));
+    }
+
+    [Test]
+    public void Marker_function_with_arguments_becomes_a_function_filter()
+    {
+        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => Db.Year(x.CreatedAt) == 2026);
+
+        Assert.That(filter.Function, Is.EqualTo("Year"));
+        Assert.That(filter.Member, Is.EqualTo("CreatedAt"));
+        Assert.That(filter.Value, Is.EqualTo(2026));
+    }
+
+    [Test]
+    public void Predicate_marker_function_carries_its_arguments()
+    {
+        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => Db.Like(x.Name, "a%"));
+
+        Assert.That(filter.Function, Is.EqualTo("Like"));
+        Assert.That(filter.Operator, Is.Null);
+        Assert.That(filter.Arguments, Is.EqualTo(new object?[] { "a%" }));
+    }
+
+    [Test]
     public void CompareTo_against_zero_normalizes_to_the_direct_comparison()
     {
         var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.CompareTo("m") > 0);
