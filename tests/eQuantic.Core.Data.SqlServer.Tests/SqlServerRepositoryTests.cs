@@ -132,12 +132,30 @@ public sealed class SqlServerRepositoryTests : SqlServerIntegrationTest
         var repo = OrderRepo(db);
         await Seed(db, NewOrder("alpha"), NewOrder("beta"));
 
-        Assert.That(async () => await repo.GetFilteredAsync(x => x.Customer.StartsWith("al")),
+        Assert.That(async () => await repo.GetFilteredAsync(x => x.Customer.Length > 4),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
 
-        var found = await repo.GetFilteredAsync(x => x.Customer.StartsWith("al"),
+        var found = await repo.GetFilteredAsync(x => x.Customer.Length > 4,
             new QueryOptions<SaleOrder>().AllowClientEvaluation());
         Assert.That(found.Single().Customer, Is.EqualTo("alpha"));
+
+        // StartsWith is native LIKE now — no opt-in.
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.StartsWith("be"))).Single().Customer, Is.EqualTo("beta"));
+    }
+
+    [Test]
+    public async Task Min_max_and_average_push_down()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("agg", 10m, quantity: 1), NewOrder("agg", 40m, quantity: 3));
+
+        var aggregates = (IAggregateReadRepository<SaleOrder>)repo;
+        var scope = new QueryOptions<SaleOrder>().Where(x => x.Customer == "agg");
+
+        Assert.That(await aggregates.MinAsync(x => x.Total, scope), Is.EqualTo(10m));
+        Assert.That(await aggregates.MaxAsync(x => x.Total, scope), Is.EqualTo(40m));
+        Assert.That(await aggregates.AverageAsync(x => x.Quantity, scope), Is.EqualTo(2d));
     }
 
     [Test]

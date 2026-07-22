@@ -26,6 +26,7 @@ internal static class SqlFilterRenderer
             LogicalFilter { Operator: LogicalOperator.Not, Operands: [var operand] } =>
                 "NOT (" + Visit(operand) + ")",
             ComparisonFilter comparison => Comparison(comparison),
+            StringFilter text => Like(text),
             InFilter inFilter => In(inFilter),
             CollectionFilter collection => dialect.CollectionContains(Column(collection.Member), Bind(collection.Value), collection.Key),
             TupleComparisonFilter tuple => dialect.TupleComparison(
@@ -51,6 +52,20 @@ internal static class SqlFilterRenderer
             return comparison.Operator == ComparisonOperator.NotEqual
                 ? $"({column} <> {Bind(comparison.Value)} OR {column} IS NULL)"
                 : $"{column} {Operator(comparison.Operator)} {Bind(comparison.Value)}";
+        }
+
+        string Like(StringFilter text)
+        {
+            // Wildcards in the tested value are literals to C#; escape them. '!' parses identically in every
+            // dialect (backslash would need per-dialect literal rules).
+            var escaped = text.Value.Replace("!", "!!").Replace("%", "!%").Replace("_", "!_");
+            var pattern = text.Operator switch
+            {
+                StringOperator.StartsWith => escaped + "%",
+                StringOperator.EndsWith => "%" + escaped,
+                _ => "%" + escaped + "%",
+            };
+            return $"{Column(text.Member)} LIKE {Bind(pattern)} ESCAPE '!'";
         }
 
         string In(InFilter inFilter)

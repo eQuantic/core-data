@@ -29,7 +29,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     IAsyncQueryableReadRepository<TEntity, TKey>,
     IExplainableRepository<TEntity>,
     IContinuationReadRepository<TEntity>,
-    IStreamingReadRepository<TEntity>
+    IStreamingReadRepository<TEntity>,
+    IAggregateReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -169,6 +170,48 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         SumCoreAsync(selector, options, cancellationToken, rows => rows.Sum(selector.Compile()));
+
+    // ---------------------------------------------------------------- min / max / average
+
+    /// <inheritdoc />
+    public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await CqlAggregateAsync(selector, options, cancellationToken,
+            column => $"MIN({column})", row => row.GetValue<TResult?>(0),
+            rows => rows.Count == 0 ? default : rows.Min(selector.Compile())).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await CqlAggregateAsync(selector, options, cancellationToken,
+            column => $"MAX({column})", row => row.GetValue<TResult?>(0),
+            rows => rows.Count == 0 ? default : rows.Max(selector.Compile())).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await CqlAggregateAsync(selector, options, cancellationToken,
+            column => $"AVG(CAST({column} AS double))", row => row.GetValue<double>(0),
+            rows => rows.Count == 0 ? 0d : rows.Average(row => Convert.ToDouble(selector.Compile()(row)))).ConfigureAwait(false);
+
+    private async Task<TResult> CqlAggregateAsync<TSelected, TResult>(Expression<Func<TEntity, TSelected>> selector,
+        QueryOptions<TEntity>? options, CancellationToken cancellationToken,
+        Func<string, string> aggregate, Func<Row, TResult> read, Func<List<TEntity>, TResult> clientFallback)
+    {
+        var column = SumColumn(selector);
+        if (column is not null)
+        {
+            var plan = GatedPlan(options, null);
+            if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
+            {
+                var cql = $"SELECT {aggregate(column)} FROM {_configuration.TableName}"
+                          + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                          + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
+                    CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false)).First();
+                return row.IsNull(0) ? default! : read(row);
+            }
+        }
+
+        return clientFallback(await SelectAsync(options, null, cancellationToken).ConfigureAwait(false));
+    }
 
     // ---------------------------------------------------------------- continuation paging
 

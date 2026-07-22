@@ -15,9 +15,13 @@ internal static class RelationalMaterializer
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="reader">The reader, positioned on a row.</param>
     /// <param name="selected">The columns the SELECT listed, in ordinal order.</param>
-    public static TEntity Materialize<TEntity>(DbDataReader reader, IReadOnlyList<RelationalColumn> selected)
+    public static TEntity Materialize<TEntity>(DbDataReader reader, IReadOnlyList<RelationalColumn> selected) =>
+        (TEntity)Materialize(typeof(TEntity), reader, selected);
+
+    /// <summary>Materializes the current row (non-generic — the include loader works over runtime types).</summary>
+    public static object Materialize(Type entityType, DbDataReader reader, IReadOnlyList<RelationalColumn> selected)
     {
-        var entity = Activator.CreateInstance<TEntity>()!;
+        var entity = Activator.CreateInstance(entityType)!;
         for (var ordinal = 0; ordinal < selected.Count; ordinal++)
         {
             if (reader.IsDBNull(ordinal))
@@ -26,6 +30,32 @@ internal static class RelationalMaterializer
             }
 
             Assign(entity, selected[ordinal].Property, reader.GetValue(ordinal));
+        }
+
+        return entity;
+    }
+
+    /// <summary>
+    ///     Materializes the current row of an <b>arbitrary</b> result set (a <c>FromSql</c> escape hatch),
+    ///     matching the reader's column names to the mapped columns; unmatched result columns are ignored.
+    /// </summary>
+    public static TEntity MaterializeByName<TEntity>(DbDataReader reader, RelationalEntityConfiguration configuration)
+    {
+        var entity = Activator.CreateInstance<TEntity>()!;
+        for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
+        {
+            if (reader.IsDBNull(ordinal))
+            {
+                continue;
+            }
+
+            var name = reader.GetName(ordinal);
+            var column = configuration.Columns.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (column is not null)
+            {
+                Assign(entity, column.Property, reader.GetValue(ordinal));
+            }
         }
 
         return entity;

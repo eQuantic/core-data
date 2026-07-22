@@ -60,6 +60,38 @@ public sealed class ComparisonFilter(string member, ComparisonOperator op, objec
     public object? Value { get; } = value;
 }
 
+/// <summary>A substring position in the dialect-agnostic filter model.</summary>
+public enum StringOperator
+{
+    /// <summary>The member starts with the value.</summary>
+    StartsWith,
+
+    /// <summary>The member ends with the value.</summary>
+    EndsWith,
+
+    /// <summary>The member contains the value.</summary>
+    Contains,
+}
+
+/// <summary>
+///     A substring test over a string member (<c>member LIKE 'value%'</c> and friends). Case sensitivity follows
+///     the store's collation — the same rule string equality already follows.
+/// </summary>
+/// <param name="member">The member path.</param>
+/// <param name="op">The substring position.</param>
+/// <param name="value">The tested substring.</param>
+public sealed class StringFilter(string member, StringOperator op, string value) : QueryFilter
+{
+    /// <summary>The member path.</summary>
+    public string Member { get; } = member;
+
+    /// <summary>The substring position.</summary>
+    public StringOperator Operator { get; } = op;
+
+    /// <summary>The tested substring.</summary>
+    public string Value { get; } = value;
+}
+
 /// <summary>A member constrained to a set of values: <c>member IN (values)</c>.</summary>
 /// <param name="member">The member path.</param>
 /// <param name="values">The candidate values.</param>

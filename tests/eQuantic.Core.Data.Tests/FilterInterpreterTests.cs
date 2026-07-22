@@ -157,6 +157,26 @@ public sealed class FilterInterpreterTests
     }
 
     [Test]
+    public void StartsWith_becomes_a_string_filter()
+    {
+        var filter = (StringFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.StartsWith("al"));
+
+        Assert.That(filter.Member, Is.EqualTo("Name"));
+        Assert.That(filter.Operator, Is.EqualTo(StringOperator.StartsWith));
+        Assert.That(filter.Value, Is.EqualTo("al"));
+    }
+
+    [Test]
+    public void String_contains_is_a_string_filter_while_collection_contains_stays_contains()
+    {
+        var text = (StringFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.Contains("mid"));
+        Assert.That(text.Operator, Is.EqualTo(StringOperator.Contains));
+
+        var collection = (CollectionFilter)FilterInterpreter.Interpret<Sample>(x => x.Tags.Contains("vip"));
+        Assert.That(collection.Member, Is.EqualTo("Tags"));
+    }
+
+    [Test]
     public void CompareTo_against_zero_normalizes_to_the_direct_comparison()
     {
         var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.CompareTo("m") > 0);

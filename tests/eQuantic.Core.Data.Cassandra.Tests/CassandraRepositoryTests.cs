@@ -194,6 +194,21 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("counter"));
     }
 
+    [Test]
+    public async Task Min_max_and_average_compute_on_the_cluster()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = ReadingRepo(db);
+        await Seed(db, NewReading(1, Utc(0), 1.0), NewReading(1, Utc(1), 2.0), NewReading(1, Utc(2), 3.0), NewReading(2, Utc(0), 99.0));
+
+        var aggregates = (IAggregateReadRepository<Reading>)repo;
+        var scope = new QueryOptions<Reading>().Where(x => x.SensorId == 1);
+
+        Assert.That(await aggregates.MinAsync(x => x.Value, scope), Is.EqualTo(1.0));
+        Assert.That(await aggregates.MaxAsync(x => x.Value, scope), Is.EqualTo(3.0));
+        Assert.That(await aggregates.AverageAsync(x => x.Value, scope), Is.EqualTo(2.0));
+    }
+
     // ---------------------------------------------------------------- counters + lightweight transactions
 
     [Test]

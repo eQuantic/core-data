@@ -107,6 +107,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
 {
     private readonly SqlDialect _dialect;
     private readonly Dictionary<string, string> _columnOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
@@ -142,11 +143,25 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>Excludes a member from the mapping (navigations are excluded automatically; this is for the rest).</summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    public RelationalEntityBuilder<TEntity> Ignore<TMember>(Expression<Func<TEntity, TMember>> selector)
+    {
+        _ignored.Add(selector.GetMemberName());
+        return this;
+    }
+
     internal RelationalEntityConfiguration<TEntity> Build()
     {
+        // Scalar members (and collections of scalars, for stores with array columns) map to columns; entity
+        // references and entity collections are navigations — loaded through Include, never selected.
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(property => property is { CanRead: true, CanWrite: true } && property.GetIndexParameters().Length == 0)
+            .Where(property => property is { CanRead: true, CanWrite: true }
+                               && property.GetIndexParameters().Length == 0
+                               && !_ignored.Contains(property.Name)
+                               && IsMapped(property.PropertyType))
             .Select(property => new RelationalColumn(property,
                 _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name)))
             .ToList();
@@ -158,5 +173,34 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
 
         return new RelationalEntityConfiguration<TEntity>(
             _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated);
+    }
+
+    private static bool IsMapped(Type type)
+    {
+        if (IsScalar(type))
+        {
+            return true;
+        }
+
+        if (type == typeof(string) || type == typeof(byte[]) || !type.IsGenericType && !type.IsArray)
+        {
+            return false;
+        }
+
+        var element = type.IsArray
+            ? type.GetElementType()
+            : type.GetInterfaces().Append(type)
+                .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                ?.GetGenericArguments()[0];
+        return element is not null && IsScalar(element);
+    }
+
+    private static bool IsScalar(Type type)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        return type.IsPrimitive || type.IsEnum
+               || type == typeof(string) || type == typeof(decimal) || type == typeof(Guid)
+               || type == typeof(DateTime) || type == typeof(DateTimeOffset) || type == typeof(TimeSpan)
+               || type == typeof(byte[]);
     }
 }

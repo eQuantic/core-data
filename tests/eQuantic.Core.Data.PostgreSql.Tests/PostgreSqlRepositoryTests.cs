@@ -1,4 +1,5 @@
 using eQuantic.Core.Data.Relational;
+using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -177,18 +178,86 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
     }
 
     [Test]
+    public async Task String_functions_push_down_as_like_with_escaping()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("alpha"), NewOrder("beta"), NewOrder("100% cotton"));
+
+        // No opt-in: StartsWith/EndsWith/Contains are native LIKE now.
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.StartsWith("al"))).Single().Customer, Is.EqualTo("alpha"));
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.EndsWith("ton"))).Single().Customer, Is.EqualTo("100% cotton"));
+        Assert.That((await repo.GetFilteredAsync(x => x.Customer.Contains("%"))).Single().Customer, Is.EqualTo("100% cotton"),
+            "the wildcard in the value is escaped, not interpreted");
+    }
+
+    [Test]
     public async Task Arbitrary_predicates_are_gated_residual()
     {
         using var db = await NewSchemaAsync();
         var repo = OrderRepo(db);
         await Seed(db, NewOrder("alpha"), NewOrder("beta"));
 
-        Assert.That(async () => await repo.GetFilteredAsync(x => x.Customer.StartsWith("al")),
+        Assert.That(async () => await repo.GetFilteredAsync(x => x.Customer.Length > 4),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
 
-        var found = await repo.GetFilteredAsync(x => x.Customer.StartsWith("al"),
+        var found = await repo.GetFilteredAsync(x => x.Customer.Length > 4,
             new QueryOptions<SaleOrder>().AllowClientEvaluation());
         Assert.That(found.Single().Customer, Is.EqualTo("alpha"));
+    }
+
+    [Test]
+    public async Task Min_max_and_average_push_down_without_truncation()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("a", 10m, quantity: 1), NewOrder("a", 20m, quantity: 2), NewOrder("a", 40m, quantity: 3));
+
+        var aggregates = (IAggregateReadRepository<SaleOrder>)repo;
+        var scope = new QueryOptions<SaleOrder>().Where(x => x.Customer == "a");
+
+        Assert.That(await aggregates.MinAsync(x => x.Total, scope), Is.EqualTo(10m));
+        Assert.That(await aggregates.MaxAsync(x => x.Total, scope), Is.EqualTo(40m));
+        Assert.That(await aggregates.AverageAsync(x => x.Quantity, scope), Is.EqualTo(2d),
+            "the integer column is cast before averaging");
+    }
+
+    [Test]
+    public async Task From_sql_escape_hatch_materializes_by_name()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("raw", 42m), NewOrder("other", 1m));
+
+        var rows = await ((RelationalReadRepository<SaleOrder, Guid>)repo).FromSqlAsync(
+            "SELECT o.* FROM \"sale_orders\" o WHERE o.\"customer\" = @p0", ["raw"]);
+
+        Assert.That(rows.Single().Total, Is.EqualTo(42m));
+    }
+
+    [Test]
+    public async Task Includes_load_reference_and_collection_navigations()
+    {
+        using var db = await NewSchemaAsync();
+        var buyers = db.Resolve<IAsyncRepository<Buyer, Guid>>();
+        var items = db.Resolve<IAsyncRepository<OrderItem, Guid>>();
+        var repo = OrderRepo(db);
+
+        var buyer = new Buyer { Id = Guid.NewGuid(), Name = "acme" };
+        await buyers.AddAsync(buyer);
+        var order = NewOrder("with-navs");
+        order.BuyerId = buyer.Id;
+        await repo.AddAsync(order);
+        await items.AddAsync(new OrderItem { Id = Guid.NewGuid(), SaleOrderId = order.Id, Product = "kb" });
+        await items.AddAsync(new OrderItem { Id = Guid.NewGuid(), SaleOrderId = order.Id, Product = "mouse" });
+        await Uow(db).CommitAsync();
+
+        var loaded = await repo.GetAsync(order.Id,
+            new QueryOptions<SaleOrder>().Include(nameof(SaleOrder.Buyer), nameof(SaleOrder.Items)));
+
+        Assert.That(loaded!.Buyer, Is.Not.Null, "the reference navigation loaded");
+        Assert.That(loaded.Buyer!.Name, Is.EqualTo("acme"));
+        Assert.That(loaded.Items.Select(i => i.Product), Is.EquivalentTo(new[] { "kb", "mouse" }), "the collection navigation loaded");
     }
 
     // ---------------------------------------------------------------- sorting, paging, streaming, aggregates
@@ -333,7 +402,7 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That(pushed.Statement, Does.Contain("\"customer\"").And.Contain("OR"));
         Assert.That(pushed.ClientEvaluation, Is.False);
 
-        var residual = explainable.Explain(new QueryOptions<SaleOrder>().Where(x => x.Customer.EndsWith("z")));
+        var residual = explainable.Explain(new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 3));
         Assert.That(residual.ClientEvaluation, Is.True);
         Assert.That(residual.Notes, Has.Some.Contains("AllowClientEvaluation"));
     }

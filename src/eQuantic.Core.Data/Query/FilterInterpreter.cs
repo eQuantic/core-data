@@ -183,7 +183,24 @@ public static class FilterInterpreter
 
     private static QueryFilter Call(MethodCallNode call)
     {
-        if (call.Method.Name == "Contains")
+        // string.StartsWith / EndsWith / Contains over a member — the single-argument overloads only, so the
+        // store's collation decides case sensitivity exactly as string equality already does.
+        if (call.Method.Name is nameof(string.StartsWith) or nameof(string.EndsWith)
+            && call.Object is { } receiver && Path(receiver) is { } stringMember && call.Arguments is [var soleArgument]
+            && Value(soleArgument) is string affix)
+        {
+            return new StringFilter(stringMember,
+                call.Method.Name == nameof(string.StartsWith) ? StringOperator.StartsWith : StringOperator.EndsWith, affix);
+        }
+
+        if (call.Method.Name == "Contains" && IsStringMethod(call.Method)
+            && call.Object is { } text && Path(text) is { } textMember && call.Arguments is [var fragmentArgument]
+            && Value(fragmentArgument) is string fragment)
+        {
+            return new StringFilter(textMember, StringOperator.Contains, fragment);
+        }
+
+        if (call.Method.Name == "Contains" && !IsStringMethod(call.Method))
         {
             // Gather the receiver and arguments; the parameter-rooted one is the column, the other is the collection.
             var operands = new List<ExpressionNode>();
@@ -218,6 +235,11 @@ public static class FilterInterpreter
 
         throw Unsupported(call);
     }
+
+    /// <summary>Whether the method is declared by <see cref="string" /> (disambiguates the two <c>Contains</c> shapes; the type reference may carry the alias or the full name).</summary>
+    private static bool IsStringMethod(eQuantic.Linq.Expressions.Metadata.MethodRef method) =>
+        method.DeclaringType?.Name is { } name
+        && (name.Equals("string", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".String", StringComparison.Ordinal));
 
     // ---------------------------------------------------------------- helpers
 
