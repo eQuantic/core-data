@@ -253,6 +253,111 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
             "the integer column is cast before averaging");
     }
 
+    // ---------------------------------------------------------------- typed GroupBy
+
+    [Test]
+    public async Task Group_by_renders_a_native_group_by_with_aggregates()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db,
+            NewOrder("a", 10m, quantity: 1), NewOrder("a", 20m, quantity: 3),
+            NewOrder("b", 40m, quantity: 2));
+
+        var grouped = (IGroupedReadRepository<SaleOrder>)repo;
+        var groups = (await grouped.GroupByAsync(x => x.Customer,
+                g => new { Customer = g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total), Mean = g.Average(x => x.Quantity) }))
+            .OrderBy(x => x.Customer).ToList();
+
+        Assert.That(groups.Select(x => (x.Customer, x.Orders, x.Revenue, x.Mean)),
+            Is.EqualTo(new[] { ("a", 2, 30m, 2d), ("b", 1, 40m, 2d) }));
+    }
+
+    [Test]
+    public async Task Group_by_filter_applies_before_grouping()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("a", 10m, "open"), NewOrder("a", 20m, "closed"), NewOrder("b", 5m, "open"));
+
+        var groups = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+                x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
+                new QueryOptions<SaleOrder>().Where(x => x.Status == "open")))
+            .OrderBy(x => x.Key).ToList();
+
+        Assert.That(groups.Select(x => (x.Key, x.Total)), Is.EqualTo(new[] { ("a", 10m), ("b", 5m) }),
+            "the WHERE pushed before the GROUP BY");
+    }
+
+    [Test]
+    public async Task Group_by_composite_key_projects_members_or_the_whole_key()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db,
+            NewOrder("a", 10m, "open"), NewOrder("a", 20m, "open"),
+            NewOrder("a", 40m, "closed"), NewOrder("b", 1m, "open"));
+        var grouped = (IGroupedReadRepository<SaleOrder>)repo;
+
+        var members = (await grouped.GroupByAsync(x => new { x.Customer, x.Status },
+                g => new { g.Key.Customer, g.Key.Status, Subtotal = g.Sum(x => x.Total) }))
+            .OrderBy(x => x.Customer).ThenBy(x => x.Status).ToList();
+        Assert.That(members.Select(x => (x.Customer, x.Status, x.Subtotal)),
+            Is.EqualTo(new[] { ("a", "closed", 40m), ("a", "open", 30m), ("b", "open", 1m) }));
+
+        var whole = await grouped.GroupByAsync(x => new { x.Customer, x.Status },
+            g => new { Bucket = g.Key, Rows = g.Count() });
+        Assert.That(whole.Single(x => x.Bucket.Customer == "a" && x.Bucket.Status == "open").Rows, Is.EqualTo(2),
+            "the composite key materializes back as the anonymous key");
+    }
+
+    [Test]
+    public async Task Group_by_member_init_projects_into_a_named_type()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("a", 10m), NewOrder("a", 30m), NewOrder("b", 7m));
+
+        var summaries = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+                x => x.Customer,
+                g => new CustomerSummary { Customer = g.Key, Orders = g.Count(), Smallest = g.Min(x => x.Total) }))
+            .OrderBy(x => x.Customer).ToList();
+
+        Assert.That(summaries.Select(x => (x.Customer, x.Orders, x.Smallest)),
+            Is.EqualTo(new[] { ("a", 2, 10m), ("b", 1, 7m) }));
+    }
+
+    [Test]
+    public async Task Group_by_residual_filter_degrades_to_gated_client_grouping()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("alpha", 10m), NewOrder("alpha", 20m), NewOrder("bo", 40m));
+        var grouped = (IGroupedReadRepository<SaleOrder>)repo;
+
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Rows = g.Count() },
+                new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4)),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
+
+        var groups = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
+            new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4).AllowClientEvaluation());
+        Assert.That(groups.Single(), Is.EqualTo(new { Key = "alpha", Total = 30m }),
+            "the gated fallback groups the fetched rows with the selectors themselves");
+    }
+
+    [Test]
+    public async Task Group_by_rejects_unsupported_projections_and_sorting()
+    {
+        using var db = await NewSchemaAsync();
+        var grouped = (IGroupedReadRepository<SaleOrder>)OrderRepo(db);
+
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { Odd = g.Count() * 2 }),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("Supported shapes"));
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { g.Key },
+                new QueryOptions<SaleOrder>().OrderBy(x => x.Total)),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("Sorting"));
+    }
+
     [Test]
     public async Task From_sql_escape_hatch_materializes_by_name()
     {
@@ -436,5 +541,15 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         var residual = explainable.Explain(new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 3));
         Assert.That(residual.ClientEvaluation, Is.True);
         Assert.That(residual.Notes, Has.Some.Contains("AllowClientEvaluation"));
+    }
+
+    /// <summary>A named grouped-projection target for the member-init GroupBy shape.</summary>
+    private sealed class CustomerSummary
+    {
+        public string Customer { get; set; } = "";
+
+        public int Orders { get; set; }
+
+        public decimal Smallest { get; set; }
     }
 }

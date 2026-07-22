@@ -159,6 +159,14 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
   `IStreamingReadRepository<T>`) — deep pages walk the native path (Cassandra `PagingState`, Cosmos
   continuation tokens, MongoDB keyset by id), every page costing the same as the first, and
   `IAsyncEnumerable<T>` streams hold one page in memory at a time.
+- **Typed `GroupBy` and aggregates on the store** (`IGroupedReadRepository<T>`,
+  `IAggregateReadRepository<T>`) —
+  `GroupByAsync(x => x.Customer, g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total) })`
+  renders to a native `GROUP BY` on the relational providers: the filter pushes into the `WHERE`
+  (before grouping) and only the grouped rows travel; `Min`/`Max`/`Average` push down alongside
+  `Sum`/`Count`. A filter the store cannot express degrades — behind `.AllowClientEvaluation()` —
+  to grouping the fetched rows with the selectors themselves; a projection shape the store cannot
+  aggregate is rejected with the supported shapes, never silently fetched.
 - **Partition-key inference and ETag concurrency (Cosmos)** — a filter that pins the partition key
   scopes the query to a single partition automatically (the biggest RU saving there is), and
   `ConcurrencyToken(x => x.ETag)` turns `Modify` into a conditional `If-Match` replace.

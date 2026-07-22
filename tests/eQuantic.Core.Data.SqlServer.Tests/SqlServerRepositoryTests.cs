@@ -172,6 +172,24 @@ public sealed class SqlServerRepositoryTests : SqlServerIntegrationTest
     }
 
     [Test]
+    public async Task Typed_group_by_is_a_native_group_by()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db,
+            NewOrder("a", 10m, "open", quantity: 1), NewOrder("a", 20m, "closed", quantity: 3),
+            NewOrder("b", 40m, "open", quantity: 2));
+
+        var groups = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+                x => new { x.Customer, x.Status },
+                g => new { g.Key.Customer, g.Key.Status, Revenue = g.Sum(x => x.Total), Orders = g.Count() }))
+            .OrderBy(x => x.Customer).ThenBy(x => x.Status).ToList();
+
+        Assert.That(groups.Select(x => (x.Customer, x.Status, x.Revenue, x.Orders)),
+            Is.EqualTo(new[] { ("a", "closed", 20m, 1), ("a", "open", 10m, 1), ("b", "open", 40m, 1) }));
+    }
+
+    [Test]
     public async Task Update_many_applies_computed_shapes_with_real_counts()
     {
         using var db = await NewSchemaAsync();

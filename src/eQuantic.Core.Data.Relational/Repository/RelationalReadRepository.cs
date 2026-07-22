@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using eQuantic.Core.Data.Diagnostics;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -28,7 +29,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     IExplainableRepository<TEntity>,
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
-    IAggregateReadRepository<TEntity>
+    IAggregateReadRepository<TEntity>,
+    IGroupedReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -231,6 +233,180 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         }
 
         return clientFallback(await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false));
+    }
+
+    // ---------------------------------------------------------------- grouped reads
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Renders to a native <c>GROUP BY</c> — the filter pushes into the <c>WHERE</c> (before grouping) and
+    ///     only the grouped rows travel. A filter with a client-side residual degrades, behind
+    ///     <c>.AllowClientEvaluation()</c>, to fetching the matching rows and grouping them with the selectors
+    ///     themselves — identical semantics, explicit cost. Group order is store-defined; order the result
+    ///     client-side.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GroupByAsync<TGroup, TResult>(
+        Expression<Func<TEntity, TGroup>> keySelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, TResult>> resultSelector,
+        QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (options is { Sortings.Count: > 0 })
+        {
+            throw new NotSupportedException("Sorting does not apply to a grouped read; order the grouped result client-side.");
+        }
+
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not apply to a grouped projection; drop the includes.");
+        }
+
+        // Interpret first so the contract is uniform: only server-side aggregate shapes are accepted on every path.
+        var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
+        var plan = GatedPlan(options, null);
+
+        if (plan.Residual.Count > 0)
+        {
+            var rows = await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false);
+            return rows.GroupBy(keySelector.Compile()).Select(resultSelector.Compile()).ToList();
+        }
+
+        var keys = group.Key
+            .Select(member => _configuration.ColumnFor(member.Path)
+                              ?? throw new NotSupportedException(
+                                  $"'{typeof(TEntity).Name}' has no mapped member '{member.Path}' to group by."))
+            .ToList();
+
+        var select = keys.Select(column => _dialect.Quote(column.Name))
+            .Concat(group.Bindings.OfType<GroupAggregateBinding>().Select(AggregateSql))
+            .ToList();
+
+        var grouped = string.Join(", ", keys.Select(column => _dialect.Quote(column.Name)));
+        var sql = $"SELECT {string.Join(", ", select)} FROM {_dialect.Quote(_configuration.TableName)}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                  + $" GROUP BY {grouped}";
+
+        await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+        var project = GroupProjector<TGroup, TResult>(group);
+        var results = new List<TResult>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            results.Add(project(reader));
+        }
+
+        return results;
+
+        string AggregateSql(GroupAggregateBinding aggregate)
+        {
+            if (aggregate.Aggregate == GroupAggregate.Count)
+            {
+                return "COUNT(*)";
+            }
+
+            var column = _configuration.ColumnFor(aggregate.Member!)
+                         ?? throw new NotSupportedException(
+                             $"'{typeof(TEntity).Name}' has no mapped member '{aggregate.Member}' to aggregate.");
+            var quoted = _dialect.Quote(column.Name);
+            return aggregate.Aggregate switch
+            {
+                GroupAggregate.Sum => $"SUM({quoted})",
+                GroupAggregate.Min => $"MIN({quoted})",
+                GroupAggregate.Max => $"MAX({quoted})",
+                _ => $"AVG(CAST({quoted} AS {_dialect.SqlType(typeof(double))}))",
+            };
+        }
+    }
+
+    /// <summary>
+    ///     Builds the row projector for a grouped SELECT laid out as key columns first, aggregates after, in
+    ///     binding order — reading each slot into the result member's type.
+    /// </summary>
+    private static Func<DbDataReader, TResult> GroupProjector<TGroup, TResult>(GroupQuery group)
+    {
+        var constructor = group.ConstructorProjection ? typeof(TResult).GetConstructors().Single() : null;
+        var targets = group.Bindings
+            .Select((binding, index) => constructor is not null
+                ? constructor.GetParameters()[index].ParameterType
+                : (typeof(TResult).GetProperty(binding.Target)
+                   ?? throw new NotSupportedException($"'{typeof(TResult).Name}' has no member '{binding.Target}'.")).PropertyType)
+            .ToList();
+
+        var keyConstructor = group.Key is [{ Name: not null }, ..] ? typeof(TGroup).GetConstructors().Single() : null;
+        var aggregateOrdinals = new Dictionary<GroupBinding, int>();
+        foreach (var binding in group.Bindings.OfType<GroupAggregateBinding>())
+        {
+            aggregateOrdinals.Add(binding, group.Key.Count + aggregateOrdinals.Count);
+        }
+
+        return reader =>
+        {
+            var keyValues = new object?[group.Key.Count];
+            for (var ordinal = 0; ordinal < keyValues.Length; ordinal++)
+            {
+                keyValues[ordinal] = reader.IsDBNull(ordinal) ? null : reader.GetValue(ordinal);
+            }
+
+            var values = new object?[group.Bindings.Count];
+            for (var index = 0; index < values.Length; index++)
+            {
+                values[index] = group.Bindings[index] switch
+                {
+                    GroupKeyBinding { KeyName: null } when keyConstructor is null =>
+                        ChangeValue(keyValues[0], typeof(TGroup)),
+                    GroupKeyBinding { KeyName: null } => keyConstructor.Invoke(keyConstructor.GetParameters()
+                        .Select((parameter, position) => ChangeValue(keyValues[position], parameter.ParameterType))
+                        .ToArray()),
+                    GroupKeyBinding named => ChangeValue(keyValues[KeyIndex(group.Key, named.KeyName!)], targets[index]),
+                    var aggregate => ChangeValue(
+                        reader.IsDBNull(aggregateOrdinals[aggregate]) ? null : reader.GetValue(aggregateOrdinals[aggregate]),
+                        targets[index]),
+                };
+            }
+
+            if (constructor is not null)
+            {
+                return (TResult)constructor.Invoke(values);
+            }
+
+            var result = Activator.CreateInstance<TResult>()!;
+            for (var index = 0; index < values.Length; index++)
+            {
+                typeof(TResult).GetProperty(group.Bindings[index].Target)!.SetValue(result, values[index]);
+            }
+
+            return result;
+        };
+
+        static int KeyIndex(IReadOnlyList<GroupKeyMember> key, string name)
+        {
+            for (var index = 0; index < key.Count; index++)
+            {
+                if (string.Equals(key[index].Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return index;
+                }
+            }
+
+            throw new NotSupportedException($"The key has no member '{name}'.");
+        }
+    }
+
+    private static object? ChangeValue(object? value, Type target)
+    {
+        if (value is null or DBNull)
+        {
+            return null;
+        }
+
+        var type = Nullable.GetUnderlyingType(target) ?? target;
+        if (type.IsInstanceOfType(value))
+        {
+            return value;
+        }
+
+        return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 
     // ---------------------------------------------------------------- continuation paging (keyset)

@@ -147,6 +147,25 @@ public sealed class MySqlRepositoryTests : MySqlIntegrationTest
     }
 
     [Test]
+    public async Task Typed_group_by_is_a_native_group_by()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db,
+            NewOrder("a", 10m, "open", quantity: 1), NewOrder("a", 20m, "closed", quantity: 3),
+            NewOrder("b", 40m, "open", quantity: 2));
+
+        var groups = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+                x => x.Customer,
+                g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total), Mean = g.Average(x => x.Quantity) },
+                new QueryOptions<SaleOrder>().Where(x => x.Status != null)))
+            .OrderBy(x => x.Key).ToList();
+
+        Assert.That(groups.Select(x => (x.Key, x.Orders, x.Revenue, x.Mean)),
+            Is.EqualTo(new[] { ("a", 2, 30m, 2d), ("b", 1, 40m, 2d) }));
+    }
+
+    [Test]
     public async Task Sorting_offset_paging_keyset_and_aggregates_are_native()
     {
         using var db = await NewSchemaAsync();
