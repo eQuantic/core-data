@@ -97,9 +97,15 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
 public sealed class CosmosModel
 {
     private readonly Dictionary<Type, CosmosEntityConfiguration> _configurations = new();
+    private readonly List<System.Text.Json.Serialization.JsonConverter> _converters = [];
 
     /// <summary>The registered configurations.</summary>
     public IReadOnlyDictionary<Type, CosmosEntityConfiguration> Configurations => _configurations;
+
+    /// <summary>The value converters the model declared (joined into the serializer by <see cref="CosmosClientFactory" />).</summary>
+    public IReadOnlyList<System.Text.Json.Serialization.JsonConverter> Converters => _converters;
+
+    internal void AddConverter(System.Text.Json.Serialization.JsonConverter converter) => _converters.Add(converter);
 
     /// <summary>Gets the configuration for an entity type, or throws when it was not registered.</summary>
     /// <param name="entityType">The entity type.</param>
@@ -156,7 +162,38 @@ public sealed class CosmosModelBuilder
         return this;
     }
 
-    internal CosmosModel Build() => _model;
+    /// <summary>
+    ///     Declares a value conversion for every member of type <typeparamref name="TMember" />: documents store
+    ///     <typeparamref name="TStored" />, entities keep <typeparamref name="TMember" />. Deliberately
+    ///     <b>type-level</b> (unlike the relational per-member <c>Converts</c>): the SDK's LINQ translation
+    ///     serializes a filter's constants by their type, so only a type-level converter keeps
+    ///     <c>x =&gt; x.Status == Status.Active</c> comparing against the stored representation.
+    /// </summary>
+    /// <typeparam name="TMember">The CLR type on the entity.</typeparam>
+    /// <typeparam name="TStored">The stored (JSON) type.</typeparam>
+    /// <param name="toStored">Converts the CLR value to its stored representation.</param>
+    /// <param name="fromStored">Converts the stored representation back.</param>
+    public CosmosModelBuilder Converts<TMember, TStored>(Func<TMember, TStored> toStored, Func<TStored, TMember> fromStored)
+    {
+        _model.AddConverter(new CosmosValueConverter<TMember, TStored>(toStored, fromStored));
+        return this;
+    }
+
+    /// <summary>
+    ///     Builds the model. The DI extensions call this for you; call it directly when hosting without DI — the
+    ///     built model feeds <see cref="CosmosClientFactory.Create(string, CosmosModel)" /> and <see cref="CosmosModel.Explain" />.
+    /// </summary>
+    public CosmosModel Build() => _model;
+
+    private sealed class CosmosValueConverter<TMember, TStored>(Func<TMember, TStored> toStored, Func<TStored, TMember> fromStored)
+        : System.Text.Json.Serialization.JsonConverter<TMember>
+    {
+        public override TMember Read(ref System.Text.Json.Utf8JsonReader reader, Type typeToConvert, System.Text.Json.JsonSerializerOptions options) =>
+            fromStored(System.Text.Json.JsonSerializer.Deserialize<TStored>(ref reader, options)!);
+
+        public override void Write(System.Text.Json.Utf8JsonWriter writer, TMember value, System.Text.Json.JsonSerializerOptions options) =>
+            System.Text.Json.JsonSerializer.Serialize(writer, toStored(value), options);
+    }
 }
 
 /// <summary>Fluent configuration for one entity's Cosmos mapping.</summary>
@@ -190,7 +227,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
         {
             if (property.GetCustomAttributes(typeof(Data.Modeling.PartitionKeyAttribute), inherit: true).Length > 0)
             {
-                _partitionKeyPath = "/" + CosmosNaming.CamelCase(property.Name);
+                _partitionKeyPath = "/" + CosmosNaming.StoredName(property);
                 var partitionProperty = property;
                 _partitionKey = entity => ToPartitionKey(partitionProperty.GetValue(entity));
             }
@@ -244,7 +281,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     /// <param name="path">An explicit partition key path, or <c>null</c> to derive it from the member.</param>
     public CosmosEntityBuilder<TEntity> PartitionKey<TKey>(Expression<Func<TEntity, TKey>> selector, string? path = null)
     {
-        _partitionKeyPath = path ?? "/" + string.Join("/", selector.GetMemberPath().Split('.').Select(CosmosNaming.CamelCase));
+        _partitionKeyPath = path ?? "/" + string.Join("/", CosmosNaming.StoredPath(selector));
         var read = selector.Compile();
         _partitionKey = entity => ToPartitionKey(read(entity));
         return this;

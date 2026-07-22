@@ -50,11 +50,17 @@ public sealed class CosmosTestServer
             await _container.StartAsync();
 
             var endpoint = $"http://{_container.Hostname}:{_container.GetMappedPublicPort(8081)}/";
+
+            // One model instance feeds both the client's serializer (renames, exclusions, Converts) and DI.
+            var modelBuilder = new CosmosModelBuilder();
+            RegisterEntities(modelBuilder);
+            var model = modelBuilder.Build();
+
             var options = new CosmosClientOptions
             {
                 ConnectionMode = ConnectionMode.Gateway,
                 LimitToEndpoint = true,
-                UseSystemTextJsonSerializerWithOptions = CosmosClientFactory.SerializerOptions,
+                Serializer = new CosmosEntitySerializer(CosmosEntitySerializer.BuildOptions(model)),
                 RequestTimeout = TimeSpan.FromMinutes(2),
             };
             _client = new CosmosClient(endpoint, EmulatorKey, options);
@@ -77,11 +83,8 @@ public sealed class CosmosTestServer
                     ? product => product.Category == category
                     : null));
 
-            services.AddCosmosDatabase("emulator", DatabaseName, model =>
-                model.Entity<CosmosProduct>(entity => entity
-                    .Container(ContainerName)
-                    .PartitionKey(x => x.Category)
-                    .ConcurrencyToken(x => x.ETag)));
+            services.AddSingleton(model);
+            services.AddCosmosDatabase("emulator", DatabaseName, RegisterEntities);
             services.AddCosmosRepositories();
             services.AddCosmosMigrations(typeof(CosmosProductsSetupMigration).Assembly);
             _provider = services.BuildServiceProvider();
@@ -91,6 +94,19 @@ public sealed class CosmosTestServer
             _startupError = ex;
         }
     }
+
+    /// <summary>The entity model shared by the client's serializer and the DI registration.</summary>
+    private static void RegisterEntities(CosmosModelBuilder model) => model
+        .Converts<GadgetGrade, string>(
+            grade => grade.ToString().ToLowerInvariant(),
+            stored => Enum.Parse<GadgetGrade>(stored, ignoreCase: true))
+        .Entity<CosmosProduct>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category)
+            .ConcurrencyToken(x => x.ETag))
+        .Entity<RenamedGadget>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category));
 
     [OneTimeTearDown]
     public async Task StopAsync()

@@ -213,10 +213,10 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
     }
 
     private static string FieldPath(LambdaExpression selector) =>
-        "/" + string.Join("/", selector.GetMemberPath().Split('.').Select(CosmosNaming.CamelCase));
+        "/" + string.Join("/", CosmosNaming.StoredPath(selector));
 
     private static string FieldElement(LambdaExpression selector) =>
-        string.Join(".", selector.GetMemberPath().Split('.').Select(CosmosNaming.CamelCase));
+        string.Join(".", CosmosNaming.StoredPath(selector));
 
     private static PartitionKey ToPartitionKey(JsonNode? node) => node?.GetValueKind() switch
     {

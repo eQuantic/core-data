@@ -32,7 +32,8 @@ public static class CosmosServiceCollectionExtensions
         model(builder);
 
         services.TryAddSingleton(builder.Build());
-        services.TryAddSingleton(_ => CosmosClientFactory.Create(connectionString));
+        services.TryAddSingleton(serviceProvider =>
+            CosmosClientFactory.Create(connectionString, serviceProvider.GetRequiredService<CosmosModel>()));
         services.TryAddSingleton(serviceProvider => serviceProvider.GetRequiredService<CosmosClient>()
             .CreateDatabaseIfNotExistsAsync(databaseName).GetAwaiter().GetResult().Database);
 

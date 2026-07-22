@@ -34,9 +34,10 @@ internal static class CosmosPartitionKeyInference
                 continue;
             }
 
+            var entityType = (filter as LambdaExpression)?.Parameters is [{ } parameter, ..] ? parameter.Type : null;
             var node = ExpressionSerializer.Default.ToNode(filter);
             var body = node is LambdaNode lambda ? lambda.Body : node;
-            if (TryFind(body, field, out var value))
+            if (TryFind(body, entityType, field, out var value))
             {
                 return ToPartitionKey(value);
             }
@@ -45,7 +46,7 @@ internal static class CosmosPartitionKeyInference
         return null;
     }
 
-    private static bool TryFind(ExpressionNode node, string field, out object? value)
+    private static bool TryFind(ExpressionNode node, Type? entityType, string field, out object? value)
     {
         value = null;
         if (node is not BinaryNode binary)
@@ -55,7 +56,7 @@ internal static class CosmosPartitionKeyInference
 
         if (binary.NodeType is ExpressionType.AndAlso or ExpressionType.And)
         {
-            return TryFind(binary.Left, field, out value) || TryFind(binary.Right, field, out value);
+            return TryFind(binary.Left, entityType, field, out value) || TryFind(binary.Right, entityType, field, out value);
         }
 
         if (binary.NodeType != ExpressionType.Equal)
@@ -66,13 +67,13 @@ internal static class CosmosPartitionKeyInference
         var left = Unwrap(binary.Left);
         var right = Unwrap(binary.Right);
 
-        if (IsPartitionMember(left, field) && right is ConstantNode rightConstant)
+        if (IsPartitionMember(left, entityType, field) && right is ConstantNode rightConstant)
         {
             value = rightConstant.Value;
             return true;
         }
 
-        if (IsPartitionMember(right, field) && left is ConstantNode leftConstant)
+        if (IsPartitionMember(right, entityType, field) && left is ConstantNode leftConstant)
         {
             value = leftConstant.Value;
             return true;
@@ -81,8 +82,20 @@ internal static class CosmosPartitionKeyInference
         return false;
     }
 
-    private static bool IsPartitionMember(ExpressionNode node, string field) =>
-        node is MemberNode { Expression: ParameterNode } member && CosmosNaming.CamelCase(member.Member.Name) == field;
+    private static bool IsPartitionMember(ExpressionNode node, Type? entityType, string field)
+    {
+        if (node is not MemberNode { Expression: ParameterNode } member)
+        {
+            return false;
+        }
+
+        // The stored name resolves through the same contract as the serializer ([StoredAs] > JsonPropertyName >
+        // camelCase); without a reachable property the camelCase convention is the only candidate.
+        var property = entityType?.GetProperty(member.Member.Name,
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        var storedName = property is null ? CosmosNaming.CamelCase(member.Member.Name) : CosmosNaming.StoredName(property);
+        return storedName == field;
+    }
 
     private static ExpressionNode Unwrap(ExpressionNode node) =>
         node is UnaryNode { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked, Operand: { } operand }

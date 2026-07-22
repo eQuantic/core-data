@@ -29,9 +29,27 @@ public static class MongoServiceCollectionExtensions
     }
 
     /// <summary>
+    ///     Registers the client and database, and applies the fluent entity model — collection names, id members,
+    ///     element renames, exclusions and value conversions (conventions &lt; annotations &lt; fluent).
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="connectionString">The MongoDB connection string.</param>
+    /// <param name="databaseName">The target database name.</param>
+    /// <param name="model">Builds the entity model.</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddMongoDatabase(this IServiceCollection services, string connectionString,
+        string databaseName, Action<MongoModelBuilder> model)
+    {
+        var builder = new MongoModelBuilder();
+        model(builder);
+        services.TryAddSingleton(builder.Build());
+        return services.AddMongoDatabase(connectionString, databaseName);
+    }
+
+    /// <summary>
     ///     Registers the generic repositories over the <see cref="MongoDefaultUnitOfWork" />. Call
-    ///     <see cref="AddMongoDatabase" /> too (or an overload that takes a connection string) so the client and
-    ///     database are available.
+    ///     <see cref="AddMongoDatabase(IServiceCollection, string, string)" /> too (or an overload that takes a
+    ///     connection string) so the client and database are available.
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <param name="lifetime">The unit-of-work and repository lifetime (scoped by default).</param>
@@ -69,6 +87,17 @@ public static class MongoServiceCollectionExtensions
     public static IServiceCollection AddMongoRepositories(this IServiceCollection services, string connectionString, string databaseName,
         ServiceLifetime lifetime = ServiceLifetime.Scoped) =>
         services.AddMongoDatabase(connectionString, databaseName).AddMongoRepositories(lifetime);
+
+    /// <summary>Registers the client, database, fluent entity model and repositories in one call.</summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="connectionString">The MongoDB connection string.</param>
+    /// <param name="databaseName">The target database name.</param>
+    /// <param name="model">Builds the entity model.</param>
+    /// <param name="lifetime">The unit-of-work and repository lifetime (scoped by default).</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddMongoRepositories(this IServiceCollection services, string connectionString,
+        string databaseName, Action<MongoModelBuilder> model, ServiceLifetime lifetime = ServiceLifetime.Scoped) =>
+        services.AddMongoDatabase(connectionString, databaseName, model).AddMongoRepositories(lifetime);
 
     /// <summary>
     ///     Registers the document-store migration runner, executor and history. Migrations are discovered in the

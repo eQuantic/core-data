@@ -82,3 +82,79 @@ public sealed class KeyedNote : IEntity<string>
 
     public void SetKey(string key) => Code = key;
 }
+
+/// <summary>
+///     Proves the fluent model end to end: collection name, id member, element rename, exclusion and value
+///     conversion — with queries rendering against the stored shape, and <c>Explain()</c> reporting it.
+/// </summary>
+[TestFixture]
+public sealed class MongoFluentModelTests : MongoIntegrationTest
+{
+    private static readonly MongoModel Model = new MongoModelBuilder()
+        .Entity<FluentGizmo>(entity => entity
+            .Collection("fluent_gizmos")
+            .Key(x => x.Code)
+            .Field(x => x.Label, "l")
+            .Ignore(x => x.Scratch)
+            .Converts(x => x.Grade, grade => grade.ToString().ToLowerInvariant(),
+                stored => Enum.Parse<GizmoGrade>(stored, ignoreCase: true)))
+        .Build();
+
+    [Test]
+    public async Task Fluent_model_shapes_the_document_and_the_queries()
+    {
+        using var db = NewDatabase();
+        var repo = db.Resolve<IAsyncRepository<FluentGizmo, string>>();
+
+        await repo.AddAsync(new FluentGizmo { Code = "g1", Label = "Widget", Scratch = "volatile", Grade = GizmoGrade.Premium });
+        await Uow(db).CommitAsync();
+
+        var raw = await db.Database.GetCollection<BsonDocument>("fluent_gizmos")
+            .Find(Builders<BsonDocument>.Filter.Eq("_id", "g1")).FirstOrDefaultAsync();
+        Assert.That(raw, Is.Not.Null, "the fluent Collection() named the collection and Key() mapped _id");
+        Assert.That(raw["l"].AsString, Is.EqualTo("Widget"), "Field() renamed the element");
+        Assert.That(raw["Grade"].AsString, Is.EqualTo("premium"), "Converts() stored the enum as a string");
+        Assert.That(raw.Contains("Scratch"), Is.False, "Ignore() excluded the member");
+
+        var byLabel = await repo.GetFilteredAsync(x => x.Label == "Widget");
+        Assert.That(byLabel.Single().Code, Is.EqualTo("g1"), "filters render against the renamed element");
+
+        var byGrade = await repo.GetFilteredAsync(x => x.Grade == GizmoGrade.Premium);
+        Assert.That(byGrade.Single().Grade, Is.EqualTo(GizmoGrade.Premium),
+            "the filter constant serialized through the member's converter");
+    }
+
+    [Test]
+    public void Explain_reports_the_mapping_decisions()
+    {
+        var report = Model.Explain();
+        Assert.That(report, Does.Contain("collection \"fluent_gizmos\""));
+        Assert.That(report, Does.Contain("id: Code \"_id\""));
+        Assert.That(report, Does.Contain("Label \"l\""));
+        Assert.That(report, Does.Contain("converts: Grade"));
+        Assert.That(report, Does.Not.Contain("Scratch"), "an ignored member leaves the contract entirely");
+    }
+}
+
+/// <summary>A graded gizmo — the enum is stored as a lower-case string via the fluent <c>Converts</c>.</summary>
+public enum GizmoGrade
+{
+    Basic,
+    Premium,
+}
+
+/// <summary>An entity mapped entirely by the fluent builder — no annotations, no driver attributes.</summary>
+public sealed class FluentGizmo : IEntity<string>
+{
+    public string Code { get; set; } = default!;
+
+    public string Label { get; set; } = "";
+
+    public string Scratch { get; set; } = "";
+
+    public GizmoGrade Grade { get; set; }
+
+    public string GetKey() => Code;
+
+    public void SetKey(string key) => Code = key;
+}

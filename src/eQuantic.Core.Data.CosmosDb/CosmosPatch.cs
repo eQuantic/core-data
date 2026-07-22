@@ -20,7 +20,7 @@ internal static class CosmosPatch
 
         foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
         {
-            var path = "/" + CosmosNaming.CamelCase(assignment.Name);
+            var path = "/" + CosmosNaming.StoredName(assignment.Member);
             switch (assignment)
             {
                 case SetAssignment set:

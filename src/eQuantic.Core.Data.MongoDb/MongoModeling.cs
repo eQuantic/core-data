@@ -14,9 +14,20 @@ internal static class MongoModeling
 {
     private static bool _registered;
     private static readonly object Gate = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, string> CollectionOverrides = new();
 
-    /// <summary>The collection name for an entity type: <c>[Entity("...")]</c>, or the type name.</summary>
-    public static string CollectionName(Type entityType) => EntityAttribute.NameFor(entityType) ?? entityType.Name;
+    /// <summary>
+    ///     The collection name for an entity type: the fluent model's <c>Collection(...)</c>, then
+    ///     <c>[Entity("...")]</c>, then the type name. The overrides live process-wide, like the driver's own
+    ///     class-map registry — the same lifecycle the rest of the mapping already has.
+    /// </summary>
+    public static string CollectionName(Type entityType) =>
+        CollectionOverrides.TryGetValue(entityType, out var overridden)
+            ? overridden
+            : EntityAttribute.NameFor(entityType) ?? entityType.Name;
+
+    /// <summary>Registers a fluent collection-name override (last declaration wins).</summary>
+    public static void SetCollectionName(Type entityType, string name) => CollectionOverrides[entityType] = name;
 
     /// <summary>Registers the annotation conventions with the driver (idempotent).</summary>
     public static void Register()
