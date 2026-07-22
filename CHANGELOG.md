@@ -1,5 +1,21 @@
 # Changelog
 
+## [5.8.0](https://github.com/eQuantic/core-data/compare/v5.7.0...v5.8.0) (2026-07-22)
+
+### Features
+
+* **core,relational,mongodb,cassandra,cosmosdb:** live-schema evolution and rich index options in the fluent migrations ([abc00f1](https://github.com/eQuantic/core-data/commit/abc00f1ee1f5cffa950e35cd5d72b479cd85cea5))
+* **core,relational,mongodb,cosmosdb,cassandra:** entity lifecycle by convention and relational optimistic concurrency ([2f6f3f7](https://github.com/eQuantic/core-data/commit/2f6f3f7a078e25604633863c522fca25dfceba51))
+* **core,relational,mongodb,cosmosdb,cassandra:** store-neutral modeling annotations with explicit precedence and a model Explain ([c7d7ffe](https://github.com/eQuantic/core-data/commit/c7d7ffeb2df41cb2b39d484ec4d9f6b91ffc9b59))
+* **core:** DataConventions — tunable lifecycle conventions with who-stamps for eQuantic.Core.DataModel shapes ([f47922c](https://github.com/eQuantic/core-data/commit/f47922cfd8458e6c297f48eaa2c3f345c5f49429))
+* **postgresql,mysql,cassandra,cosmosdb:** jsonb documents, MariaDB dialect, SASI LIKE pushdown and Cosmos GroupBy ([226484d](https://github.com/eQuantic/core-data/commit/226484d0104bf8c4b5e0117d5aa6d6a09151e2cf))
+* **relational:** declared navigations with nested includes, and opt-in transient-fault retries ([820bae5](https://github.com/eQuantic/core-data/commit/820bae5a66277db4930e55bfde85ed24fe3fa159))
+* **relational:** value converters — Value Objects and enums-as-strings mapped to stored scalars ([8dd1a35](https://github.com/eQuantic/core-data/commit/8dd1a35cb2f8909ca3c8fbe3800a707424a355a4))
+
+### Bug Fixes
+
+* **cosmosdb:** reject GroupBy honestly instead of emitting invalid SQL ([d46ecea](https://github.com/eQuantic/core-data/commit/d46ecea253edea797049de385e65dd83452abb60))
+
 ## [5.7.0](https://github.com/eQuantic/core-data/compare/v5.6.1...v5.7.0) (2026-07-22)
 
 ### Features
