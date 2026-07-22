@@ -10,6 +10,12 @@ namespace eQuantic.Core.Data.Relational;
 /// <param name="FromStored">Converts the stored value back into the member value.</param>
 public sealed record RelationalConverter(Type StoredType, Func<object?, object?> ToStored, Func<object?, object?> FromStored);
 
+/// <summary>A declared navigation: the member, the foreign-key member and which side holds it.</summary>
+/// <param name="Member">The navigation property name.</param>
+/// <param name="ForeignKey">The foreign-key member: on <b>this</b> entity for a reference, on the <b>element</b> for a collection.</param>
+/// <param name="Collection">Whether the navigation is a collection.</param>
+public sealed record RelationalNavigation(string Member, string ForeignKey, bool Collection);
+
 /// <summary>A mapped column: the entity property, its stored name and (optionally) its value converter.</summary>
 /// <param name="Property">The entity property.</param>
 /// <param name="Name">The column name (already through the dialect's naming convention or an explicit override).</param>
@@ -39,7 +45,8 @@ public abstract class RelationalEntityConfiguration
 {
     /// <summary>Initializes the configuration.</summary>
     protected RelationalEntityConfiguration(Type entityType, string tableName, IReadOnlyList<RelationalColumn> columns,
-        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null)
+        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
+        IReadOnlyList<RelationalNavigation>? navigations = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -47,6 +54,7 @@ public abstract class RelationalEntityConfiguration
         Key = key;
         KeyIsGenerated = keyIsGenerated;
         ConcurrencyToken = concurrencyToken;
+        Navigations = navigations ?? [];
     }
 
     /// <summary>The entity type.</summary>
@@ -70,6 +78,13 @@ public abstract class RelationalEntityConfiguration
     /// </summary>
     public RelationalColumn? ConcurrencyToken { get; }
 
+    /// <summary>The declared navigations (foreign-key overrides); undeclared ones resolve by convention.</summary>
+    public IReadOnlyList<RelationalNavigation> Navigations { get; }
+
+    /// <summary>Resolves a declared navigation by member name, or <c>null</c> — conventions apply then.</summary>
+    public RelationalNavigation? NavigationFor(string memberName) =>
+        Navigations.FirstOrDefault(navigation => string.Equals(navigation.Member, memberName, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Resolves a member (property) name to its column, or <c>null</c> when the member is not mapped.</summary>
     public RelationalColumn? ColumnFor(string memberName) =>
         Columns.FirstOrDefault(column => string.Equals(column.Property.Name, memberName, StringComparison.OrdinalIgnoreCase));
@@ -81,8 +96,9 @@ public sealed class RelationalEntityConfiguration<TEntity> : RelationalEntityCon
     where TEntity : class
 {
     internal RelationalEntityConfiguration(string tableName, IReadOnlyList<RelationalColumn> columns,
-        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null)
-        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken)
+        RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
+        IReadOnlyList<RelationalNavigation>? navigations = null)
+        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken, navigations)
     {
     }
 }
@@ -137,6 +153,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, string> _columnOverrides = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, RelationalConverter> _converters = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<RelationalNavigation> _navigations = [];
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
@@ -179,6 +196,36 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     public RelationalEntityBuilder<TEntity> Ignore<TMember>(Expression<Func<TEntity, TMember>> selector)
     {
         _ignored.Add(selector.GetMemberName());
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a <b>reference navigation with an explicit foreign key</b> — for schemas the
+    ///     <c>{Nav}Id</c> convention does not fit. <c>Include</c> loads it with one follow-up <c>IN</c> query.
+    /// </summary>
+    /// <typeparam name="TTarget">The referenced entity type.</typeparam>
+    /// <param name="navigation">The navigation selector.</param>
+    /// <param name="foreignKey">The foreign-key member on <b>this</b> entity.</param>
+    public RelationalEntityBuilder<TEntity> Reference<TTarget>(
+        Expression<Func<TEntity, TTarget?>> navigation, Expression<Func<TEntity, object?>> foreignKey)
+        where TTarget : class
+    {
+        _navigations.Add(new RelationalNavigation(navigation.GetMemberName(), foreignKey.GetMemberName(), Collection: false));
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a <b>collection navigation with an explicit foreign key</b> — for schemas the
+    ///     <c>{Entity}Id</c> convention does not fit. <c>Include</c> loads it with one follow-up <c>IN</c> query.
+    /// </summary>
+    /// <typeparam name="TElement">The element entity type.</typeparam>
+    /// <param name="navigation">The navigation selector.</param>
+    /// <param name="foreignKey">The foreign-key member on the <b>element</b>, pointing back at this entity's key.</param>
+    public RelationalEntityBuilder<TEntity> Collection<TElement>(
+        Expression<Func<TEntity, IEnumerable<TElement>?>> navigation, Expression<Func<TElement, object?>> foreignKey)
+        where TElement : class
+    {
+        _navigations.Add(new RelationalNavigation(navigation.GetMemberName(), foreignKey.GetMemberName(), Collection: true));
         return this;
     }
 
@@ -270,7 +317,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         }
 
         return new RelationalEntityConfiguration<TEntity>(
-            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken);
+            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken, _navigations);
     }
 
     private bool IsMapped(Type type)

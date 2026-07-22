@@ -226,6 +226,18 @@ indexing policy).
   enum-as-string or any domain type to a stored scalar, applied everywhere the member crosses the
   engine: the DDL column type, inserts and updates (set-based included), filter values and
   materialization. The domain type never leaks to the driver.
+- **Declared navigations and nested includes (relational)** —
+  `Reference(x => x.Order, x => x.OrderCode)` / `Collection(x => x.Invoices, i => i.OrderCode)`
+  override the `{Nav}Id`/`{Entity}Id` conventions for schemas that do not follow them, and a
+  dotted include path (`Include("Invoices.Order")`) loads level by level — one `IN` query per
+  segment, never a join explosion.
+- **Transient-fault retries (relational, opt-in)** — `services.AddRelationalResilience(...)`:
+  reads retry automatically on driver-transient failures (`DbException.IsTransient`) with a
+  connection reset and exponential backoff; commits retry only behind `RetryCommits` (a lost
+  commit acknowledgement may mean the batch applied — the caveat is documented, and concurrency
+  tokens make a double-apply loud); nothing retries inside an explicit transaction. Attempts land
+  on the span (`equantic.retries`). The document and wide-column drivers ship native retry
+  policies, so they need none of this.
 - **OpenTelemetry built in** — subscribe to the `eQuantic.Core.Data` `ActivitySource` and every
   provider emits spans with the statement (placeholders, never values) plus the engine's own facts:
   client evaluation, split-query count, partition scoping, staged write counts.

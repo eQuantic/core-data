@@ -31,6 +31,8 @@ public sealed class SaleOrder : IEntity<Guid>
 
     public List<OrderItem> Items { get; set; } = [];
 
+    public List<Invoice> Invoices { get; set; } = [];
+
     public Guid GetKey() => Id;
 
     public void SetKey(Guid key) => Id = key;
@@ -80,6 +82,22 @@ public sealed class Document : IEntity<Guid>, IEntityTimeMark, IEntityTimeTrack,
     public DateTime? UpdatedAt { get; set; }
 
     public DateTime? DeletedAt { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>An entity whose foreign keys do <b>not</b> follow the conventions — the model declares them.</summary>
+public sealed class Invoice : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+
+    public Guid OrderCode { get; set; }
+
+    public decimal Amount { get; set; }
+
+    public SaleOrder? Order { get; set; }
 
     public Guid GetKey() => Id;
 
@@ -147,9 +165,13 @@ public sealed class Ticket : IEntity<long>
 internal static class TestSchema
 {
     public static void Configure(RelationalModelBuilder builder) => builder
-        .Entity<SaleOrder>(entity => entity.Table("sale_orders"))
+        .Entity<SaleOrder>(entity => entity
+            .Table("sale_orders")
+            .Collection(x => x.Invoices, invoice => invoice.OrderCode))
         .Entity<Buyer>(_ => { })
         .Entity<OrderItem>(_ => { })
+        .Entity<Invoice>(entity => entity
+            .Reference(x => x.Order, x => x.OrderCode))
         .Entity<LegacyNote>(entity => entity.Table("legacy_notes"))
         .Entity<Document>(entity => entity.ConcurrencyToken(x => x.Version))
         .Entity<Subscriber>(entity => entity
@@ -174,6 +196,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Document>(document => document
             .EnsureCollection())
         .For<Subscriber>(subscriber => subscriber
+            .EnsureCollection())
+        .For<Invoice>(invoice => invoice
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
             .EnsureCollection());

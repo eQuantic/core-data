@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Relational;
+using eQuantic.Core.Data.Relational.Extensions;
 using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
@@ -452,6 +453,43 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         await docs.ModifyAsync(fresh);
         await Uow(db).CommitAsync();
         Assert.That(fresh.Version, Is.EqualTo(2), "reload + retry succeeds and bumps again");
+    }
+
+    // ---------------------------------------------------------------- declared navigations + resilience wiring
+
+    [Test]
+    public async Task Navigation_overrides_and_nested_includes_load_by_declared_foreign_keys()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        var invoices = db.Resolve<IAsyncRepository<Invoice, Guid>>();
+
+        var order = NewOrder("nav");
+        var other = NewOrder("other");
+        await Seed(db, order, other);
+        await invoices.AddAsync(new Invoice { Id = Guid.NewGuid(), OrderCode = order.Id, Amount = 10m });
+        await invoices.AddAsync(new Invoice { Id = Guid.NewGuid(), OrderCode = order.Id, Amount = 20m });
+        await invoices.AddAsync(new Invoice { Id = Guid.NewGuid(), OrderCode = other.Id, Amount = 5m });
+        await Uow(db).CommitAsync();
+
+        var loaded = (await repo.GetAsync(order.Id, new QueryOptions<SaleOrder>().Include("Invoices")))!;
+        Assert.That(loaded.Invoices.Select(x => x.Amount), Is.EquivalentTo(new[] { 10m, 20m }),
+            "the collection loaded through its declared foreign key (OrderCode, not the convention)");
+
+        var nested = (await repo.GetAsync(order.Id, new QueryOptions<SaleOrder>().Include("Invoices.Order")))!;
+        Assert.That(nested.Invoices, Has.Count.EqualTo(2));
+        Assert.That(nested.Invoices.Select(x => x.Order?.Customer), Is.All.EqualTo("nav"),
+            "the dotted path loaded the second level through its declared foreign key");
+    }
+
+    [Test]
+    public async Task Resilience_policy_wires_through_di_and_reads_still_run()
+    {
+        using var db = await NewSchemaAsync(services => services.AddRelationalResilience(o => o.MaxRetries = 2));
+        await Seed(db, NewOrder("resilient", 1m));
+
+        Assert.That((await OrderRepo(db).GetFilteredAsync(x => x.Customer == "resilient")).Single().Total, Is.EqualTo(1m));
+        Assert.That(await OrderRepo(db).CountAsync(), Is.EqualTo(1), "reads run whole under the policy");
     }
 
     // ---------------------------------------------------------------- value converters

@@ -25,6 +25,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
     internal RelationalModel Model { get; }
 
     private readonly List<PendingWrite> _pending = [];
+    private readonly RelationalResilienceOptions? _resilience;
     private DbConnection? _connection;
     private DbTransaction? _transaction;
     private QueryFilters? _queryFilters;
@@ -37,6 +38,38 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         DataSource = dataSource;
         Dialect = dialect;
         Model = model;
+        _resilience = serviceProvider.GetService(typeof(RelationalResilienceOptions)) as RelationalResilienceOptions;
+    }
+
+    /// <summary>
+    ///     Runs an operation under the transient-retry policy — a no-op without one, for a commit without the
+    ///     commit opt-in, and inside an explicit transaction (a broken transaction cannot be resumed).
+    /// </summary>
+    internal async Task<T> RetryAsync<T>(bool write, Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
+    {
+        var enabled = _resilience is { MaxRetries: > 0 } policy
+                      && (!write || policy.RetryCommits)
+                      && _transaction is null;
+        return enabled
+            ? await RelationalResilience.ExecuteAsync(_resilience!, operation, ResetConnectionAsync, cancellationToken).ConfigureAwait(false)
+            : await operation(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ResetConnectionAsync()
+    {
+        if (_connection is not null)
+        {
+            try
+            {
+                await _connection.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // The connection is already broken; disposal noise carries no information.
+            }
+
+            _connection = null;
+        }
     }
 
     internal RelationalEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
@@ -84,22 +117,25 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
         var projector = new RelationalProjector<TResult>(
             shape.Bindings.Select(binding => binding.Target).ToList(), shape.ConstructorProjection);
-        var results = new List<TResult>();
-        await using var command = await CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        return await RetryAsync<IReadOnlyList<TResult>>(write: false, async _ =>
         {
-            var values = new object?[shape.Bindings.Count];
-            for (var index = 0; index < values.Length; index++)
+            var results = new List<TResult>();
+            await using var command = await CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                values[index] = RelationalMaterializer.ChangeValue(
-                    reader.IsDBNull(index) ? null : reader.GetValue(index), projector.TargetType(index));
+                var values = new object?[shape.Bindings.Count];
+                for (var index = 0; index < values.Length; index++)
+                {
+                    values[index] = RelationalMaterializer.ChangeValue(
+                        reader.IsDBNull(index) ? null : reader.GetValue(index), projector.TargetType(index));
+                }
+
+                results.Add(projector.Create(values));
             }
 
-            results.Add(projector.Create(values));
-        }
-
-        return results;
+            return results;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------- connection / command plumbing
@@ -175,6 +211,12 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         activity?.SetTag("db.system", Dialect.System);
         activity?.SetTag("equantic.writes", writes.Count);
 
+        // Behind the RetryCommits opt-in, a transient failure re-runs the whole flush (its transaction rolled back).
+        return await RetryAsync(write: true, _ => FlushAsync(writes, cancellationToken), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<int> FlushAsync(List<PendingWrite> writes, CancellationToken cancellationToken)
+    {
         var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
 
         // Inside an explicit transaction the flush joins it (durable on CommitTransactionAsync); otherwise the

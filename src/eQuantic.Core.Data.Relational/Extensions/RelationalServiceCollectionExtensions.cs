@@ -38,6 +38,24 @@ public static class RelationalServiceCollectionExtensions
     }
 
     /// <summary>
+    ///     Opts the relational engine into <b>transient-fault retries</b>: reads retry automatically on
+    ///     driver-transient failures (with connection reset and exponential backoff), commits only behind
+    ///     <see cref="RelationalResilienceOptions.RetryCommits" />, and nothing retries inside an explicit
+    ///     transaction. See <see cref="RelationalResilienceOptions" /> for the honest semantics.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Optional policy tuning (retries, backoff, commit opt-in).</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddRelationalResilience(this IServiceCollection services,
+        Action<RelationalResilienceOptions>? configure = null)
+    {
+        var options = new RelationalResilienceOptions();
+        configure?.Invoke(options);
+        services.TryAddSingleton(options);
+        return services;
+    }
+
+    /// <summary>
     ///     Registers the SQL-DDL migration runner, executor and history. Migrations are discovered in the supplied
     ///     assemblies (the calling assembly when none are given). Resolve <see cref="IMigrationRunner" /> and call
     ///     <c>RunAsync</c> on startup.

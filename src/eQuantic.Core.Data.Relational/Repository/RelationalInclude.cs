@@ -4,15 +4,17 @@ using System.Reflection;
 namespace eQuantic.Core.Data.Relational.Repository;
 
 /// <summary>
-///     Loads <c>QueryOptions.Include</c> navigation paths with <b>one follow-up IN query per path</b> — no join
-///     explosion, no N+1. Two shapes are supported, resolved by convention over the registered model:
+///     Loads <c>QueryOptions.Include</c> navigation paths with <b>one follow-up IN query per path segment</b> —
+///     no join explosion, no N+1. Two shapes are supported, resolved from the model's declared navigations
+///     (<c>Reference(...)</c>/<c>Collection(...)</c> foreign-key overrides) or by convention:
 ///     <list type="bullet">
-///         <item><b>reference</b> (<c>x =&gt; x.Customer</c>): the entity holds <c>{Nav}Id</c>, matched to the
-///         referenced entity's key; the match populates the navigation.</item>
-///         <item><b>collection</b> (<c>x =&gt; x.Items</c>): the element entities hold <c>{Entity}Id</c> back to
-///         the entity's key; the matches populate the navigation list.</item>
+///         <item><b>reference</b> (<c>x =&gt; x.Customer</c>): the entity holds the foreign key
+///         (<c>{Nav}Id</c> by convention), matched to the referenced entity's key.</item>
+///         <item><b>collection</b> (<c>x =&gt; x.Items</c>): the elements hold the foreign key
+///         (<c>{Entity}Id</c> by convention) back to the entity's key.</item>
 ///     </list>
-///     Both entity types must be registered in the <see cref="RelationalModel" />.
+///     A dotted path (<c>"Items.Product"</c>) loads level by level — each segment costs one query over the
+///     previous segment's results. Both entity types must be registered in the <see cref="RelationalModel" />.
 /// </summary>
 internal static class RelationalInclude
 {
@@ -30,44 +32,55 @@ internal static class RelationalInclude
 
         foreach (var path in paths)
         {
-            if (!string.IsNullOrWhiteSpace(path))
+            if (string.IsNullOrWhiteSpace(path))
             {
-                await ApplyPathAsync(unitOfWork, entities, path.Trim(), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            IReadOnlyList<object> current = entities;
+            var currentType = typeof(TEntity);
+            foreach (var segment in path.Split('.', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                (current, currentType) = await ApplySegmentAsync(unitOfWork, current, currentType, segment, cancellationToken)
+                    .ConfigureAwait(false);
+                if (current.Count == 0)
+                {
+                    break;
+                }
             }
         }
     }
 
-    private static async Task ApplyPathAsync<TEntity>(RelationalUnitOfWork unitOfWork, List<TEntity> entities,
-        string path, CancellationToken cancellationToken)
-        where TEntity : class
+    /// <summary>Loads one path segment into the current level's entities; returns the loaded targets for the next level.</summary>
+    private static async Task<(IReadOnlyList<object> Targets, Type Type)> ApplySegmentAsync(
+        RelationalUnitOfWork unitOfWork, IReadOnlyList<object> entities, Type entityType, string segment,
+        CancellationToken cancellationToken)
     {
-        var navigation = typeof(TEntity).GetProperty(path, Members)
+        var navigation = entityType.GetProperty(segment, Members)
                          ?? throw new NotSupportedException(
-                             $"Cannot include '{path}': '{typeof(TEntity).Name}' has no such navigation property.");
+                             $"Cannot include '{segment}': '{entityType.Name}' has no such navigation property.");
 
-        if (ElementType(navigation.PropertyType) is { } elementType)
-        {
-            await CollectionAsync(unitOfWork, entities, navigation, elementType, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await ReferenceAsync(unitOfWork, entities, navigation, cancellationToken).ConfigureAwait(false);
-        }
+        return ElementType(navigation.PropertyType) is { } elementType
+            ? (await CollectionAsync(unitOfWork, entities, entityType, navigation, elementType, cancellationToken).ConfigureAwait(false), elementType)
+            : (await ReferenceAsync(unitOfWork, entities, entityType, navigation, cancellationToken).ConfigureAwait(false), navigation.PropertyType);
     }
 
-    private static async Task ReferenceAsync<TEntity>(RelationalUnitOfWork unitOfWork, List<TEntity> entities,
-        PropertyInfo navigation, CancellationToken cancellationToken)
-        where TEntity : class
+    private static async Task<IReadOnlyList<object>> ReferenceAsync(RelationalUnitOfWork unitOfWork,
+        IReadOnlyList<object> entities, Type entityType, PropertyInfo navigation, CancellationToken cancellationToken)
     {
         var configuration = unitOfWork.Model.For(navigation.PropertyType);
-        var foreignKey = typeof(TEntity).GetProperty(navigation.Name + "Id", Members)
-                         ?? throw new NotSupportedException(
-                             $"Cannot include '{navigation.Name}': no '{navigation.Name}Id' property found on '{typeof(TEntity).Name}'.");
 
-        var ids = entities.Select(entity => foreignKey.GetValue(entity)).Where(id => id is not null).Distinct().ToList();
+        // The declared navigation wins; the {Nav}Id convention covers the rest.
+        var foreignKeyName = unitOfWork.Model.For(entityType).NavigationFor(navigation.Name)?.ForeignKey
+                             ?? navigation.Name + "Id";
+        var foreignKey = entityType.GetProperty(foreignKeyName, Members)
+                         ?? throw new NotSupportedException(
+                             $"Cannot include '{navigation.Name}': no '{foreignKeyName}' property found on '{entityType.Name}'.");
+
+        var ids = entities.Select(foreignKey.GetValue).Where(id => id is not null).Distinct().ToList();
         if (ids.Count == 0)
         {
-            return;
+            return [];
         }
 
         var referenced = await LoadAsync(unitOfWork, configuration, configuration.Key, ids, cancellationToken).ConfigureAwait(false);
@@ -80,23 +93,27 @@ internal static class RelationalInclude
                 navigation.SetValue(entity, match);
             }
         }
+
+        return referenced;
     }
 
-    private static async Task CollectionAsync<TEntity>(RelationalUnitOfWork unitOfWork, List<TEntity> entities,
-        PropertyInfo navigation, Type elementType, CancellationToken cancellationToken)
-        where TEntity : class
+    private static async Task<IReadOnlyList<object>> CollectionAsync(RelationalUnitOfWork unitOfWork,
+        IReadOnlyList<object> entities, Type entityType, PropertyInfo navigation, Type elementType,
+        CancellationToken cancellationToken)
     {
         var configuration = unitOfWork.Model.For(elementType);
-        var parentConfiguration = unitOfWork.Configuration<TEntity>();
-        var foreignKeyName = typeof(TEntity).Name + "Id";
+        var parentConfiguration = unitOfWork.Model.For(entityType);
+
+        // The declared navigation wins; the {Entity}Id convention covers the rest.
+        var foreignKeyName = parentConfiguration.NavigationFor(navigation.Name)?.ForeignKey ?? entityType.Name + "Id";
         var foreignKey = configuration.ColumnFor(foreignKeyName)
                          ?? throw new NotSupportedException(
                              $"Cannot include '{navigation.Name}': no '{foreignKeyName}' property found on '{elementType.Name}'.");
 
-        var keys = entities.Select(entity => parentConfiguration.Key.Property.GetValue(entity)).Where(key => key is not null).Distinct().ToList();
+        var keys = entities.Select(parentConfiguration.Key.Property.GetValue).Where(key => key is not null).Distinct().ToList();
         if (keys.Count == 0)
         {
-            return;
+            return [];
         }
 
         var elements = await LoadAsync(unitOfWork, configuration, foreignKey, keys, cancellationToken).ConfigureAwait(false);
@@ -116,6 +133,8 @@ internal static class RelationalInclude
 
             navigation.SetValue(entity, list);
         }
+
+        return elements;
     }
 
     private static async Task<List<object>> LoadAsync(RelationalUnitOfWork unitOfWork,

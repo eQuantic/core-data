@@ -107,9 +107,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         {
             var sql = $"SELECT COUNT(*) FROM {_dialect.Quote(_configuration.TableName)}"
                       + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty);
-            await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
-            var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-            return Convert.ToInt64(result);
+            return await UnitOfWork.RetryAsync(write: false, async _ =>
+            {
+                await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+                var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                return Convert.ToInt64(result);
+            }, cancellationToken).ConfigureAwait(false);
         }
 
         return (await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false)).Count;
@@ -175,21 +178,22 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     /// <param name="parameters">The values bound as <c>@p0…</c>, in order.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The materialized entities.</returns>
-    public async Task<IReadOnlyList<TEntity>> FromSqlAsync(string sql, IReadOnlyList<object?>? parameters = null,
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = await UnitOfWork.CommandAsync(sql,
-            (parameters ?? []).Select(_dialect.BindValue).ToList(), cancellationToken).ConfigureAwait(false);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-
-        var entities = new List<TEntity>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+    public Task<IReadOnlyList<TEntity>> FromSqlAsync(string sql, IReadOnlyList<object?>? parameters = null,
+        CancellationToken cancellationToken = default) =>
+        UnitOfWork.RetryAsync<IReadOnlyList<TEntity>>(write: false, async _ =>
         {
-            entities.Add(RelationalMaterializer.MaterializeByName<TEntity>(reader, _configuration));
-        }
+            await using var command = await UnitOfWork.CommandAsync(sql,
+                (parameters ?? []).Select(_dialect.BindValue).ToList(), cancellationToken).ConfigureAwait(false);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        return entities;
-    }
+            var entities = new List<TEntity>();
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                entities.Add(RelationalMaterializer.MaterializeByName<TEntity>(reader, _configuration));
+            }
+
+            return entities;
+        }, cancellationToken);
 
     // ---------------------------------------------------------------- min / max / average
 
@@ -226,9 +230,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             {
                 var sql = $"SELECT {aggregate(column)} FROM {_dialect.Quote(_configuration.TableName)}"
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty);
-                await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
-                var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                return result is null or DBNull ? default! : convert(result);
+                return await UnitOfWork.RetryAsync(write: false, async _ =>
+                {
+                    await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+                    var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                    return result is null or DBNull ? default! : convert(result);
+                }, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -587,7 +594,15 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     // ---------------------------------------------------------------- query plumbing
 
-    internal async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
+    internal Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
+        bool orderByKeyWhenUnsorted, CancellationToken cancellationToken,
+        Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null) =>
+        // The read funnel runs whole under the transient-retry policy (a no-op unless one is registered).
+        UnitOfWork.RetryAsync(write: false,
+            _ => SelectCoreAsync(options, limit, offset, orderByKeyWhenUnsorted, cancellationToken, extraFilter, mapColumns),
+            cancellationToken);
+
+    private async Task<List<TEntity>> SelectCoreAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
         bool orderByKeyWhenUnsorted, CancellationToken cancellationToken,
         Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null)
     {
@@ -730,15 +745,18 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             {
                 var sql = $"SELECT SUM({_dialect.Quote(column.Name)}) FROM {_dialect.Quote(_configuration.TableName)}"
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty);
-                await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
-                var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                if (result is null or DBNull)
+                return await UnitOfWork.RetryAsync(write: false, async _ =>
                 {
-                    return default!;
-                }
+                    await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+                    var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                    if (result is null or DBNull)
+                    {
+                        return default!;
+                    }
 
-                var target = Nullable.GetUnderlyingType(typeof(TSum)) ?? typeof(TSum);
-                return (TSum)Convert.ChangeType(result, target);
+                    var target = Nullable.GetUnderlyingType(typeof(TSum)) ?? typeof(TSum);
+                    return (TSum)Convert.ChangeType(result, target);
+                }, cancellationToken).ConfigureAwait(false);
             }
         }
 
