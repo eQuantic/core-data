@@ -90,6 +90,21 @@ internal static class CassandraCqlRenderer
 
                 clauses.Add(Tuple(tuple, configuration, values, ref requiresFiltering));
                 return;
+            case StringFilter text:
+                EnsureColumn(configuration, text.Member);
+                clauses.Add(Like(configuration, text.Member, text.Operator switch
+                {
+                    StringOperator.StartsWith => EscapedFragment(text.Value) + "%",
+                    StringOperator.EndsWith => "%" + EscapedFragment(text.Value),
+                    _ => "%" + EscapedFragment(text.Value) + "%",
+                }, prefixOnly: text.Operator == StringOperator.StartsWith, values));
+                return;
+            case FunctionFilter { Function: "Like", Operator: null, Arguments: [string pattern] } like:
+                EnsureColumn(configuration, like.Member);
+                clauses.Add(Like(configuration, like.Member, pattern,
+                    prefixOnly: !pattern.StartsWith('%') && pattern.EndsWith('%') && pattern.IndexOf('%') == pattern.Length - 1,
+                    values));
+                return;
             default:
                 throw new NotSupportedException($"Cannot render the filter '{filter.GetType().Name}' to CQL.");
         }
@@ -103,6 +118,39 @@ internal static class CassandraCqlRenderer
             throw new NotSupportedException($"'{member}' is not a mapped column; the clause runs client-side.");
         }
     }
+
+    /// <summary>
+    ///     Renders a <c>LIKE</c> — only on a column the model declared a search index for, and only when the
+    ///     index's mode can serve the pattern; every refusal degrades to the gated client-side residual. The
+    ///     index serves the match, so <c>ALLOW FILTERING</c> is not required.
+    /// </summary>
+    private static string Like(CassandraEntityConfiguration configuration, string member, string pattern,
+        bool prefixOnly, List<object?> values)
+    {
+        if (!configuration.CanLike(member, out var mode))
+        {
+            throw new NotSupportedException(
+                $"'{member}' has no search index; declare one with SearchIndex(x => x.{member}) to push LIKE down, " +
+                "or run the match client-side.");
+        }
+
+        if (mode == CassandraSearchMode.Prefix && !prefixOnly)
+        {
+            throw new NotSupportedException(
+                $"The search index on '{member}' matches prefixes only; declare it with CassandraSearchMode.Contains " +
+                "for substring matches, or run the match client-side.");
+        }
+
+        values.Add(pattern);
+        return $"{member} LIKE ?";
+    }
+
+    /// <summary>SASI's <c>LIKE</c> has no escape clause — a literal wildcard in the value cannot push down.</summary>
+    private static string EscapedFragment(string value) =>
+        value.IndexOfAny(['%', '_']) < 0
+            ? value
+            : throw new NotSupportedException(
+                "The value contains a literal '%' or '_' and Cassandra LIKE has no escape syntax; run the match client-side.");
 
     private static string Comparison(ComparisonFilter filter, CassandraEntityConfiguration configuration, List<object?> values, ref bool requiresFiltering)
     {

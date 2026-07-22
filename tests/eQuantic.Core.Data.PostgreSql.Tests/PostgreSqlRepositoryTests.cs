@@ -388,6 +388,30 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"));
     }
 
+    // ---------------------------------------------------------------- jsonb document columns
+
+    [Test]
+    public async Task Jsonb_dictionary_round_trips_and_filters_natively()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        var tagged = NewOrder("doc", 1m);
+        tagged.Attributes = new Dictionary<string, string> { ["tier"] = "gold", ["region"] = "emea" };
+        await Seed(db, tagged, NewOrder("plain", 2m));
+
+        var loaded = (await repo.GetAsync(tagged.Id))!;
+        Assert.That(loaded.Attributes, Is.EqualTo(tagged.Attributes), "the dictionary round-trips through jsonb");
+
+        var byKey = await repo.GetFilteredAsync(x => x.Attributes.ContainsKey("tier"));
+        Assert.That(byKey.Single().Customer, Is.EqualTo("doc"), "ContainsKey pushed down as the jsonb ? operator");
+
+        var byValue = await repo.GetFilteredAsync(x => x.Attributes["tier"] == "gold");
+        Assert.That(byValue.Single().Customer, Is.EqualTo("doc"), "the indexer pushed down as jsonb ->>");
+
+        Assert.That(await repo.CountAsync(new QueryOptions<SaleOrder>().Where(x => x.Attributes["tier"] == "silver")),
+            Is.Zero, "value mismatches filter out on the server");
+    }
+
     // ---------------------------------------------------------------- typed Union / UnionAll
 
     [Test]

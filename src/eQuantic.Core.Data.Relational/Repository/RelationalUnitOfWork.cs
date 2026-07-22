@@ -124,6 +124,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             var parameter = command.CreateParameter();
             parameter.ParameterName = "p" + index;
             parameter.Value = parameters[index] ?? DBNull.Value;
+            Dialect.ConfigureParameter(parameter, parameters[index]);
             command.Parameters.Add(parameter);
         }
 
@@ -376,6 +377,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             var parameter = command.CreateParameter();
             parameter.ParameterName = "p" + index;
             parameter.Value = parameters[index] ?? DBNull.Value;
+            Dialect.ConfigureParameter(parameter, parameters[index]);
             command.Parameters.Add(parameter);
         }
 

@@ -97,6 +97,28 @@ public sealed class CosmosProviderTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task Typed_group_by_runs_as_a_server_side_group()
+    {
+        await Seed(
+            CosmosProduct.New("A", Partition, 1, 10m),
+            CosmosProduct.New("B", Partition, 3, 20m),
+            CosmosProduct.New("C", Partition + "f", 4, 5m));
+
+        var grouped = (IGroupedReadRepository<CosmosProduct>)Repo;
+        var groups = await grouped.GroupByAsync(x => x.Category,
+            g => new { Category = g.Key, Items = g.Count(), Value = g.Sum(x => x.Price) },
+            options: InPartition);
+
+        Assert.That(groups.Single(), Is.EqualTo(new { Category = Partition, Items = 2, Value = 30m }),
+            "the SDK translated the rebuilt (key, values) projection to a GROUP BY");
+
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Category, g => new { g.Key },
+                having: g => g.Count() > 1),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"),
+            "Cosmos SQL has no HAVING and the contract says so");
+    }
+
+    [Test]
     public async Task DeleteMany_removes_matching_documents()
     {
         await Seed(

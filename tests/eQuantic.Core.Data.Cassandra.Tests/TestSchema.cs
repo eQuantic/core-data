@@ -16,7 +16,8 @@ internal static class TestSchema
         .Entity<Reading>(entity => entity
             .Table("readings")
             .PartitionKey(x => x.SensorId)
-            .ClusteringKey(x => x.At))
+            .ClusteringKey(x => x.At)
+            .SearchIndex(x => x.Quality))
         .Entity<Tally>(entity => entity
             .Table("tallies")
             .PartitionKey(x => x.Space)

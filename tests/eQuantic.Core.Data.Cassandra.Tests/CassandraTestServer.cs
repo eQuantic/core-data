@@ -31,7 +31,13 @@ public sealed class CassandraTestServer
     {
         try
         {
-            _container = new CassandraBuilder().WithImage("cassandra:4.1").Build();
+            // SASI is off by default in 4.x; the search-index (LIKE pushdown) tests need it enabled in the yaml.
+            _container = new CassandraBuilder().WithImage("cassandra:4.1")
+                .WithEntrypoint("bash", "-c",
+                    "sed -ri 's/^#?[[:space:]]*(enable_sasi_indexes|sasi_indexes_enabled):.*//' /etc/cassandra/cassandra.yaml" +
+                    " && echo 'sasi_indexes_enabled: true' >> /etc/cassandra/cassandra.yaml" +
+                    " && exec docker-entrypoint.sh cassandra -f")
+                .Build();
             await _container.StartAsync();
             Host = _container.Hostname;
             Port = _container.GetMappedPublicPort(9042);

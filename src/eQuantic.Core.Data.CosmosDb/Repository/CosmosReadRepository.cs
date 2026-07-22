@@ -1,4 +1,6 @@
 using System.Linq.Expressions;
+using System.Reflection;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -23,7 +25,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     IExplainableRepository<TEntity>,
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
-    IAggregateReadRepository<TEntity>
+    IAggregateReadRepository<TEntity>,
+    IGroupedReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -263,6 +266,112 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
             _ => throw new NotSupportedException(
                 $"Average over '{typeof(TValue).Name}' is not supported; select a numeric member."),
         };
+    }
+
+    // ---------------------------------------------------------------- grouped reads
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Runs as a server-side <c>GROUP BY</c> through the SDK's LINQ pipeline — the filter applies before
+    ///     grouping (pinning the partition when it can) and only the grouped rows travel. Two Cosmos SQL
+    ///     restrictions are surfaced honestly: there is no <c>HAVING</c> (group without it and filter the
+    ///     returned groups client-side — they are already small), and the key is a <b>single</b> member.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GroupByAsync<TGroup, TResult>(
+        Expression<Func<TEntity, TGroup>> keySelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, TResult>> resultSelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, bool>>? having = null,
+        QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (options is { Sortings.Count: > 0 })
+        {
+            throw new NotSupportedException("Sorting does not apply to a grouped read; order the grouped result client-side.");
+        }
+
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not apply to a grouped projection; drop the includes.");
+        }
+
+        // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
+        var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
+
+        if (having is not null)
+        {
+            throw new NotSupportedException(
+                "Cosmos SQL has no HAVING; group without it and filter the returned groups client-side.");
+        }
+
+        if (group.Key is not [{ Name: null }])
+        {
+            throw new NotSupportedException(
+                "Cosmos SQL groups by a single member; group by one member, or group client-side over the fetched rows.");
+        }
+
+        var result = RebuildResultSelector<TGroup, TResult>(group);
+        return await MaterializeAsync(Query(options).GroupBy(keySelector, result), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    ///     Rebuilds the interpreted projection as the SDK-translatable two-parameter shape:
+    ///     <c>(key, values) =&gt; new { key, Count = values.Count(), … }</c>.
+    /// </summary>
+    private static Expression<Func<TGroup, IEnumerable<TEntity>, TResult>> RebuildResultSelector<TGroup, TResult>(GroupQuery group)
+    {
+        var key = Expression.Parameter(typeof(TGroup), "key");
+        var values = Expression.Parameter(typeof(IEnumerable<TEntity>), "values");
+
+        var arguments = group.Bindings.Select(binding => binding switch
+        {
+            GroupKeyBinding { KeyName: null } => key,
+            GroupKeyBinding named => (Expression)Expression.PropertyOrField(key, named.KeyName!),
+            GroupAggregateBinding aggregate => AggregateCall(values, aggregate),
+            var unknown => throw new NotSupportedException($"Unknown group binding '{unknown.GetType().Name}'."),
+        }).ToList();
+
+        Expression body;
+        if (group.ConstructorProjection)
+        {
+            var members = group.Bindings
+                .Select(MemberInfo (binding) => typeof(TResult).GetProperty(binding.Target)
+                                               ?? throw new NotSupportedException(
+                                                   $"'{typeof(TResult).Name}' has no member '{binding.Target}'."))
+                .ToList();
+            body = Expression.New(typeof(TResult).GetConstructors().Single(), arguments, members);
+        }
+        else
+        {
+            body = Expression.MemberInit(Expression.New(typeof(TResult)),
+                group.Bindings.Select((binding, index) =>
+                    Expression.Bind(typeof(TResult).GetProperty(binding.Target)!, arguments[index])));
+        }
+
+        return Expression.Lambda<Func<TGroup, IEnumerable<TEntity>, TResult>>(body, key, values);
+
+        static Expression AggregateCall(ParameterExpression values, GroupAggregateBinding aggregate)
+        {
+            if (aggregate.Aggregate == GroupAggregate.Count)
+            {
+                return Expression.Call(typeof(Enumerable), nameof(Enumerable.Count), [typeof(TEntity)], values);
+            }
+
+            var entity = Expression.Parameter(typeof(TEntity), "x");
+            Expression member = entity;
+            foreach (var segment in aggregate.Member!.Split('.'))
+            {
+                member = Expression.PropertyOrField(member, segment);
+            }
+
+            var selector = Expression.Lambda(member, entity);
+            return aggregate.Aggregate switch
+            {
+                GroupAggregate.Sum => Expression.Call(typeof(Enumerable), nameof(Enumerable.Sum), [typeof(TEntity)], values, selector),
+                GroupAggregate.Average => Expression.Call(typeof(Enumerable), nameof(Enumerable.Average), [typeof(TEntity)], values, selector),
+                GroupAggregate.Min => Expression.Call(typeof(Enumerable), nameof(Enumerable.Min), [typeof(TEntity), member.Type], values, selector),
+                _ => Expression.Call(typeof(Enumerable), nameof(Enumerable.Max), [typeof(TEntity), member.Type], values, selector),
+            };
+        }
     }
 
     // ---------------------------------------------------------------- continuation paging

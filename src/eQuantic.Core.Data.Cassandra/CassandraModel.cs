@@ -24,7 +24,7 @@ public abstract class CassandraEntityConfiguration
     /// <summary>Initializes the configuration.</summary>
     protected CassandraEntityConfiguration(Type entityType, string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
-        IReadOnlyList<string>? counterColumns = null)
+        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -33,6 +33,7 @@ public abstract class CassandraEntityConfiguration
         Columns = columns;
         KeyColumn = keyColumn;
         CounterColumns = counterColumns ?? [];
+        SearchColumns = searchColumns ?? [];
     }
 
     /// <summary>The entity type.</summary>
@@ -56,8 +57,19 @@ public abstract class CassandraEntityConfiguration
     /// <summary>The counter columns (a counter table mutates them through increments, never inserts).</summary>
     public IReadOnlyList<string> CounterColumns { get; }
 
+    /// <summary>The search-indexed columns — <c>LIKE</c> pushes down on these (a SASI index backs each one).</summary>
+    public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; }
+
     /// <summary>Whether <paramref name="column" /> is a counter column.</summary>
     public bool IsCounter(string column) => CounterColumns.Any(counter => Same(counter, column));
+
+    /// <summary>Whether <paramref name="column" /> is search-indexed, and in which mode.</summary>
+    public bool CanLike(string column, out CassandraSearchMode mode)
+    {
+        var search = SearchColumns.FirstOrDefault(candidate => Same(candidate.Column, column));
+        mode = search?.Mode ?? CassandraSearchMode.Prefix;
+        return search is not null;
+    }
 
     /// <summary>Whether <paramref name="column" /> is part of the primary key (partition or clustering).</summary>
     public bool IsKey(string column) =>
@@ -69,6 +81,21 @@ public abstract class CassandraEntityConfiguration
     internal static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 }
 
+/// <summary>What a SASI search index can match — and therefore which <c>LIKE</c> shapes push down.</summary>
+public enum CassandraSearchMode
+{
+    /// <summary>Prefix matching only (<c>StartsWith</c> / <c>LIKE 'value%'</c>).</summary>
+    Prefix,
+
+    /// <summary>Substring matching (<c>StartsWith</c>, <c>EndsWith</c>, <c>Contains</c> and any <c>LIKE</c> pattern).</summary>
+    Contains,
+}
+
+/// <summary>A search-indexed column and its matching mode.</summary>
+/// <param name="Column">The column name.</param>
+/// <param name="Mode">The SASI matching mode.</param>
+public sealed record CassandraSearchColumn(string Column, CassandraSearchMode Mode);
+
 /// <summary>The typed Cassandra mapping for <typeparamref name="TEntity" />.</summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
 public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfiguration
@@ -76,8 +103,8 @@ public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfi
 {
     internal CassandraEntityConfiguration(string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
-        IReadOnlyList<string>? counterColumns = null)
-        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns)
+        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null)
+        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns, searchColumns)
     {
     }
 }
@@ -128,6 +155,7 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     private readonly List<string> _partitionKeys = [];
     private readonly List<CassandraClusteringColumn> _clusteringKeys = [];
     private readonly List<string> _counterColumns = [];
+    private readonly List<CassandraSearchColumn> _searchColumns = [];
     private string? _table;
     private string? _keyColumn;
 
@@ -180,6 +208,24 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Declares a SASI search index on a text column — <c>StartsWith</c>/<c>EndsWith</c>/<c>Contains</c> and
+    ///     <c>Db.Like</c> push down as native <c>LIKE</c> on it (no scan opt-in: the index serves the match).
+    ///     The migration runner creates the index with <c>EnsureCollection()</c>. SASI must be enabled on the
+    ///     cluster (<c>sasi_indexes_enabled: true</c>).
+    /// </summary>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="mode">
+    ///     What the index matches: <see cref="CassandraSearchMode.Contains" /> (substrings — the default) or
+    ///     <see cref="CassandraSearchMode.Prefix" /> (cheaper, <c>StartsWith</c> only).
+    /// </param>
+    public CassandraEntityBuilder<TEntity> SearchIndex(Expression<Func<TEntity, string?>> selector,
+        CassandraSearchMode mode = CassandraSearchMode.Contains)
+    {
+        _searchColumns.Add(new CassandraSearchColumn(selector.GetMemberName(), mode));
+        return this;
+    }
+
     internal CassandraEntityConfiguration<TEntity> Build()
     {
         if (_partitionKeys.Count == 0)
@@ -219,7 +265,8 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         }
 
         return new CassandraEntityConfiguration<TEntity>(
-            _table ?? typeof(TEntity).Name, _partitionKeys, _clusteringKeys, columns, _keyColumn ?? _partitionKeys[0], _counterColumns);
+            _table ?? typeof(TEntity).Name, _partitionKeys, _clusteringKeys, columns, _keyColumn ?? _partitionKeys[0],
+            _counterColumns, _searchColumns);
     }
 }
 

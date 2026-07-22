@@ -43,6 +43,8 @@ public static class PostgreSqlServiceCollectionExtensions
                 dataSourceBuilder.ConnectionStringBuilder.MaxAutoPrepare = 32;
             }
 
+            // Serializes dictionary parameters into jsonb document columns.
+            dataSourceBuilder.EnableDynamicJson();
             return dataSourceBuilder.Build();
         });
         services.TryAddSingleton<DbDataSource>(sp => sp.GetRequiredService<NpgsqlDataSource>());

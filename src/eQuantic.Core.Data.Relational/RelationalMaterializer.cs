@@ -88,6 +88,13 @@ internal static class RelationalMaterializer
             return;
         }
 
+        // Document columns (jsonb) come back as JSON text; shape them into the member's dictionary.
+        if (value is string json && typeof(System.Collections.IDictionary).IsAssignableFrom(target))
+        {
+            property.SetValue(entity, System.Text.Json.JsonSerializer.Deserialize(json, target));
+            return;
+        }
+
         // A driver hands collections back as arrays; shape them into the member's List<T>.
         if (value is Array array && !target.IsArray && typeof(IEnumerable).IsAssignableFrom(target) && target.IsGenericType)
         {

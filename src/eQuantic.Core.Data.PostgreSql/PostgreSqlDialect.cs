@@ -7,10 +7,15 @@ namespace eQuantic.Core.Data.PostgreSql;
 /// <summary>
 ///     PostgreSQL's SQL flavour: snake_case naming, <c>"quoted"</c> identifiers, <c>LIMIT/OFFSET</c>, identity
 ///     keys read back with <c>RETURNING</c>, native array columns (membership as <c>= ANY(col)</c>, atomic
-///     append/remove) and row-wise tuple comparisons.
+///     append/remove), row-wise tuple comparisons, and scalar-keyed dictionaries as <c>jsonb</c> document
+///     columns (<c>ContainsKey</c> as the <c>?</c> operator, indexer reads as <c>-&gt;&gt;</c>).
 /// </summary>
 public sealed class PostgreSqlDialect : SqlDialect
 {
+    /// <summary>Adds the PostgreSQL-specific function translations on top of the standard set.</summary>
+    public PostgreSqlDialect() =>
+        Functions.Map("get_Item", (column, arguments) => $"{column} ->> {arguments[0]}");
+
     /// <inheritdoc />
     public override string System => "postgresql";
 
@@ -29,8 +34,27 @@ public sealed class PostgreSqlDialect : SqlDialect
     /// <inheritdoc />
     public override string CollectionContains(string column, string parameter, bool key) =>
         key
-            ? throw new NotSupportedException("Map-key membership needs a jsonb column, which the model does not declare yet.")
+            ? $"{column} ? {parameter}"
             : $"{parameter} = ANY({column})";
+
+    /// <inheritdoc />
+    /// <remarks>A scalar-keyed dictionary maps as a <c>jsonb</c> document column.</remarks>
+    public override bool IsDocumentColumn(Type type)
+    {
+        var dictionary = type.GetInterfaces().Append(type).FirstOrDefault(candidate =>
+            candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IDictionary<,>));
+        return dictionary is not null && dictionary.GetGenericArguments()[0] == typeof(string);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Npgsql cannot infer <c>jsonb</c> for a dictionary value; the parameter is typed explicitly.</remarks>
+    public override void ConfigureParameter(System.Data.Common.DbParameter parameter, object? value)
+    {
+        if (value is IDictionary && parameter is Npgsql.NpgsqlParameter npgsql)
+        {
+            npgsql.DataTypeName = "jsonb";
+        }
+    }
 
     /// <inheritdoc />
     public override string TupleComparison(IReadOnlyList<string> columns, ComparisonOperator op, IReadOnlyList<string> parameters) =>
@@ -64,6 +88,12 @@ public sealed class PostgreSqlDialect : SqlDialect
         if (underlying.IsEnum)
         {
             return "integer";
+        }
+
+        // Dictionaries are documents, not arrays — checked before the IEnumerable branch.
+        if (IsDocumentColumn(underlying))
+        {
+            return "jsonb";
         }
 
         if (underlying != typeof(string) && underlying != typeof(byte[]))

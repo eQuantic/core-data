@@ -113,8 +113,9 @@ Cosmos, an atomic `LOGGED BATCH` on Cassandra — and on PostgreSQL the commit i
 (one batched flush in a transaction, generated keys read back — `RETURNING` on PostgreSQL,
 `OUTPUT INSERTED` on SQL Server — and explicit transactions spanning commits with
 read-your-writes). The relational providers are thin dialects over the shared
-`eQuantic.Core.Data.Relational` engine: PostgreSQL (Npgsql), MySQL (MySqlConnector) and
-SQL Server (Microsoft.Data.SqlClient) differ only in their `SqlDialect`.
+`eQuantic.Core.Data.Relational` engine: PostgreSQL (Npgsql), MySQL and MariaDB (MySqlConnector —
+the MariaDB dialect reads generated keys back with `INSERT … RETURNING`, the capability MySQL
+honestly rejects) and SQL Server (Microsoft.Data.SqlClient) differ only in their `SqlDialect`.
 All providers ship the same **fluent, typed migrations**, authored with member selectors instead of
 field strings:
 
@@ -140,13 +141,18 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 
 - **A complete SQL target (PostgreSQL)** — `OR`/`NOT`/`!=`/`NULL` push down whole with C# semantics
   preserved (`== null` → `IS NULL`, `!=` matches `NULL` rows, `Contains` with a `null` in the list
-  matches `NULL` columns), arrays are native (`= ANY`, atomic append/remove), sorting works on any
-  column and paging is native `LIMIT/OFFSET` plus keyset continuation.
+  matches `NULL` columns), arrays are native (`= ANY`, atomic append/remove), scalar-keyed
+  dictionaries are **`jsonb` document columns** (`ContainsKey` pushes down as the `?` operator, the
+  indexer — `x.Attributes["tier"] == "gold"` — as `->>`), sorting works on any column and paging is
+  native `LIMIT/OFFSET` plus keyset continuation.
 - **Pushdown + residual filtering (Cassandra)** — every clause CQL can express runs on the cluster;
   the ones it cannot (`OR` across columns, `!=`, `NULL`, arbitrary predicates) run client-side over
   the fetched rows behind the explicit `.AllowClientEvaluation()` opt-in, with `.AllowFiltering()`
   gating scans. An `OR` whose branches each pin a partition needs no opt-in at all: it runs as
-  **parallel native queries**, merged and de-duplicated by primary key.
+  **parallel native queries**, merged and de-duplicated by primary key. A text column declared with
+  `SearchIndex(x => x.Name)` serves `StartsWith`/`EndsWith`/`Contains` and `Db.Like` as native
+  `LIKE` on its **SASI index** (the migration creates it) — no scan opt-in: the index serves the
+  match.
 - **`Explain()` on every provider** (`IExplainableRepository<T>`) — the native statement (CQL,
   Cosmos SQL, aggregation pipeline), what is pushed down versus evaluated client-side, partition
   scoping, and the opt-ins a query still needs. Builds the plan without executing anything.
@@ -162,8 +168,9 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 - **Typed `GroupBy` with `HAVING`, and aggregates on the store** (`IGroupedReadRepository<T>`,
   `IAggregateReadRepository<T>`) —
   `GroupByAsync(x => x.Customer, g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total) })`
-  renders to a native `GROUP BY` on the relational providers, a `$group` pipeline on MongoDB, and
-  a primary-key-restricted CQL `GROUP BY` on Cassandra. The filter pushes before grouping, the
+  renders to a native `GROUP BY` on the relational providers, a `$group` pipeline on MongoDB, a
+  primary-key-restricted CQL `GROUP BY` on Cassandra, and a single-member server-side `GROUP BY`
+  on Cosmos DB (which has no `HAVING` — the contract says so). The filter pushes before grouping, the
   typed `having` predicate — `g => g.Sum(x => x.Total) > 100 && g.Count() >= 2` — runs as SQL
   `HAVING` / a Mongo `$match` over the groups / against Cassandra's cluster-computed aggregate
   cells (CQL has no `HAVING`; no extra rows travel), and only the grouped rows come back.

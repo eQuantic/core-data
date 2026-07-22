@@ -100,6 +100,23 @@ public abstract class SqlDialect
     public virtual string TupleComparison(IReadOnlyList<string> columns, ComparisonOperator op, IReadOnlyList<string> parameters) =>
         throw new NotSupportedException($"{GetType().Name} has no native tuple comparison; the clause runs client-side.");
 
+    /// <summary>
+    ///     Whether a member of this CLR type maps as a <b>document column</b> (e.g. a scalar-keyed dictionary
+    ///     into PostgreSQL <c>jsonb</c>). The base dialect maps none — such members stay unmapped navigations.
+    /// </summary>
+    /// <param name="type">The member's CLR type.</param>
+    public virtual bool IsDocumentColumn(Type type) => false;
+
+    /// <summary>
+    ///     Configures a just-created parameter for a bound value — the hook a dialect uses to type values its
+    ///     driver cannot infer (e.g. a dictionary into a <c>jsonb</c> parameter). The base dialect does nothing.
+    /// </summary>
+    /// <param name="parameter">The parameter (its name and value are already set).</param>
+    /// <param name="value">The bound value.</param>
+    public virtual void ConfigureParameter(System.Data.Common.DbParameter parameter, object? value)
+    {
+    }
+
     /// <summary>Renders a collection-mutating SET fragment (<c>col = col + items</c>), for stores with collection columns.</summary>
     /// <param name="column">The quoted column.</param>
     /// <param name="parameter">The bound items' parameter marker.</param>

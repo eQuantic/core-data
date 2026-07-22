@@ -38,6 +38,33 @@ public static class MySqlServiceCollectionExtensions
         return services;
     }
 
+    /// <summary>
+    ///     Registers the pooled data source (singleton), the <b>MariaDB</b> dialect and the entity model. MariaDB
+    ///     shares MySQL's syntax and driver but supports <c>INSERT … RETURNING</c>, so database-generated keys
+    ///     are read back into the entities on commit. Pair with <see cref="AddMySqlRepositories" />.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="connectionString">The MariaDB connection string.</param>
+    /// <param name="model">Builds the entity model (tables, keys, column overrides).</param>
+    /// <param name="functions">Optional custom function translations (<c>Functions.Map(...)</c>).</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddMariaDbDatabase(this IServiceCollection services, string connectionString,
+        Action<RelationalModelBuilder> model, Action<SqlFunctionRegistry>? functions = null)
+    {
+        var dialect = new MariaDbDialect();
+        functions?.Invoke(dialect.Functions);
+        services.TryAddSingleton<SqlDialect>(dialect);
+
+        var builder = new RelationalModelBuilder(dialect);
+        model(builder);
+        services.TryAddSingleton(builder.Build());
+
+        services.TryAddSingleton(_ => new MySqlDataSourceBuilder(connectionString).Build());
+        services.TryAddSingleton<DbDataSource>(sp => sp.GetRequiredService<MySqlDataSource>());
+
+        return services;
+    }
+
     /// <summary>Registers the generic repositories over the <see cref="MySqlDefaultUnitOfWork" />.</summary>
     /// <param name="services">The service collection.</param>
     /// <param name="lifetime">The unit-of-work and repository lifetime (scoped by default).</param>

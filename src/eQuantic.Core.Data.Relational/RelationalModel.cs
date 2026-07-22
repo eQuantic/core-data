@@ -175,9 +175,9 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated);
     }
 
-    private static bool IsMapped(Type type)
+    private bool IsMapped(Type type)
     {
-        if (IsScalar(type))
+        if (IsScalar(type) || _dialect.IsDocumentColumn(type))
         {
             return true;
         }

@@ -57,8 +57,18 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
             switch (operation)
             {
                 case EnsureCollectionOperation ensure:
-                    await ExecuteAsync(CreateTable(_model.For(ensure.EntityType))).ConfigureAwait(false);
+                {
+                    var configuration = _model.For(ensure.EntityType);
+                    await ExecuteAsync(CreateTable(configuration)).ConfigureAwait(false);
+
+                    // The model's declared search indexes are part of the table's schema: LIKE pushdown needs them.
+                    foreach (var search in configuration.SearchColumns)
+                    {
+                        await ExecuteAsync(CreateSearchIndex(configuration, search)).ConfigureAwait(false);
+                    }
+
                     break;
+                }
                 case EnsureIndexOperation index:
                     await ExecuteAsync(CreateIndex(index)).ConfigureAwait(false);
                     break;
@@ -113,6 +123,12 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
         var table = _model.For(operation.EntityType).TableName;
         return new SimpleStatement($"CREATE INDEX IF NOT EXISTS ON {table} ({operation.Keys[0].Selector.GetMemberName()})");
     }
+
+    private static SimpleStatement CreateSearchIndex(CassandraEntityConfiguration configuration, CassandraSearchColumn search) =>
+        new($"CREATE CUSTOM INDEX IF NOT EXISTS {configuration.TableName}_{search.Column}_search " +
+            $"ON {configuration.TableName} ({search.Column}) " +
+            "USING 'org.apache.cassandra.index.sasi.SASIIndex' " +
+            $"WITH OPTIONS = {{'mode': '{(search.Mode == CassandraSearchMode.Contains ? "CONTAINS" : "PREFIX")}'}}");
 
     private SimpleStatement Update(UpdateOperation operation)
     {

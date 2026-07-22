@@ -23,6 +23,8 @@ public sealed class SaleOrder : IEntity<Guid>
 
     public Guid BuyerId { get; set; }
 
+    public Dictionary<string, string> Attributes { get; set; } = [];
+
     public Buyer? Buyer { get; set; }
 
     public List<OrderItem> Items { get; set; } = [];
