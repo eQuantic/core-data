@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -22,7 +23,9 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     IAsyncQueryableReadRepository<TEntity, TKey>,
     IExplainableRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
-    IContinuationReadRepository<TEntity>
+    IContinuationReadRepository<TEntity>,
+    IAggregateReadRepository<TEntity>,
+    IGroupedReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -249,6 +252,82 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         Query(options).SumAsync(NotNull(selector), cancellationToken);
+
+    // ---------------------------------------------------------------- min / max / average
+
+    /// <inheritdoc />
+    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$min</c>) on the server; an empty match yields <c>default</c>.</remarks>
+    public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await AggregateAsync<TResult>(NotNull(selector), nameof(Enumerable.Min), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$max</c>) on the server; an empty match yields <c>default</c>.</remarks>
+    public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await AggregateAsync<TResult>(NotNull(selector), nameof(Enumerable.Max), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$avg</c>), the member converted to double on the server; an empty match yields <c>0</c>.</remarks>
+    public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        NotNull(selector);
+        var cast = Expression.Lambda<Func<TEntity, double>>(
+            Expression.Convert(selector.Body, typeof(double)), selector.Parameters);
+        return await AggregateAsync<double>(cast, nameof(Enumerable.Average), [typeof(TEntity)], options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Aggregates the whole match as one server-side group: <c>GroupBy(_ =&gt; 1).Select(g =&gt; g.Min(selector))</c>.</summary>
+    private async Task<TAggregated?> AggregateAsync<TAggregated>(LambdaExpression selector, string method,
+        Type[] typeArguments, QueryOptions<TEntity>? options, CancellationToken cancellationToken)
+    {
+        var grouping = Expression.Parameter(typeof(IGrouping<int, TEntity>), "g");
+        var aggregate = Expression.Lambda<Func<IGrouping<int, TEntity>, TAggregated>>(
+            Expression.Call(typeof(Enumerable), method, typeArguments, grouping, selector), grouping);
+
+        return await Query(options).GroupBy(_ => 1).Select(aggregate)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // ---------------------------------------------------------------- grouped reads
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Runs as a server-side <c>$group</c> — the filter applies before grouping, the <paramref name="having" />
+    ///     predicate as a <c>$match</c> over the groups, and only the grouped rows travel. The projection is
+    ///     validated against the same shapes every provider accepts, so a grouped read ports across stores.
+    ///     Group order is store-defined; order the result client-side.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GroupByAsync<TGroup, TResult>(
+        Expression<Func<TEntity, TGroup>> keySelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, TResult>> resultSelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, bool>>? having = null,
+        QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (options is { Sortings.Count: > 0 })
+        {
+            throw new NotSupportedException("Sorting does not apply to a grouped read; order the grouped result client-side.");
+        }
+
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not apply to a grouped projection; drop the includes.");
+        }
+
+        // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
+        var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
+        if (having is not null)
+        {
+            GroupInterpreter.InterpretHaving(having, group.Key);
+        }
+
+        var grouped = Query(options).GroupBy(keySelector);
+        if (having is not null)
+        {
+            grouped = grouped.Where(having);
+        }
+
+        return await grouped.Select(resultSelector).ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     // ---------------------------------------------------------------- continuation paging (keyset by id)
 

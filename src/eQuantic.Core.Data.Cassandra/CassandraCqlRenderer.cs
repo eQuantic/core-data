@@ -71,19 +71,36 @@ internal static class CassandraCqlRenderer
             case LogicalFilter { Operator: LogicalOperator.Not }:
                 throw new NotSupportedException("Cassandra CQL has no NOT in a WHERE.");
             case ComparisonFilter comparison:
+                EnsureColumn(configuration, comparison.Member);
                 clauses.Add(Comparison(comparison, configuration, values, ref requiresFiltering));
                 return;
             case InFilter inFilter:
+                EnsureColumn(configuration, inFilter.Member);
                 clauses.Add(In(inFilter, configuration, values, ref requiresFiltering));
                 return;
             case CollectionFilter collection:
+                EnsureColumn(configuration, collection.Member);
                 clauses.Add(Collection(collection, values, ref requiresFiltering));
                 return;
             case TupleComparisonFilter tuple:
+                foreach (var member in tuple.Members)
+                {
+                    EnsureColumn(configuration, member);
+                }
+
                 clauses.Add(Tuple(tuple, configuration, values, ref requiresFiltering));
                 return;
             default:
                 throw new NotSupportedException($"Cannot render the filter '{filter.GetType().Name}' to CQL.");
+        }
+    }
+
+    /// <summary>A member that is not a mapped column (a nested path, a computed pseudo-member) cannot render — it refuses into residual.</summary>
+    private static void EnsureColumn(CassandraEntityConfiguration configuration, string member)
+    {
+        if (!configuration.Columns.Any(column => CassandraEntityConfiguration.Same(column.Name, member)))
+        {
+            throw new NotSupportedException($"'{member}' is not a mapped column; the clause runs client-side.");
         }
     }
 

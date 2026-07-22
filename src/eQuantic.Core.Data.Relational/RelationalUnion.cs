@@ -17,24 +17,15 @@ internal static class RelationalUnion
     {
         var parameters = new List<object?>();
         var selects = new List<string>();
-        UnionProjection? shape = null;
-        IReadOnlyList<string> targets = [];
+        var projections = UnionInterpreter.InterpretAll(query.Branches);
+        var shape = projections[0];
+        IReadOnlyList<string> targets = shape.Bindings.Select(binding => binding.Target).ToList();
 
         for (var index = 0; index < query.Branches.Count; index++)
         {
             var branch = query.Branches[index];
             var configuration = model.For(branch.EntityType);
-            var projection = UnionInterpreter.Interpret(branch);
-
-            if (shape is null)
-            {
-                shape = projection;
-                targets = projection.Bindings.Select(binding => binding.Target).ToList();
-            }
-            else
-            {
-                projection = Align(projection, targets, index);
-            }
+            var projection = projections[index];
 
             var columns = projection.Bindings.Select(binding => binding switch
             {
@@ -82,7 +73,7 @@ internal static class RelationalUnion
             sql += " " + dialect.LimitClause(limitParameter, offsetParameter);
         }
 
-        return (sql, parameters, shape!);
+        return (sql, parameters, shape);
 
         string Bind(object? value)
         {
@@ -127,30 +118,4 @@ internal static class RelationalUnion
         return clauses.Count > 0 ? " WHERE " + string.Join(" AND ", clauses) : string.Empty;
     }
 
-    /// <summary>Reorders a later branch's bindings into the first branch's target order — the shapes must match.</summary>
-    private static UnionProjection Align(UnionProjection projection, IReadOnlyList<string> targets, int index)
-    {
-        var byTarget = new Dictionary<string, UnionBinding>(StringComparer.OrdinalIgnoreCase);
-        foreach (var binding in projection.Bindings)
-        {
-            if (!byTarget.TryAdd(binding.Target, binding))
-            {
-                throw Mismatch(index);
-            }
-        }
-
-        if (byTarget.Count != targets.Count)
-        {
-            throw Mismatch(index);
-        }
-
-        var ordered = targets
-            .Select(target => byTarget.TryGetValue(target, out var binding) ? binding : throw Mismatch(index))
-            .ToList();
-        return projection with { Bindings = ordered };
-    }
-
-    private static NotSupportedException Mismatch(int index) => new(
-        $"Union branch {index + 1} does not project the same members as the first branch — every branch must " +
-        "produce the same shape.");
 }

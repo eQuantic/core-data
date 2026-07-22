@@ -22,7 +22,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     IAsyncQueryableReadRepository<TEntity, TKey>,
     IExplainableRepository<TEntity>,
     IContinuationReadRepository<TEntity>,
-    IStreamingReadRepository<TEntity>
+    IStreamingReadRepository<TEntity>,
+    IAggregateReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -228,6 +229,41 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+
+    // ---------------------------------------------------------------- min / max / average
+
+    /// <inheritdoc />
+    /// <remarks>Pushes down as <c>VALUE MIN(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
+    public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await Query(options).Select(NotNull(selector)).MinAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    /// <remarks>Pushes down as <c>VALUE MAX(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
+    public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await Query(options).Select(NotNull(selector)).MaxAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    /// <remarks>Pushes down as <c>VALUE AVG(...)</c> over the numeric member; an empty match yields <c>0</c>.</remarks>
+    public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        // The SDK's AverageAsync overloads are per numeric type; dispatch on the selected member's type.
+        var selected = Query(options).Select(NotNull(selector));
+        return selected switch
+        {
+            IQueryable<int> value => await value.AverageAsync(cancellationToken).ConfigureAwait(false),
+            IQueryable<int?> value => (double?)await value.AverageAsync(cancellationToken).ConfigureAwait(false) ?? 0d,
+            IQueryable<long> value => await value.AverageAsync(cancellationToken).ConfigureAwait(false),
+            IQueryable<long?> value => (double?)await value.AverageAsync(cancellationToken).ConfigureAwait(false) ?? 0d,
+            IQueryable<double> value => await value.AverageAsync(cancellationToken).ConfigureAwait(false),
+            IQueryable<double?> value => (double?)await value.AverageAsync(cancellationToken).ConfigureAwait(false) ?? 0d,
+            IQueryable<float> value => (float)await value.AverageAsync(cancellationToken).ConfigureAwait(false),
+            IQueryable<float?> value => (double?)(float?)await value.AverageAsync(cancellationToken).ConfigureAwait(false) ?? 0d,
+            IQueryable<decimal> value => (double)(decimal)await value.AverageAsync(cancellationToken).ConfigureAwait(false),
+            IQueryable<decimal?> value => (double?)(decimal?)await value.AverageAsync(cancellationToken).ConfigureAwait(false) ?? 0d,
+            _ => throw new NotSupportedException(
+                $"Average over '{typeof(TValue).Name}' is not supported; select a numeric member."),
+        };
+    }
 
     // ---------------------------------------------------------------- continuation paging
 

@@ -162,20 +162,23 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 - **Typed `GroupBy` with `HAVING`, and aggregates on the store** (`IGroupedReadRepository<T>`,
   `IAggregateReadRepository<T>`) —
   `GroupByAsync(x => x.Customer, g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total) })`
-  renders to a native `GROUP BY` on the relational providers: the filter pushes into the `WHERE`
-  (before grouping), a typed `having` predicate — `g => g.Sum(x => x.Total) > 100 && g.Count() >= 2`
-  — into `HAVING` (over the groups), and only the grouped rows travel; `Min`/`Max`/`Average` push
-  down alongside `Sum`/`Count`. A filter the store cannot express degrades — behind
-  `.AllowClientEvaluation()` — to grouping (and having-filtering) the fetched rows with the
-  selectors themselves; a projection shape the store cannot aggregate is rejected with the
-  supported shapes, never silently fetched.
+  renders to a native `GROUP BY` on the relational providers, a `$group` pipeline on MongoDB, and
+  a primary-key-restricted CQL `GROUP BY` on Cassandra. The filter pushes before grouping, the
+  typed `having` predicate — `g => g.Sum(x => x.Total) > 100 && g.Count() >= 2` — runs as SQL
+  `HAVING` / a Mongo `$match` over the groups / against Cassandra's cluster-computed aggregate
+  cells (CQL has no `HAVING`; no extra rows travel), and only the grouped rows come back.
+  `Min`/`Max`/`Average` push down alongside `Sum`/`Count` on **every** provider. A filter the
+  store cannot express degrades — behind `.AllowClientEvaluation()` — to grouping the fetched
+  rows with the selectors themselves; a projection shape outside the portable contract is
+  rejected with the supported shapes, never silently fetched.
 - **Typed `UNION`/`UNION ALL` across entities** (`IUnionQueryRunner`) — compose branches with
   `Union.Of<Order>().Where(x => x.Status == "overdue").Select(x => new { Name = x.Customer, Origin = "order" })`,
   combine with `UnionQuery.All(...)` or `UnionQuery.Distinct(...)`, order and page the combined
-  result — one statement on the store. Branches project entity members or constants (tagging which
-  branch a row came from), each branch's filter pushes into its own `WHERE` with the entity's
-  global filter applied per branch (`IgnoringQueryFilters()` opts a branch out), and a branch SQL
-  cannot express is rejected with guidance — a union never runs half a branch client-side.
+  result — one statement on the relational providers, one `$unionWith` aggregation on MongoDB.
+  Branches project entity members or constants (tagging which branch a row came from), each
+  branch's filter pushes inside its own branch with the entity's global filter applied per branch
+  (`IgnoringQueryFilters()` opts a branch out), and a branch the store cannot express is rejected
+  with guidance — a union never runs half a branch client-side.
 - **Partition-key inference and ETag concurrency (Cosmos)** — a filter that pins the partition key
   scopes the query to a single partition automatically (the biggest RU saving there is), and
   `ConcurrencyToken(x => x.ETag)` turns `Modify` into a conditional `If-Match` replace.

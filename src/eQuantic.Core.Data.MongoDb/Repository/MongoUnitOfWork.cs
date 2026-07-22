@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.Linq.Expressions;
+using System.Reflection;
 using eQuantic.Core.Data.Diagnostics;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
+using MongoDB.Driver.Linq;
 
 namespace eQuantic.Core.Data.MongoDb.Repository;
 
@@ -15,7 +18,7 @@ namespace eQuantic.Core.Data.MongoDb.Repository;
 ///     Explicit multi-document transactions are a separate concern: open one with
 ///     <see cref="BeginTransactionAsync" /> and the commit flushes inside it.
 /// </summary>
-public abstract class MongoUnitOfWork : IQueryableUnitOfWork
+public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly IMongoClient Client;
@@ -51,6 +54,115 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork
         }
 
         return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+    }
+
+    // -------------------------------------------------------------- union reads
+
+    private static readonly MethodInfo ShapedBranchMethod = typeof(MongoUnitOfWork)
+        .GetMethod(nameof(ShapedBranch), BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Runs on the server as one aggregation: the first branch's pipeline plus a <c>$unionWith</c> per
+    ///     additional branch — each branch's filters (the entity's global filter included unless the branch opted
+    ///     out) apply inside its own pipeline. <see cref="UnionQuery.Distinct{TResult}" /> deduplicates with a
+    ///     <c>$group</c> over the combined shape; ordering and paging apply to the combined rows.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> UnionAsync<TResult>(UnionQuery<TResult> query, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        // The same contract as everywhere else: members-or-constants projections, one shape across branches.
+        var targets = UnionInterpreter.InterpretAll(query.Branches)[0].Bindings.Select(binding => binding.Target).ToList();
+
+        using var activity = DataActivitySource.Instance.StartActivity("mongodb.union", ActivityKind.Client);
+        if (activity is not null)
+        {
+            activity.SetTag("db.system", "mongodb");
+            activity.SetTag("equantic.union_branches", query.Branches.Count);
+            activity.SetTag("equantic.union_all", query.All);
+        }
+
+        IQueryable<TResult>? combined = null;
+        foreach (var branch in query.Branches)
+        {
+            var shaped = (IQueryable<TResult>)ShapedBranchMethod
+                .MakeGenericMethod(branch.EntityType, typeof(TResult))
+                .Invoke(this, [branch])!;
+            combined = combined is null ? shaped : combined.Concat(shaped);
+        }
+
+        if (!query.All)
+        {
+            combined = combined!.Distinct();
+        }
+
+        combined = OrderCombined(combined!, query.Order, targets);
+
+        if (query.Offset is not null && query.Limit is null)
+        {
+            throw new NotSupportedException("Skip without Take is not supported on a union; add Take(...).");
+        }
+
+        if (query.Offset is { } offset)
+        {
+            combined = combined.Skip(offset);
+        }
+
+        if (query.Limit is { } limit)
+        {
+            combined = combined.Take(limit);
+        }
+
+        return await combined.ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>One branch's pipeline: the session-bound collection, its filters, projected into the common shape.</summary>
+    private IQueryable<TResult> ShapedBranch<TDocument, TResult>(UnionBranch branch)
+        where TDocument : class
+    {
+        var collection = GetCollection<TDocument>();
+        var query = _session is null ? collection.AsQueryable() : collection.AsQueryable(_session);
+
+        if (!branch.IgnoreQueryFilters && GlobalFilter<TDocument>() is { } global)
+        {
+            query = query.Where(global);
+        }
+
+        foreach (var filter in branch.Filters)
+        {
+            query = query.Where((Expression<Func<TDocument, bool>>)filter);
+        }
+
+        return query.Select((Expression<Func<TDocument, TResult>>)branch.Projection);
+    }
+
+    private static IQueryable<TResult> OrderCombined<TResult>(IQueryable<TResult> combined,
+        IReadOnlyList<UnionOrder> order, IReadOnlyList<string> targets)
+    {
+        for (var index = 0; index < order.Count; index++)
+        {
+            if (!targets.Contains(order[index].Member, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new NotSupportedException($"The union projects no member '{order[index].Member}' to order by.");
+            }
+
+            var row = Expression.Parameter(typeof(TResult), "row");
+            var member = Expression.PropertyOrField(row, order[index].Member);
+            var selector = Expression.Lambda(member, row);
+            var method = (index == 0, order[index].Descending) switch
+            {
+                (true, false) => nameof(Queryable.OrderBy),
+                (true, true) => nameof(Queryable.OrderByDescending),
+                (false, false) => nameof(Queryable.ThenBy),
+                (false, true) => nameof(Queryable.ThenByDescending),
+            };
+            combined = combined.Provider.CreateQuery<TResult>(Expression.Call(
+                typeof(Queryable), method, [typeof(TResult), member.Type],
+                combined.Expression, Expression.Quote(selector)));
+        }
+
+        return combined;
     }
 
     // -------------------------------------------------------------- write staging (called by MongoSet)

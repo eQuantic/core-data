@@ -43,6 +43,62 @@ public sealed record UnionProjection(IReadOnlyList<UnionBinding> Bindings, bool 
 /// </summary>
 public static class UnionInterpreter
 {
+    /// <summary>
+    ///     Interprets every branch's projection and validates the branches against each other: the first branch
+    ///     defines the target order, later branches are reordered into it, and a branch that does not project the
+    ///     same members is rejected — a union must combine one shape.
+    /// </summary>
+    /// <param name="branches">The composed branches, in order.</param>
+    /// <returns>One aligned projection per branch, in branch order.</returns>
+    public static IReadOnlyList<UnionProjection> InterpretAll(IReadOnlyList<UnionBranch> branches)
+    {
+        var projections = new List<UnionProjection>(branches.Count);
+        IReadOnlyList<string> targets = [];
+
+        for (var index = 0; index < branches.Count; index++)
+        {
+            var projection = Interpret(branches[index]);
+            if (index == 0)
+            {
+                targets = projection.Bindings.Select(binding => binding.Target).ToList();
+            }
+            else
+            {
+                projection = Align(projection, targets, index);
+            }
+
+            projections.Add(projection);
+        }
+
+        return projections;
+    }
+
+    private static UnionProjection Align(UnionProjection projection, IReadOnlyList<string> targets, int index)
+    {
+        var byTarget = new Dictionary<string, UnionBinding>(StringComparer.OrdinalIgnoreCase);
+        foreach (var binding in projection.Bindings)
+        {
+            if (!byTarget.TryAdd(binding.Target, binding))
+            {
+                throw Mismatch(index);
+            }
+        }
+
+        if (byTarget.Count != targets.Count)
+        {
+            throw Mismatch(index);
+        }
+
+        var ordered = targets
+            .Select(target => byTarget.TryGetValue(target, out var binding) ? binding : throw Mismatch(index))
+            .ToList();
+        return projection with { Bindings = ordered };
+    }
+
+    private static NotSupportedException Mismatch(int index) => new(
+        $"Union branch {index + 1} does not project the same members as the first branch — every branch must " +
+        "produce the same shape.");
+
     /// <summary>Interprets the branch's projection.</summary>
     /// <param name="branch">The composed branch.</param>
     public static UnionProjection Interpret(UnionBranch branch)

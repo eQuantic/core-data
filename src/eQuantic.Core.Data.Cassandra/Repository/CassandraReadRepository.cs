@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Diagnostics;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -30,7 +31,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     IExplainableRepository<TEntity>,
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
-    IAggregateReadRepository<TEntity>
+    IAggregateReadRepository<TEntity>,
+    IGroupedReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -211,6 +213,302 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         return clientFallback(await SelectAsync(options, null, cancellationToken).ConfigureAwait(false));
+    }
+
+    // ---------------------------------------------------------------- grouped reads
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Renders to a native CQL <c>GROUP BY</c> — restricted, as Cassandra requires, to the primary key: the
+    ///     key must be the full partition key, optionally followed by clustering columns in order. The filter
+    ///     pushes into the <c>WHERE</c> under the usual gates, and a residual filter degrades — behind the same
+    ///     opt-ins as any read — to fetching the matching rows and grouping them with the selectors themselves.
+    ///     CQL has no <c>HAVING</c>: the predicate's aggregates are computed <b>on the cluster</b> as extra
+    ///     select columns and the groups are filtered as they stream back — no extra rows travel either way.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GroupByAsync<TGroup, TResult>(
+        Expression<Func<TEntity, TGroup>> keySelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, TResult>> resultSelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, bool>>? having = null,
+        QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (options is { Sortings.Count: > 0 })
+        {
+            throw new NotSupportedException("Sorting does not apply to a grouped read; order the grouped result client-side.");
+        }
+
+        // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
+        var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
+        var predicate = having is null ? null : GroupInterpreter.InterpretHaving(having, group.Key);
+        var plan = GatedPlan(options, null);
+
+        if (plan.Alternatives.Count > 0)
+        {
+            throw new NotSupportedException(
+                "An OR-split query cannot group on the cluster (per-branch groups would need re-aggregation); " +
+                "restructure the filter, or group client-side over separate reads.");
+        }
+
+        if (plan.Residual.Count > 0)
+        {
+            var fetched = await SelectAsync(options, null, cancellationToken).ConfigureAwait(false);
+            var grouped = fetched.GroupBy(keySelector.Compile());
+            if (having is not null)
+            {
+                grouped = grouped.Where(having.Compile());
+            }
+
+            return grouped.Select(resultSelector.Compile()).ToList();
+        }
+
+        var keys = group.Key.Select(member => ColumnNamed(member.Path, "group by")).ToList();
+        ValidateGroupKeys(keys);
+
+        // The aggregate cells: the projected ones first, then any the HAVING needs that are not already projected.
+        var cells = group.Bindings.OfType<GroupAggregateBinding>()
+            .Select(binding => (binding.Aggregate, binding.Member))
+            .ToList();
+        if (predicate is not null)
+        {
+            foreach (var comparison in Comparisons(predicate))
+            {
+                if (comparison.Aggregate is { } aggregate && CellIndex(cells, aggregate, comparison.Member) < 0)
+                {
+                    cells.Add((aggregate, comparison.Member));
+                }
+            }
+        }
+
+        var select = keys.Concat(cells.Select(cell => AggregateCql(cell.Item1, cell.Item2))).ToList();
+        var cql = $"SELECT {string.Join(", ", select)} FROM {_configuration.TableName}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                  + $" GROUP BY {string.Join(", ", keys)}"
+                  + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+
+        using var activity = DataActivitySource.Instance.StartActivity("cassandra.group_by", ActivityKind.Client);
+        if (activity is not null)
+        {
+            activity.SetTag("db.system", "cassandra");
+            activity.SetTag("equantic.partition_scoped", plan.PartitionScoped);
+            activity.SetTag("equantic.allow_filtering", plan.RequiresAllowFiltering);
+        }
+
+        var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
+            CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
+
+        var constructor = group.ConstructorProjection ? typeof(TResult).GetConstructors().Single() : null;
+        var properties = group.ConstructorProjection
+            ? null
+            : group.Bindings.Select(binding => typeof(TResult).GetProperty(binding.Target)
+                                               ?? throw new NotSupportedException(
+                                                   $"'{typeof(TResult).Name}' has no member '{binding.Target}'.")).ToArray();
+        var targets = constructor?.GetParameters().Select(parameter => parameter.ParameterType).ToArray()
+                      ?? properties!.Select(property => property.PropertyType).ToArray();
+        var keyConstructor = group.Key is [{ Name: not null }, ..] ? typeof(TGroup).GetConstructors().Single() : null;
+
+        var results = new List<TResult>();
+        foreach (var row in rows)
+        {
+            var keyValues = new object?[keys.Count];
+            for (var ordinal = 0; ordinal < keyValues.Length; ordinal++)
+            {
+                keyValues[ordinal] = row.IsNull(ordinal) ? null : row.GetValue<object>(ordinal);
+            }
+
+            var cellValues = new object?[cells.Count];
+            for (var ordinal = 0; ordinal < cellValues.Length; ordinal++)
+            {
+                cellValues[ordinal] = row.IsNull(keys.Count + ordinal) ? null : row.GetValue<object>(keys.Count + ordinal);
+            }
+
+            if (predicate is not null && !EvaluateHaving(predicate, group, cells, keyValues, cellValues))
+            {
+                continue;
+            }
+
+            var values = new object?[group.Bindings.Count];
+            for (var index = 0; index < values.Length; index++)
+            {
+                values[index] = group.Bindings[index] switch
+                {
+                    GroupKeyBinding { KeyName: null } when keyConstructor is null =>
+                        ChangeValue(keyValues[0], typeof(TGroup)),
+                    GroupKeyBinding { KeyName: null } => keyConstructor.Invoke(keyConstructor.GetParameters()
+                        .Select((parameter, position) => ChangeValue(keyValues[position], parameter.ParameterType))
+                        .ToArray()),
+                    GroupKeyBinding named => ChangeValue(
+                        keyValues[KeyOrdinal(group, named.KeyName!)], targets[index]),
+                    GroupAggregateBinding aggregate => ChangeValue(
+                        cellValues[CellIndex(cells, aggregate.Aggregate, aggregate.Member)], targets[index]),
+                    var unknown => throw new NotSupportedException($"Unknown group binding '{unknown.GetType().Name}'."),
+                };
+            }
+
+            if (constructor is not null)
+            {
+                results.Add((TResult)constructor.Invoke(values));
+            }
+            else
+            {
+                var result = Activator.CreateInstance<TResult>()!;
+                for (var index = 0; index < values.Length; index++)
+                {
+                    properties![index].SetValue(result, values[index]);
+                }
+
+                results.Add(result);
+            }
+        }
+
+        return results;
+    }
+
+    private string ColumnNamed(string path, string purpose) =>
+        _configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Name, path))?.Name
+        ?? throw new NotSupportedException($"'{typeof(TEntity).Name}' has no mapped column '{path}' to {purpose}.");
+
+    /// <summary>CQL groups by the primary key only: the full partition key, then clustering columns in order.</summary>
+    private void ValidateGroupKeys(IReadOnlyList<string> keys)
+    {
+        var primary = _configuration.PartitionKeys
+            .Concat(_configuration.ClusteringKeys.Select(key => key.Column))
+            .ToList();
+        var valid = keys.Count >= _configuration.PartitionKeys.Count
+                    && keys.Count <= primary.Count
+                    && keys.Select((key, index) => CassandraEntityConfiguration.Same(key, primary[index])).All(match => match);
+        if (!valid)
+        {
+            throw new NotSupportedException(
+                $"Cassandra groups by the primary key only: the key must be the full partition key ({string.Join(", ", _configuration.PartitionKeys)})" +
+                (_configuration.ClusteringKeys.Count > 0
+                    ? $", optionally followed by clustering columns in order ({string.Join(", ", _configuration.ClusteringKeys.Select(key => key.Column))})."
+                    : "."));
+        }
+    }
+
+    private string AggregateCql(GroupAggregate aggregate, string? member) => aggregate switch
+    {
+        GroupAggregate.Count => "COUNT(*)",
+        GroupAggregate.Sum => $"SUM({ColumnNamed(member!, "aggregate")})",
+        GroupAggregate.Min => $"MIN({ColumnNamed(member!, "aggregate")})",
+        GroupAggregate.Max => $"MAX({ColumnNamed(member!, "aggregate")})",
+        _ => $"AVG(CAST({ColumnNamed(member!, "aggregate")} AS double))",
+    };
+
+    private static int CellIndex(List<(GroupAggregate Aggregate, string? Member)> cells, GroupAggregate aggregate, string? member)
+    {
+        for (var index = 0; index < cells.Count; index++)
+        {
+            if (cells[index].Aggregate == aggregate
+                && (cells[index].Member is null
+                    ? member is null
+                    : member is not null && CassandraEntityConfiguration.Same(cells[index].Member!, member)))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static int KeyOrdinal(GroupQuery group, string keyName)
+    {
+        for (var index = 0; index < group.Key.Count; index++)
+        {
+            if (string.Equals(group.Key[index].Name, keyName, StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+
+        throw new NotSupportedException($"The key has no member '{keyName}'.");
+    }
+
+    /// <summary>Evaluates the interpreted HAVING against one grouped row's key and aggregate cells.</summary>
+    private static bool EvaluateHaving(GroupPredicate predicate, GroupQuery group,
+        List<(GroupAggregate Aggregate, string? Member)> cells, object?[] keyValues, object?[] cellValues) => predicate switch
+    {
+        GroupLogical { Operator: LogicalOperator.And } logical =>
+            logical.Operands.All(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues)),
+        GroupLogical logical =>
+            logical.Operands.Any(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues)),
+        GroupComparison comparison => CompareHaving(comparison, comparison.Aggregate is { } aggregate
+            ? cellValues[CellIndex(cells, aggregate, comparison.Member)]
+            : keyValues[KeyPathOrdinal(group, comparison.Member!)]),
+        _ => throw new NotSupportedException($"Unknown group predicate '{predicate.GetType().Name}'."),
+    };
+
+    private static int KeyPathOrdinal(GroupQuery group, string path)
+    {
+        for (var index = 0; index < group.Key.Count; index++)
+        {
+            if (CassandraEntityConfiguration.Same(group.Key[index].Path, path))
+            {
+                return index;
+            }
+        }
+
+        throw new NotSupportedException($"The key has no member '{path}'.");
+    }
+
+    private static bool CompareHaving(GroupComparison comparison, object? value)
+    {
+        if (comparison.Value is null)
+        {
+            return comparison.Operator switch
+            {
+                ComparisonOperator.Equal => value is null,
+                ComparisonOperator.NotEqual => value is not null,
+                _ => throw new NotSupportedException("Only == null and != null compare a group value against null."),
+            };
+        }
+
+        if (value is null)
+        {
+            return false;
+        }
+
+        var aligned = (IComparable)ChangeValue(value, comparison.Value.GetType())!;
+        var result = aligned.CompareTo(comparison.Value);
+        return comparison.Operator switch
+        {
+            ComparisonOperator.Equal => result == 0,
+            ComparisonOperator.NotEqual => result != 0,
+            ComparisonOperator.GreaterThan => result > 0,
+            ComparisonOperator.GreaterThanOrEqual => result >= 0,
+            ComparisonOperator.LessThan => result < 0,
+            _ => result <= 0,
+        };
+    }
+
+    private static IEnumerable<GroupComparison> Comparisons(GroupPredicate predicate) => predicate switch
+    {
+        GroupComparison comparison => [comparison],
+        GroupLogical logical => logical.Operands.SelectMany(Comparisons),
+        _ => [],
+    };
+
+    private static object? ChangeValue(object? value, Type target)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var type = Nullable.GetUnderlyingType(target) ?? target;
+        if (type.IsInstanceOfType(value))
+        {
+            return value;
+        }
+
+        // The driver hands timestamps back as DateTimeOffset; entity members are usually DateTime.
+        if (value is DateTimeOffset offset && type == typeof(DateTime))
+        {
+            return offset.UtcDateTime;
+        }
+
+        return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 
     // ---------------------------------------------------------------- continuation paging

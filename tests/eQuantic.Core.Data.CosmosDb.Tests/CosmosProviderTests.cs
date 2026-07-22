@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Core.Data.Repository.Read;
 
 namespace eQuantic.Core.Data.CosmosDb.Tests;
 
@@ -78,6 +79,21 @@ public sealed class CosmosProviderTests : CosmosIntegrationTest
         Assert.That(await Repo.CountAsync(InPartition), Is.EqualTo(2));
         Assert.That(await Repo.AnyAsync(InPartition), Is.True);
         Assert.That(await Repo.SumAsync(p => p.Quantity, InPartition), Is.EqualTo(5));
+    }
+
+    [Test]
+    public async Task Min_max_and_average_push_down_as_value_aggregates()
+    {
+        await Seed(
+            CosmosProduct.New("A", Partition, 1, 10m),
+            CosmosProduct.New("B", Partition, 3, 40m),
+            CosmosProduct.New("C", Partition + "f", 9, 99m));
+
+        var aggregates = (IAggregateReadRepository<CosmosProduct>)Repo;
+        Assert.That(await aggregates.MinAsync(p => p.Price, InPartition), Is.EqualTo(10m));
+        Assert.That(await aggregates.MaxAsync(p => p.Price, InPartition), Is.EqualTo(40m));
+        Assert.That(await aggregates.AverageAsync(p => p.Quantity, InPartition), Is.EqualTo(2d),
+            "the partition-pinning filter scopes the aggregate to one partition");
     }
 
     [Test]
