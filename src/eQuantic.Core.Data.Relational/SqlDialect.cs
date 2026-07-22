@@ -107,6 +107,17 @@ public abstract class SqlDialect
                + (filter is not null ? $" WHERE {filter}" : string.Empty);
     }
 
+    /// <summary>
+    ///     The DDL materializing a model-declared search index (<c>SearchIndex(...)</c> / <c>[SearchIndex]</c>)
+    ///     on a text column, in execution order — empty when the dialect has no equivalent structure. The
+    ///     declaration never changes semantics (<c>LIKE</c> pushes down regardless); it only changes the plan,
+    ///     which is why a dialect without the structure ignores it instead of refusing.
+    /// </summary>
+    /// <param name="indexName">The unquoted index name (the dialect quotes it).</param>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="quotedColumn">The quoted column.</param>
+    public virtual IReadOnlyList<string> SearchIndexSql(string indexName, string quotedTable, string quotedColumn) => [];
+
     /// <summary>The DDL adding a column to an existing table (added nullable, matching create-table semantics).</summary>
     /// <param name="quotedTable">The quoted table.</param>
     /// <param name="quotedColumn">The quoted column.</param>

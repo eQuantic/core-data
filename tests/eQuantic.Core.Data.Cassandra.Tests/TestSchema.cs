@@ -21,7 +21,28 @@ internal static class TestSchema
         .Entity<Tally>(entity => entity
             .Table("tallies")
             .PartitionKey(x => x.Space)
-            .Counter(x => x.Hits));
+            .Counter(x => x.Hits))
+        .Entity<Ledger>(entity => entity
+            .Table("ledgers")
+            .PartitionKey(x => x.Id)
+            .ConcurrencyToken(x => x.Version)
+            .TimeToLive(TimeSpan.FromDays(30)));
+}
+
+/// <summary>A versioned row: writes are lightweight transactions, and the table carries a default TTL.</summary>
+public sealed class Ledger : eQuantic.Core.Data.Repository.IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Holder { get; set; } = "";
+
+    public decimal Balance { get; set; }
+
+    public long Version { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
 }
 
 /// <summary>
@@ -40,5 +61,7 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Reading>(reading => reading
             .EnsureCollection())
         .For<Tally>(tally => tally
+            .EnsureCollection())
+        .For<Ledger>(ledger => ledger
             .EnsureCollection());
 }

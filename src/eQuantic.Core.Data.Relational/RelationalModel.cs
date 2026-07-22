@@ -36,6 +36,11 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     public object? Store(object? value) => Converter is null ? value : Converter.ToStored(value);
 }
 
+/// <summary>A search-indexed text column: the migration materializes an index serving <c>LIKE</c> where the dialect can.</summary>
+/// <param name="Column">The column.</param>
+/// <param name="Mode">What the declaration promises to match (<c>Contains</c> serves any pattern).</param>
+public sealed record RelationalSearchColumn(RelationalColumn Column, Data.Modeling.SearchMode Mode);
+
 /// <summary>
 ///     The relational mapping for an entity: its table, key column, columns (named through the dialect's
 ///     convention unless overridden) and whether the key is database-generated. Declared up front — the engine
@@ -46,7 +51,7 @@ public abstract class RelationalEntityConfiguration
     /// <summary>Initializes the configuration.</summary>
     protected RelationalEntityConfiguration(Type entityType, string tableName, IReadOnlyList<RelationalColumn> columns,
         RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
-        IReadOnlyList<RelationalNavigation>? navigations = null)
+        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -55,6 +60,7 @@ public abstract class RelationalEntityConfiguration
         KeyIsGenerated = keyIsGenerated;
         ConcurrencyToken = concurrencyToken;
         Navigations = navigations ?? [];
+        SearchColumns = searchColumns ?? [];
     }
 
     /// <summary>The entity type.</summary>
@@ -81,6 +87,14 @@ public abstract class RelationalEntityConfiguration
     /// <summary>The declared navigations (foreign-key overrides); undeclared ones resolve by convention.</summary>
     public IReadOnlyList<RelationalNavigation> Navigations { get; }
 
+    /// <summary>
+    ///     The search-indexed text columns. Relational <c>LIKE</c> already pushes down without them — the
+    ///     declaration is about the <b>index</b>: on PostgreSQL the migration materializes a GIN trigram index
+    ///     (<c>pg_trgm</c>) so substring matches stop scanning; dialects without an equivalent ignore it (the
+    ///     semantics never change, only the plan).
+    /// </summary>
+    public IReadOnlyList<RelationalSearchColumn> SearchColumns { get; }
+
     /// <summary>Resolves a declared navigation by member name, or <c>null</c> — conventions apply then.</summary>
     public RelationalNavigation? NavigationFor(string memberName) =>
         Navigations.FirstOrDefault(navigation => string.Equals(navigation.Member, memberName, StringComparison.OrdinalIgnoreCase));
@@ -97,8 +111,8 @@ public sealed class RelationalEntityConfiguration<TEntity> : RelationalEntityCon
 {
     internal RelationalEntityConfiguration(string tableName, IReadOnlyList<RelationalColumn> columns,
         RelationalColumn key, bool keyIsGenerated, RelationalColumn? concurrencyToken = null,
-        IReadOnlyList<RelationalNavigation>? navigations = null)
-        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken, navigations)
+        IReadOnlyList<RelationalNavigation>? navigations = null, IReadOnlyList<RelationalSearchColumn>? searchColumns = null)
+        : base(typeof(TEntity), tableName, columns, key, keyIsGenerated, concurrencyToken, navigations, searchColumns)
     {
     }
 }
@@ -155,6 +169,15 @@ public sealed class RelationalModel
                                   $"via {navigation.ForeignKey})");
             }
 
+            foreach (var search in configuration.SearchColumns)
+            {
+                var materialized = dialect.SearchIndexSql("probe", "probe", "probe").Count > 0;
+                report.AppendLine($"  search index: {search.Column.Property.Name} \"{search.Column.Name}\" " +
+                                  (materialized
+                                      ? "(GIN trigram via pg_trgm; LIKE stops scanning)"
+                                      : "(no index structure on this dialect; LIKE still pushes down, unindexed)"));
+            }
+
             if (eQuantic.Core.Data.Repository.EntityLifecycle.IsSoftDelete(
                     configuration.EntityType, new eQuantic.Core.Data.Repository.DataConventions()))
             {
@@ -198,6 +221,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, RelationalConverter> _converters = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<RelationalNavigation> _navigations = [];
+    private readonly Dictionary<string, Modeling.SearchMode> _searchMembers = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyMember;
     private bool _keyIsGenerated;
@@ -235,6 +259,11 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Modeling.ConcurrencyTokenAttribute>() is not null)
             {
                 _concurrencyMember = property.Name;
+            }
+
+            if (property.GetCustomAttribute<Modeling.SearchIndexAttribute>() is { } search)
+            {
+                _searchMembers[property.Name] = search.Mode;
             }
         }
     }
@@ -344,6 +373,21 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Declares a search-indexed text member. Relational <c>LIKE</c> already pushes down — this is about the
+    ///     <b>index</b>: on PostgreSQL the migration's <c>EnsureCollection()</c> materializes a GIN trigram index
+    ///     (<c>pg_trgm</c>) so <c>Contains</c>/<c>EndsWith</c> stop scanning; dialects without an equivalent
+    ///     ignore the declaration (same semantics, unindexed plan — <c>Explain()</c> says which).
+    /// </summary>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="mode">What the search should serve (<see cref="Modeling.SearchMode.Contains" /> by default).</param>
+    public RelationalEntityBuilder<TEntity> SearchIndex(Expression<Func<TEntity, string?>> selector,
+        Modeling.SearchMode mode = Modeling.SearchMode.Contains)
+    {
+        _searchMembers[selector.GetMemberName()] = mode;
+        return this;
+    }
+
     internal RelationalEntityConfiguration<TEntity> Build()
     {
         // Scalar members (and collections of scalars, for stores with array columns) map to columns; entity
@@ -394,8 +438,19 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             }
         }
 
+        var searchColumns = new List<RelationalSearchColumn>();
+        foreach (var (member, mode) in _searchMembers)
+        {
+            var column = columns.FirstOrDefault(candidate =>
+                             string.Equals(candidate.Property.Name, member, StringComparison.OrdinalIgnoreCase))
+                         ?? throw new InvalidOperationException(
+                             $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' to search-index.");
+            searchColumns.Add(new RelationalSearchColumn(column, mode));
+        }
+
         return new RelationalEntityConfiguration<TEntity>(
-            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken, _navigations);
+            _table ?? _dialect.TableName(typeof(TEntity).Name), columns, key, _keyIsGenerated, concurrencyToken, _navigations,
+            searchColumns);
     }
 
     private bool IsMapped(Type type)

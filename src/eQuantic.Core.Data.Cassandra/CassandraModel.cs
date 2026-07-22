@@ -28,7 +28,8 @@ public abstract class CassandraEntityConfiguration
     /// <summary>Initializes the configuration.</summary>
     protected CassandraEntityConfiguration(Type entityType, string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
-        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null)
+        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null,
+        string? concurrencyColumn = null, int? defaultTtlSeconds = null)
     {
         EntityType = entityType;
         TableName = tableName;
@@ -38,6 +39,8 @@ public abstract class CassandraEntityConfiguration
         KeyColumn = keyColumn;
         CounterColumns = counterColumns ?? [];
         SearchColumns = searchColumns ?? [];
+        ConcurrencyColumn = concurrencyColumn;
+        DefaultTtlSeconds = defaultTtlSeconds;
     }
 
     /// <summary>The entity type.</summary>
@@ -63,6 +66,17 @@ public abstract class CassandraEntityConfiguration
 
     /// <summary>The search-indexed columns — <c>LIKE</c> pushes down on these (a SASI index backs each one).</summary>
     public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; }
+
+    /// <summary>
+    ///     The optimistic-concurrency column (a version counter the entity carries), or <c>null</c>. Writes on a
+    ///     token entity become lightweight transactions: <c>INSERT … IF NOT EXISTS</c> for a new row,
+    ///     <c>UPDATE … IF version = old</c> (bumping the version) otherwise — Paxos per write, the explicit cost
+    ///     of the declaration. An unapplied write throws <c>ConcurrencyConflictException</c>.
+    /// </summary>
+    public string? ConcurrencyColumn { get; }
+
+    /// <summary>The table's <c>default_time_to_live</c> in seconds, or <c>null</c> (rows never expire by default).</summary>
+    public int? DefaultTtlSeconds { get; }
 
     /// <summary>Whether <paramref name="column" /> is a counter column.</summary>
     public bool IsCounter(string column) => CounterColumns.Any(counter => Same(counter, column));
@@ -115,8 +129,10 @@ public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfi
 {
     internal CassandraEntityConfiguration(string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
-        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null)
-        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns, searchColumns)
+        IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null,
+        string? concurrencyColumn = null, int? defaultTtlSeconds = null)
+        : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns, searchColumns,
+            concurrencyColumn, defaultTtlSeconds)
     {
     }
 }
@@ -158,6 +174,16 @@ public sealed class CassandraModel
             }
 
             report.AppendLine($"  key column: \"{configuration.KeyColumn}\" (point lookups)");
+            if (configuration.ConcurrencyColumn is { } token)
+            {
+                report.AppendLine($"  concurrency token: \"{token}\" (writes are LWTs: IF version = old, Paxos per write)");
+            }
+
+            if (configuration.DefaultTtlSeconds is { } ttl)
+            {
+                report.AppendLine($"  default TTL: {ttl}s (table default_time_to_live; writes can override)");
+            }
+
             foreach (var column in configuration.Columns)
             {
                 report.AppendLine($"  column: {column.Member} \"{column.Name}\" ({column.CqlType})");
@@ -210,6 +236,8 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, string> _storedNames = new(StringComparer.OrdinalIgnoreCase);
     private string? _table;
     private string? _keyColumn;
+    private string? _concurrencyMember;
+    private int? _ttlSeconds;
 
     internal CassandraEntityBuilder()
     {
@@ -218,6 +246,12 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         if (Data.Modeling.EntityAttribute.NameFor(typeof(TEntity)) is { } name)
         {
             _table = name;
+        }
+
+        if (System.Attribute.GetCustomAttribute(typeof(TEntity), typeof(Data.Modeling.TimeToLiveAttribute))
+            is Data.Modeling.TimeToLiveAttribute timeToLive)
+        {
+            _ttlSeconds = timeToLive.Seconds;
         }
 
         var properties = typeof(TEntity).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -256,6 +290,11 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Data.Modeling.CounterAttribute>() is not null)
             {
                 _counterColumns.Add(property.Name);
+            }
+
+            if (property.GetCustomAttribute<Data.Modeling.ConcurrencyTokenAttribute>() is not null)
+            {
+                _concurrencyMember = property.Name;
             }
 
             if (property.GetCustomAttribute<Data.Modeling.SearchIndexAttribute>() is { } search)
@@ -329,6 +368,33 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares the optimistic-concurrency member: an integral version the entity carries. Writes become
+    ///     lightweight transactions — <c>INSERT … IF NOT EXISTS</c> for a new row (version at default),
+    ///     <c>UPDATE … IF version = old</c> with a bump otherwise, <c>DELETE … IF version = old</c> on remove —
+    ///     and an unapplied write throws <c>ConcurrencyConflictException</c>. The explicit cost: every write on
+    ///     the entity pays a Paxos round; entities without a token keep plain (last-write-wins) upserts.
+    /// </summary>
+    /// <typeparam name="TMember">The version member type (an integral type; stored as bigint).</typeparam>
+    /// <param name="selector">The member selector (e.g. <c>x =&gt; x.Version</c>).</param>
+    public CassandraEntityBuilder<TEntity> ConcurrencyToken<TMember>(Expression<Func<TEntity, TMember>> selector)
+    {
+        _concurrencyMember = selector.GetMemberName();
+        return this;
+    }
+
+    /// <summary>
+    ///     Sets the table's <c>default_time_to_live</c>: rows expire that long after their last write unless the
+    ///     write overrides it (<c>CommitAsync(o =&gt; o.WithTtl(...))</c>). Applied by the migration's
+    ///     <c>EnsureCollection()</c>.
+    /// </summary>
+    /// <param name="timeToLive">The default time-to-live.</param>
+    public CassandraEntityBuilder<TEntity> TimeToLive(TimeSpan timeToLive)
+    {
+        _ttlSeconds = (int)timeToLive.TotalSeconds;
+        return this;
+    }
+
+    /// <summary>
     ///     Declares a SASI search index on a text column — <c>StartsWith</c>/<c>EndsWith</c>/<c>Contains</c> and
     ///     <c>Db.Like</c> push down as native <c>LIKE</c> on it (no scan opt-in: the index serves the match).
     ///     The migration runner creates the index with <c>EnsureCollection()</c>. SASI must be enabled on the
@@ -389,6 +455,22 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             }
         }
 
+        if (_concurrencyMember is { } concurrency)
+        {
+            if (_counterColumns.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}': a counter table cannot carry a concurrency token (counters only move by increments).");
+            }
+
+            var keys = _partitionKeys.Concat(_clusteringKeys.Select(key => key.Column));
+            if (keys.Any(key => CassandraEntityConfiguration.Same(key, concurrency)))
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}': the concurrency token cannot be a primary key column ('{concurrency}').");
+            }
+        }
+
         return new CassandraEntityConfiguration<TEntity>(
             _table ?? typeof(TEntity).Name,
             _partitionKeys.Select(Stored).ToList(),
@@ -396,7 +478,9 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             columns,
             Stored(_keyColumn ?? _partitionKeys[0]),
             _counterColumns.Select(Stored).ToList(),
-            _searchColumns.Select(search => search with { Column = Stored(search.Column) }).ToList());
+            _searchColumns.Select(search => search with { Column = Stored(search.Column) }).ToList(),
+            _concurrencyMember is null ? null : Stored(_concurrencyMember),
+            _ttlSeconds);
     }
 }
 

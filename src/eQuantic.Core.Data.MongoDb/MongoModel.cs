@@ -147,6 +147,40 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares the optimistic-concurrency member: an integral version the entity carries. A staged replace
+    ///     filters on the read version and writes the bump; a commit whose replace matched nothing throws
+    ///     <c>ConcurrencyConflictException</c> — another writer changed (or removed) the document since it was read.
+    ///     Entities without a token keep plain last-write-wins replaces.
+    /// </summary>
+    /// <typeparam name="TMember">The version member type (an integral type).</typeparam>
+    /// <param name="selector">The member selector (e.g. <c>x =&gt; x.Version</c>).</param>
+    public MongoEntityBuilder<TEntity> ConcurrencyToken<TMember>(Expression<Func<TEntity, TMember>> selector)
+    {
+        var member = typeof(TEntity).GetProperty(eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector))
+                     ?? throw new InvalidOperationException(
+                         $"'{typeof(TEntity).Name}' has no property behind the concurrency-token selector.");
+        MongoModeling.SetConcurrencyMember(typeof(TEntity), member);
+        Notes.Add($"concurrency token: {member.Name} (replaces filter on the read version and bump it)");
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares the TTL index: each document expires <paramref name="timeToLive" /> after the date its
+    ///     <paramref name="selector" /> member carries (MongoDB's per-document expiry — unlike Cosmos DB's
+    ///     container default). The migration's <c>EnsureCollection()</c> creates the index.
+    /// </summary>
+    /// <typeparam name="TMember">The date member type.</typeparam>
+    /// <param name="selector">The date member the expiry counts from (e.g. <c>x =&gt; x.CreatedAt</c>).</param>
+    /// <param name="timeToLive">The lifetime after that date.</param>
+    public MongoEntityBuilder<TEntity> TimeToLive<TMember>(Expression<Func<TEntity, TMember>> selector, TimeSpan timeToLive)
+    {
+        var member = eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector);
+        MongoModeling.SetTimeToLive(typeof(TEntity), member, (int)timeToLive.TotalSeconds);
+        Notes.Add($"TTL: documents expire {(int)timeToLive.TotalSeconds}s after {member} (per-document TTL index)");
+        return this;
+    }
+
+    /// <summary>
     ///     Declares a value conversion for the member: documents store <typeparamref name="TStored" />, the entity
     ///     keeps <typeparamref name="TMember" />. Filters, sorts and set-based updates on the member render against
     ///     the stored representation — the driver serializes constants through the member's serializer.

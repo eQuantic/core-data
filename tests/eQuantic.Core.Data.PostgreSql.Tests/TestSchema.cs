@@ -191,6 +191,20 @@ public sealed class Ticket : IEntity<long>
     public void SetKey(long key) => Id = key;
 }
 
+/// <summary>A searchable entity: <c>[SearchIndex]</c> asks the migration for a GIN trigram index on PostgreSQL.</summary>
+[eQuantic.Core.Data.Modeling.Entity("articles")]
+public sealed class Article : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    [eQuantic.Core.Data.Modeling.SearchIndex]
+    public string Title { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The relational mapping shared by the integration tests.</summary>
 internal static class TestSchema
 {
@@ -209,7 +223,8 @@ internal static class TestSchema
             .Converts(x => x.Status, status => status.ToString(), value => Enum.Parse<SubscriberStatus>(value)))
         .Entity<AnnotatedOrder>(_ => { })
         .Entity<AuditedTicket>(entity => entity.Key(x => x.Id, generated: true))
-        .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
+        .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
+        .Entity<Article>(_ => { });
 }
 
 /// <summary>The schema migration the runner discovers: both tables plus a customer index.</summary>
@@ -236,6 +251,8 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<AuditedTicket>(audited => audited
             .EnsureCollection())
         .For<Ticket>(ticket => ticket
+            .EnsureCollection())
+        .For<Article>(article => article
             .EnsureCollection());
 }
 

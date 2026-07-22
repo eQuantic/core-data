@@ -32,6 +32,55 @@ internal static class CassandraMapper
         return ($"DELETE FROM {configuration.TableName} WHERE {where}", values);
     }
 
+    /// <summary>
+    ///     Builds the lightweight-transaction write for a concurrency-token entity, bumping the token on the
+    ///     entity: a version at its default (0) means a new row (<c>INSERT … IF NOT EXISTS</c>, version written as
+    ///     1); anything else means a conditional update (<c>UPDATE … SET non-keys WHERE keys IF token = old</c>).
+    ///     The caller must check the result's <c>[applied]</c> cell.
+    /// </summary>
+    public static (string Cql, object?[] Values) BuildConditionalUpsert(CassandraEntityConfiguration configuration, object entity)
+    {
+        var token = configuration.ConcurrencyColumn!;
+        var member = configuration.MemberFor(token);
+        var property = Property(entity.GetType(), member)
+                       ?? throw new InvalidOperationException(
+                           $"'{entity.GetType().Name}' has no member '{member}' backing the concurrency token.");
+        var current = Convert.ToInt64(property.GetValue(entity) ?? 0L);
+
+        if (current == 0)
+        {
+            property.SetValue(entity, Convert.ChangeType(1L, Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType));
+            var (insert, values) = BuildUpsert(configuration, entity);
+            return (insert + " IF NOT EXISTS", values);
+        }
+
+        property.SetValue(entity, Convert.ChangeType(current + 1,
+            Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType));
+
+        var keys = PrimaryKey(configuration);
+        var sets = configuration.Columns
+            .Where(column => !keys.Any(key => CassandraEntityConfiguration.Same(key, column.Name)))
+            .ToList();
+        var assignments = string.Join(", ", sets.Select(column => $"{column.Name} = ?"));
+        var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
+        object?[] parameters =
+        [
+            .. sets.Select(column => Read(entity, column.Member)),
+            .. keys.Select(key => Read(entity, configuration.MemberFor(key))),
+            current,
+        ];
+        return ($"UPDATE {configuration.TableName} SET {assignments} WHERE {where} IF {token} = ?", parameters);
+    }
+
+    /// <summary>Builds the conditional <c>DELETE … IF token = current</c> for a concurrency-token entity.</summary>
+    public static (string Cql, object?[] Values) BuildConditionalDelete(CassandraEntityConfiguration configuration, object entity)
+    {
+        var token = configuration.ConcurrencyColumn!;
+        var current = Convert.ToInt64(Read(entity, configuration.MemberFor(token)) ?? 0L);
+        var (cql, values) = BuildDelete(configuration, entity);
+        return current == 0 ? (cql, values) : ($"{cql} IF {token} = ?", [.. values, current]);
+    }
+
     /// <summary>Materializes a row into a new <typeparamref name="TEntity" />.</summary>
     public static TEntity Materialize<TEntity>(CassandraEntityConfiguration configuration, Row row) =>
         Materialize<TEntity>(configuration, row, null);

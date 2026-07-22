@@ -181,19 +181,31 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     internal void StageInsert<TEntity>(TEntity item) where TEntity : class
     {
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
+        StampInitialVersion(item);
         Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
     }
 
     internal void StageReplace<TEntity>(TEntity item) where TEntity : class
     {
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-        Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
+        Buffer<TEntity>().Add(VersionedReplace(item, upsert: false), conditional: HasToken<TEntity>());
     }
 
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
     {
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-        Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = true });
+
+        // A token entity at its initial version is a new document: insert it (a duplicate key surfaces as an
+        // error rather than silently overwriting a concurrent writer's document).
+        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
+            && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
+        {
+            StampInitialVersion(item);
+            Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
+            return;
+        }
+
+        Buffer<TEntity>().Add(VersionedReplace(item, upsert: !HasToken<TEntity>()), conditional: HasToken<TEntity>());
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
@@ -201,11 +213,54 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
         if (EntityLifecycle.TrySoftDelete(item, Conventions, ServiceProvider))
         {
-            Buffer<TEntity>().Add(new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = false });
+            Buffer<TEntity>().Add(VersionedReplace(item, upsert: false), conditional: HasToken<TEntity>());
+            return;
+        }
+
+        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
+            && Convert.ToInt64(token.GetValue(item) ?? 0L) is var version && version > 0)
+        {
+            var filter = Builders<TEntity>.Filter.And(IdFilter(item),
+                Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(token.Name), version));
+            Buffer<TEntity>().Add(new DeleteOneModel<TEntity>(filter), conditional: true);
             return;
         }
 
         Buffer<TEntity>().Add(new DeleteOneModel<TEntity>(IdFilter(item)));
+    }
+
+    private static bool HasToken<TEntity>() where TEntity : class =>
+        MongoModeling.ConcurrencyMember(typeof(TEntity)) is not null;
+
+    /// <summary>Sets a token entity's version to 1 when unset — the first persisted version.</summary>
+    private static void StampInitialVersion<TEntity>(TEntity item) where TEntity : class
+    {
+        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
+            && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
+        {
+            token.SetValue(item, Convert.ChangeType(1L,
+                Nullable.GetUnderlyingType(token.PropertyType) ?? token.PropertyType));
+        }
+    }
+
+    /// <summary>
+    ///     The replace model for an entity: a token entity filters on the version it was read at and carries the
+    ///     bump, so a concurrent writer's document never gets silently overwritten.
+    /// </summary>
+    private ReplaceOneModel<TEntity> VersionedReplace<TEntity>(TEntity item, bool upsert) where TEntity : class
+    {
+        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is not { } token)
+        {
+            return new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = upsert };
+        }
+
+        var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
+        token.SetValue(item, Convert.ChangeType(current + 1,
+            Nullable.GetUnderlyingType(token.PropertyType) ?? token.PropertyType));
+
+        var filter = Builders<TEntity>.Filter.And(IdFilter(item),
+            Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(token.Name), current));
+        return new ReplaceOneModel<TEntity>(filter, item) { IsUpsert = false };
     }
 
     private PendingCollectionWrites<TEntity> Buffer<TEntity>() where TEntity : class

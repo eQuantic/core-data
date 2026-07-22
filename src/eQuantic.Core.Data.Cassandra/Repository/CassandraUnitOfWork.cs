@@ -20,7 +20,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     protected readonly ISession Session;
     protected readonly CassandraModel Model;
 
-    private readonly List<(string Cql, object?[] Values)> _pending = [];
+    private readonly List<(string Cql, object?[] Values, bool Conditional)> _pending = [];
     private bool _inTransaction;
     private bool _disposed;
 
@@ -76,7 +76,17 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         // Cassandra writes are upserts, so both stamps apply: CreatedAt only when unset, UpdatedAt always.
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-        _pending.Add(CassandraMapper.BuildUpsert(configuration, item));
+
+        if (configuration.ConcurrencyColumn is not null)
+        {
+            GuardConditionalInTransaction<TEntity>();
+            var conditional = CassandraMapper.BuildConditionalUpsert(configuration, item);
+            _pending.Add((conditional.Cql, conditional.Values, true));
+            return;
+        }
+
+        var statement = CassandraMapper.BuildUpsert(configuration, item);
+        _pending.Add((statement.Cql, statement.Values, false));
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
@@ -88,7 +98,31 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
             return;
         }
 
-        _pending.Add(CassandraMapper.BuildDelete(Configuration<TEntity>(), item));
+        var configuration = Configuration<TEntity>();
+        if (configuration.ConcurrencyColumn is not null)
+        {
+            GuardConditionalInTransaction<TEntity>();
+            var conditional = CassandraMapper.BuildConditionalDelete(configuration, item);
+            _pending.Add((conditional.Cql, conditional.Values, conditional.Cql.Contains(" IF ", StringComparison.Ordinal)));
+            return;
+        }
+
+        var statement = CassandraMapper.BuildDelete(configuration, item);
+        _pending.Add((statement.Cql, statement.Values, false));
+    }
+
+    /// <summary>
+    ///     A LOGGED BATCH cannot carry a lightweight transaction alongside other partitions' writes — Cassandra
+    ///     restricts conditional batches to a single partition. The combination refuses instead of degrading.
+    /// </summary>
+    private void GuardConditionalInTransaction<TEntity>()
+    {
+        if (_inTransaction)
+        {
+            throw new NotSupportedException(
+                $"'{typeof(TEntity).Name}' declares a concurrency token, and its conditional (LWT) write cannot run inside " +
+                "an explicit transaction batch; commit it outside the transaction, or drop the token from the model.");
+        }
     }
 
     // -------------------------------------------------------------- commit
@@ -130,17 +164,26 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         activity?.SetTag("equantic.writes", statements.Count);
 
         // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write; a TTL
-        // applies to this flush's inserts only (deletes carry none).
-        await Task.WhenAll(statements.Select(statement =>
+        // applies to this flush's inserts only (deletes carry none). A conditional (LWT) write answers whether it
+        // applied — an unapplied one means another writer won since the entity was read.
+        var results = await Task.WhenAll(statements.Select(async statement =>
         {
-            var (cql, values) = WithTtl(statement, ttlSeconds);
-            return CassandraStatements.ExecuteAsync(Session, cql, values, consistency);
+            var (cql, values) = WithTtl((statement.Cql, statement.Values), ttlSeconds);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency).ConfigureAwait(false);
+            return statement.Conditional && rows.FirstOrDefault() is { } row && !row.GetValue<bool>("[applied]") ? 0 : 1;
         })).ConfigureAwait(false);
+
+        var applied = results.Sum();
+        if (applied != statements.Count)
+        {
+            throw new ConcurrencyConflictException(statements.Count, applied);
+        }
+
         return statements.Count;
     }
 
     private static (string Cql, object?[] Values) WithTtl((string Cql, object?[] Values) statement, int? ttlSeconds) =>
-        ttlSeconds is { } ttl && statement.Cql.StartsWith("INSERT", StringComparison.Ordinal)
+        ttlSeconds is { } ttl && statement.Cql.StartsWith("INSERT", StringComparison.Ordinal) && !statement.Cql.EndsWith("IF NOT EXISTS", StringComparison.Ordinal)
             ? (statement.Cql + " USING TTL ?", [.. statement.Values, ttl])
             : statement;
     public int CommitAndRefreshChanges() => Commit();
@@ -182,7 +225,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
                 activity?.SetTag("equantic.writes", writes.Count);
 
                 var batch = new BatchStatement().SetBatchType(BatchType.Logged);
-                foreach (var (cql, values) in writes)
+                foreach (var (cql, values, _) in writes)
                 {
                     batch.Add(await CassandraStatements.BindAsync(Session, cql, values).ConfigureAwait(false));
                 }

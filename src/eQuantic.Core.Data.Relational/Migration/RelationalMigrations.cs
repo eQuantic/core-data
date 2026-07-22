@@ -59,8 +59,25 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             switch (operation)
             {
                 case EnsureCollectionOperation ensure:
-                    await ExecuteAsync(connection, CreateTable(_model.For(ensure.EntityType)), [], cancellationToken).ConfigureAwait(false);
+                {
+                    var configuration = _model.For(ensure.EntityType);
+                    await ExecuteAsync(connection, CreateTable(configuration), [], cancellationToken).ConfigureAwait(false);
+
+                    // The model's declared search indexes are part of the table's schema where the dialect can
+                    // materialize them (PostgreSQL: GIN trigram); elsewhere the declaration is a no-op by design.
+                    foreach (var search in configuration.SearchColumns)
+                    {
+                        foreach (var sql in _dialect.SearchIndexSql(
+                                     $"ix_{configuration.TableName}_{search.Column.Name}_search",
+                                     _dialect.Quote(configuration.TableName), _dialect.Quote(search.Column.Name)))
+                        {
+                            await ExecuteAsync(connection, sql, [], cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+
                     break;
+                }
+
                 case EnsureIndexOperation index:
                     await ExecuteAsync(connection, CreateIndex(index), [], cancellationToken).ConfigureAwait(false);
                     break;

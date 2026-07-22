@@ -29,6 +29,59 @@ internal static class MongoModeling
     /// <summary>Registers a fluent collection-name override (last declaration wins).</summary>
     public static void SetCollectionName(Type entityType, string name) => CollectionOverrides[entityType] = name;
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, System.Reflection.PropertyInfo?> ConcurrencyMembers = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, (string Member, int Seconds)> TtlOverrides = new();
+
+    /// <summary>
+    ///     The optimistic-concurrency member for an entity type (fluent <c>ConcurrencyToken(...)</c>, then
+    ///     <c>[ConcurrencyToken]</c>), or <c>null</c>. Writes on a token entity become conditional: the replace
+    ///     filter carries the read version, the document carries the bump, and a commit whose replace matched
+    ///     nothing throws <c>ConcurrencyConflictException</c>.
+    /// </summary>
+    public static System.Reflection.PropertyInfo? ConcurrencyMember(Type entityType) =>
+        ConcurrencyMembers.GetOrAdd(entityType, type => type
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .FirstOrDefault(property =>
+                property.GetCustomAttributes(typeof(ConcurrencyTokenAttribute), inherit: true).Length > 0));
+
+    /// <summary>Registers a fluent concurrency-token override.</summary>
+    public static void SetConcurrencyMember(Type entityType, System.Reflection.PropertyInfo member) =>
+        ConcurrencyMembers[entityType] = member;
+
+    /// <summary>
+    ///     The TTL-index declaration for an entity type, or <c>null</c>. Resolution: the fluent
+    ///     <c>TimeToLive(x =&gt; x.Member, span)</c>, then <c>[TimeToLive]</c> over the lifecycle
+    ///     <c>CreatedAt</c> member (<c>IEntityTimeMark</c>). MongoDB expires <b>per document</b>, that long after
+    ///     the indexed date — unlike Cosmos DB's container default; the semantic difference is the reason the
+    ///     member is explicit here.
+    /// </summary>
+    public static (string Member, int Seconds)? TimeToLive(Type entityType)
+    {
+        if (TtlOverrides.TryGetValue(entityType, out var overridden))
+        {
+            return overridden;
+        }
+
+        if (System.Attribute.GetCustomAttribute(entityType, typeof(TimeToLiveAttribute)) is not TimeToLiveAttribute annotated)
+        {
+            return null;
+        }
+
+        if (!typeof(eQuantic.Core.Domain.Entities.IEntityTimeMark).IsAssignableFrom(entityType))
+        {
+            throw new InvalidOperationException(
+                $"'{entityType.Name}' declares [TimeToLive] but MongoDB expires per document from a date member: " +
+                "implement IEntityTimeMark (CreatedAt) so the TTL index has its date, or declare the member with " +
+                "TimeToLive(x => x.Member, span) in the fluent model.");
+        }
+
+        return (nameof(eQuantic.Core.Domain.Entities.IEntityTimeMark.CreatedAt), annotated.Seconds);
+    }
+
+    /// <summary>Registers a fluent TTL declaration (member + lifetime).</summary>
+    public static void SetTimeToLive(Type entityType, string member, int seconds) =>
+        TtlOverrides[entityType] = (member, seconds);
+
     /// <summary>Registers the annotation conventions with the driver (idempotent).</summary>
     public static void Register()
     {

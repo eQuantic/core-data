@@ -99,6 +99,18 @@ public sealed class PostgreSqlDialect : SqlDialect
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     A GIN trigram index (<c>pg_trgm</c>): it serves <c>LIKE</c>/<c>ILIKE</c> with leading wildcards —
+    ///     <c>Contains</c>/<c>EndsWith</c> stop scanning. The extension creation is idempotent and ships with
+    ///     stock PostgreSQL; it does require the privilege to create extensions in the database.
+    /// </remarks>
+    public override IReadOnlyList<string> SearchIndexSql(string indexName, string quotedTable, string quotedColumn) =>
+    [
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        $"CREATE INDEX IF NOT EXISTS {Quote(indexName)} ON {quotedTable} USING GIN ({quotedColumn} gin_trgm_ops)",
+    ];
+
+    /// <inheritdoc />
     public override string AddColumnSql(string quotedTable, string quotedColumn, string sqlType) =>
         $"ALTER TABLE {quotedTable} ADD COLUMN IF NOT EXISTS {quotedColumn} {sqlType}";
 

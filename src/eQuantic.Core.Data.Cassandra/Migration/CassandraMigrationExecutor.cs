@@ -123,11 +123,23 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
             : string.Empty;
 
         var cql = $"CREATE TABLE IF NOT EXISTS {configuration.TableName} ({columns}, PRIMARY KEY ({partition}{clustering}))";
+
+        var with = new List<string>();
         if (configuration.ClusteringKeys.Count > 0)
         {
-            cql += " WITH CLUSTERING ORDER BY ("
-                   + string.Join(", ", configuration.ClusteringKeys.Select(key => $"{key.Column} {(key.Descending ? "DESC" : "ASC")}"))
-                   + ")";
+            with.Add("CLUSTERING ORDER BY ("
+                     + string.Join(", ", configuration.ClusteringKeys.Select(key => $"{key.Column} {(key.Descending ? "DESC" : "ASC")}"))
+                     + ")");
+        }
+
+        if (configuration.DefaultTtlSeconds is { } ttl)
+        {
+            with.Add($"default_time_to_live = {ttl}");
+        }
+
+        if (with.Count > 0)
+        {
+            cql += " WITH " + string.Join(" AND ", with);
         }
 
         return new SimpleStatement(cql);

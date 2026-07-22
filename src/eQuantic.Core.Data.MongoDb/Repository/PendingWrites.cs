@@ -30,12 +30,34 @@ internal sealed class PendingCollectionWrites<TEntity>(IMongoCollection<TEntity>
     where TEntity : class
 {
     private readonly List<WriteModel<TEntity>> _models = [];
+    private int _conditionalReplaces;
+    private int _conditionalDeletes;
 
     public int Count => _models.Count;
 
-    public void Add(WriteModel<TEntity> model) => _models.Add(model);
+    public void Add(WriteModel<TEntity> model) => Add(model, conditional: false);
 
-    public void Clear() => _models.Clear();
+    /// <summary>Stages a model; a conditional one (a version-filtered replace/delete) must match to count as applied.</summary>
+    public void Add(WriteModel<TEntity> model, bool conditional)
+    {
+        _models.Add(model);
+        if (conditional)
+        {
+            _ = model switch
+            {
+                ReplaceOneModel<TEntity> => _conditionalReplaces++,
+                DeleteOneModel<TEntity> => _conditionalDeletes++,
+                _ => 0,
+            };
+        }
+    }
+
+    public void Clear()
+    {
+        _models.Clear();
+        _conditionalReplaces = 0;
+        _conditionalDeletes = 0;
+    }
 
     public async Task<long> FlushAsync(IClientSessionHandle? session, CancellationToken cancellationToken)
     {
@@ -49,7 +71,23 @@ internal sealed class PendingCollectionWrites<TEntity>(IMongoCollection<TEntity>
             ? await collection.BulkWriteAsync(_models, options, cancellationToken).ConfigureAwait(false)
             : await collection.BulkWriteAsync(session, _models, options, cancellationToken).ConfigureAwait(false);
 
-        _models.Clear();
+        var conditionalReplaces = _conditionalReplaces;
+        var conditionalDeletes = _conditionalDeletes;
+        Clear();
+
+        // A version-filtered write that matched nothing is a lost race, not a no-op: another writer changed or
+        // removed the document since it was read. MatchedCount covers replaces; DeletedCount covers deletes.
+        if (conditionalReplaces > 0 && result.MatchedCount < conditionalReplaces)
+        {
+            throw new eQuantic.Core.Data.Repository.ConcurrencyConflictException(conditionalReplaces, result.MatchedCount);
+        }
+
+        if (conditionalDeletes > 0 && result.DeletedCount < conditionalDeletes)
+        {
+            throw new eQuantic.Core.Data.Repository.ConcurrencyConflictException(
+                conditionalDeletes + conditionalReplaces, result.DeletedCount + result.MatchedCount);
+        }
+
         return result.InsertedCount + result.ModifiedCount + result.DeletedCount + result.Upserts.Count;
     }
 }

@@ -91,6 +91,25 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
         {
             await _database.CreateCollectionAsync(name, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+
+        // The model's TTL declaration is part of the collection's schema: each document expires that long after
+        // its date member (MongoDB's per-document TTL — the index carries expireAfterSeconds).
+        if (MongoModeling.TimeToLive(operation.EntityType) is { } ttl)
+        {
+            var member = operation.EntityType.GetProperty(ttl.Member)
+                         ?? throw new InvalidOperationException(
+                             $"'{operation.EntityType.Name}' declares TTL on '{ttl.Member}', which is not a property.");
+            var element = MongoFieldNames.Resolve(operation.EntityType, member);
+            var keys = Builders<BsonDocument>.IndexKeys.Ascending(element);
+            var indexOptions = new CreateIndexOptions
+            {
+                Name = $"ttl_{element}",
+                ExpireAfter = TimeSpan.FromSeconds(ttl.Seconds),
+            };
+            await _database.GetCollection<BsonDocument>(name).Indexes
+                .CreateOneAsync(new CreateIndexModel<BsonDocument>(keys, indexOptions), cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     private async Task EnsureIndexAsync(EnsureIndexOperation operation, CancellationToken cancellationToken)
