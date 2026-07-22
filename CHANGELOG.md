@@ -1,5 +1,20 @@
 # Changelog
 
+## [6.0.0](https://github.com/eQuantic/core-data/compare/v5.8.0...v6.0.0) (2026-07-22)
+
+### ⚠ BREAKING CHANGES
+
+* **core:** requires eQuantic.Core.DataModel 4.0.0 and
+eQuantic.Core.Domain 4.0.0. Must be released AFTER core-api publishes the
+4.0.0 packages (this branch builds against them; it is held for that ordering,
+not pushed). Validated locally against a 4.0.0 pack of DataModel/Domain: full
+solution builds, core unit tests 62/62, PostgreSQL suite 48/48 including the
+DataModel EntityHistoryDataBase compatibility test.
+
+### Features
+
+* **core:** source IEntity from eQuantic.Core.DataModel (dependency inverted) ([8406b76](https://github.com/eQuantic/core-data/commit/8406b7619aabbaf2b0ac426e106f0659afdf6a55))
+
 ## [5.8.0](https://github.com/eQuantic/core-data/compare/v5.7.0...v5.8.0) (2026-07-22)
 
 ### Features
