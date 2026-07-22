@@ -1,0 +1,321 @@
+using System.Data.Common;
+using System.Reflection;
+using eQuantic.Core.Data.Migration;
+using eQuantic.Core.Data.Query;
+using eQuantic.Linq.Expressions;
+
+namespace eQuantic.Core.Data.Relational.Migration;
+
+/// <summary>
+///     The relational execution context handed to a <see cref="IMigrationBuilder.Run" /> escape hatch: it exposes
+///     the open <see cref="DbConnection" /> so a migration can run any SQL when the fluent operations are not enough.
+/// </summary>
+/// <param name="connection">The open connection.</param>
+public sealed class RelationalMigrationExecutionContext(DbConnection connection) : IMigrationExecutionContext
+{
+    /// <summary>The open connection.</summary>
+    public DbConnection Connection { get; } = connection;
+}
+
+/// <summary>Convenience access to the connection from the provider-agnostic context.</summary>
+public static class RelationalMigrationExecutionContextExtensions
+{
+    /// <summary>Narrows the context to the relational engine (e.g. <c>ctx.AsRelational().Connection</c>).</summary>
+    /// <param name="context">The provider-agnostic context.</param>
+    public static RelationalMigrationExecutionContext AsRelational(this IMigrationExecutionContext context) =>
+        (RelationalMigrationExecutionContext)context;
+}
+
+/// <summary>
+///     Applies provider-agnostic <see cref="MigrationOperation" />s as SQL DDL/DML: <c>CREATE TABLE</c> from the
+///     model (column types from the dialect, generated keys declared), single- and multi-column indexes, keyed
+///     data updates, column renames and type conversions — and hands the connection to escape-hatch steps.
+/// </summary>
+public sealed class RelationalMigrationExecutor : IMigrationExecutor
+{
+    private readonly DbDataSource _dataSource;
+    private readonly SqlDialect _dialect;
+    private readonly RelationalModel _model;
+
+    /// <summary>Initializes the executor.</summary>
+    public RelationalMigrationExecutor(DbDataSource dataSource, SqlDialect dialect, RelationalModel model)
+    {
+        _dataSource = dataSource;
+        _dialect = dialect;
+        _model = model;
+    }
+
+    /// <inheritdoc />
+    public async Task ApplyAsync(IReadOnlyList<MigrationOperation> operations, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var context = new RelationalMigrationExecutionContext(connection);
+
+        foreach (var operation in operations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            switch (operation)
+            {
+                case EnsureCollectionOperation ensure:
+                    await ExecuteAsync(connection, CreateTable(_model.For(ensure.EntityType)), [], cancellationToken).ConfigureAwait(false);
+                    break;
+                case EnsureIndexOperation index:
+                    await ExecuteAsync(connection, CreateIndex(index), [], cancellationToken).ConfigureAwait(false);
+                    break;
+                case UpdateOperation update:
+                {
+                    var (sql, parameters) = Update(update);
+                    await ExecuteAsync(connection, sql, parameters, cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case RenameFieldOperation rename:
+                {
+                    var configuration = _model.For(rename.EntityType);
+                    var column = Column(configuration, rename.Field.GetMemberName());
+                    await ExecuteAsync(connection,
+                        $"ALTER TABLE {_dialect.Quote(configuration.TableName)} RENAME COLUMN {_dialect.Quote(column.Name)} " +
+                        $"TO {_dialect.Quote(_dialect.ColumnName(rename.NewName))}", [], cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case ConvertFieldOperation convert:
+                {
+                    var configuration = _model.For(convert.EntityType);
+                    var column = Column(configuration, convert.Field.GetMemberName());
+                    await ExecuteAsync(connection,
+                        _dialect.AlterColumnType(_dialect.Quote(configuration.TableName), _dialect.Quote(column.Name), SqlTypeOf(convert.To)),
+                        [], cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case RunOperation run:
+                    await run.Action(context, cancellationToken).ConfigureAwait(false);
+                    break;
+                default:
+                    throw new NotSupportedException($"Unsupported migration operation '{operation.GetType().Name}'.");
+            }
+        }
+    }
+
+    private string CreateTable(RelationalEntityConfiguration configuration)
+    {
+        var columns = configuration.Columns.Select(column =>
+        {
+            var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column.Property.PropertyType)}";
+            if (column == configuration.Key)
+            {
+                if (configuration.KeyIsGenerated)
+                {
+                    declaration += " " + _dialect.GeneratedKeyDdl;
+                }
+
+                declaration += " PRIMARY KEY";
+            }
+
+            return declaration;
+        });
+
+        return $"CREATE TABLE IF NOT EXISTS {_dialect.Quote(configuration.TableName)} ({string.Join(", ", columns)})";
+    }
+
+    private string CreateIndex(EnsureIndexOperation operation)
+    {
+        var configuration = _model.For(operation.EntityType);
+        if (operation.ExpireAfter is not null)
+        {
+            throw new NotSupportedException("Relational stores have no TTL indexes; expire rows with a scheduled delete instead.");
+        }
+
+        var keys = operation.Keys
+            .Select(key => (Column: Column(configuration, key.Selector.GetMemberName()), key.Descending))
+            .ToList();
+        var name = operation.Name
+                   ?? $"ix_{configuration.TableName}_{string.Join("_", keys.Select(key => key.Column.Name))}";
+        var list = string.Join(", ", keys.Select(key => $"{_dialect.Quote(key.Column.Name)}{(key.Descending ? " DESC" : string.Empty)}"));
+
+        return $"CREATE {(operation.Unique ? "UNIQUE " : string.Empty)}INDEX IF NOT EXISTS {_dialect.Quote(name)} " +
+               $"ON {_dialect.Quote(configuration.TableName)} ({list})";
+    }
+
+    private (string Sql, List<object?> Parameters) Update(UpdateOperation operation)
+    {
+        var configuration = _model.For(operation.EntityType);
+        var parameters = new List<object?>();
+
+        var set = string.Join(", ", operation.Sets.Select(assignment =>
+        {
+            parameters.Add(_dialect.BindValue(assignment.Value));
+            return $"{_dialect.Quote(Column(configuration, assignment.Field.GetMemberName()).Name)} = @p{parameters.Count - 1}";
+        }));
+
+        var where = SqlFilterRenderer.Render(_dialect, configuration, FilterInterpreter.Interpret(operation.Predicate), parameters);
+        return ($"UPDATE {_dialect.Quote(configuration.TableName)} SET {set} WHERE {where}", parameters);
+    }
+
+    private static RelationalColumn Column(RelationalEntityConfiguration configuration, string memberName) =>
+        configuration.ColumnFor(memberName)
+        ?? throw new NotSupportedException($"'{configuration.EntityType.Name}' has no mapped member '{memberName}'.");
+
+    private string SqlTypeOf(MigrationFieldType type) => type switch
+    {
+        MigrationFieldType.String => _dialect.SqlType(typeof(string)),
+        MigrationFieldType.Boolean => _dialect.SqlType(typeof(bool)),
+        MigrationFieldType.Int32 => _dialect.SqlType(typeof(int)),
+        MigrationFieldType.Int64 => _dialect.SqlType(typeof(long)),
+        MigrationFieldType.Double => _dialect.SqlType(typeof(double)),
+        MigrationFieldType.Decimal => _dialect.SqlType(typeof(decimal)),
+        MigrationFieldType.DateTime => _dialect.SqlType(typeof(DateTime)),
+        MigrationFieldType.Guid => _dialect.SqlType(typeof(Guid)),
+        _ => throw new NotSupportedException($"Cannot convert a relational column to '{type}'."),
+    };
+
+    private static async Task ExecuteAsync(DbConnection connection, string sql, IReadOnlyList<object?> parameters, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        for (var index = 0; index < parameters.Count; index++)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "p" + index;
+            parameter.Value = parameters[index] ?? DBNull.Value;
+            command.Parameters.Add(parameter);
+        }
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>Tracks applied migrations in a <c>_migrations</c> table.</summary>
+public sealed class RelationalMigrationHistory : IMigrationHistory
+{
+    private readonly DbDataSource _dataSource;
+    private readonly SqlDialect _dialect;
+
+    /// <summary>Initializes the history.</summary>
+    public RelationalMigrationHistory(DbDataSource dataSource, SqlDialect dialect)
+    {
+        _dataSource = dataSource;
+        _dialect = dialect;
+    }
+
+    private string Table => _dialect.Quote("_migrations");
+
+    /// <inheritdoc />
+    public async Task EnsureCreatedAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            $"CREATE TABLE IF NOT EXISTS {Table} (" +
+            $"{_dialect.Quote("id")} {_dialect.SqlType(typeof(string))} PRIMARY KEY, " +
+            $"{_dialect.Quote("title")} {_dialect.SqlType(typeof(string))}, " +
+            $"{_dialect.Quote("date")} {_dialect.SqlType(typeof(DateTime))}, " +
+            $"{_dialect.Quote("applied_at")} {_dialect.SqlType(typeof(DateTime))})";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyCollection<string>> GetAppliedIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT {_dialect.Quote("id")} FROM {Table}";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+        var ids = new List<string>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ids.Add(reader.GetString(0));
+        }
+
+        return ids;
+    }
+
+    /// <inheritdoc />
+    public async Task RecordAsync(AppliedMigration migration, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"INSERT INTO {Table} VALUES (@p0, @p1, @p2, @p3)";
+        var values = new object?[]
+        {
+            migration.Id, migration.Title,
+            DateTime.SpecifyKind(migration.Date, DateTimeKind.Utc), DateTime.UtcNow,
+        };
+        for (var index = 0; index < values.Length; index++)
+        {
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "p" + index;
+            parameter.Value = values[index] ?? DBNull.Value;
+            command.Parameters.Add(parameter);
+        }
+
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>
+///     Discovers the migrations marked with <see cref="MigrationAttribute" /> across the supplied assemblies,
+///     orders them by timestamp, skips the recorded ones and applies the rest through the executor.
+/// </summary>
+public sealed class RelationalMigrationRunner : IMigrationRunner
+{
+    private readonly IMigrationExecutor _executor;
+    private readonly IMigrationHistory _history;
+    private readonly IReadOnlyList<System.Reflection.Assembly> _assemblies;
+
+    /// <summary>Initializes the runner.</summary>
+    public RelationalMigrationRunner(IMigrationExecutor executor, IMigrationHistory history,
+        IEnumerable<System.Reflection.Assembly> assemblies)
+    {
+        _executor = executor;
+        _history = history;
+        _assemblies = assemblies.Distinct().ToArray();
+    }
+
+    /// <inheritdoc />
+    public async Task<int> RunAsync(CancellationToken cancellationToken = default)
+    {
+        await _history.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
+
+        var pending = _assemblies
+            .SelectMany(assembly => assembly.GetTypes())
+            .Where(type => typeof(Data.Migration.Migration).IsAssignableFrom(type) && type is { IsAbstract: false, IsClass: true })
+            .Select(type => (Attribute: type.GetCustomAttribute<MigrationAttribute>(), Type: type))
+            .Where(candidate => candidate.Attribute is not null)
+            .OrderBy(candidate => candidate.Attribute!.Date)
+            .ToList();
+        if (pending.Count == 0)
+        {
+            return 0;
+        }
+
+        var applied = new HashSet<string>(await _history.GetAppliedIdsAsync(cancellationToken).ConfigureAwait(false));
+
+        var count = 0;
+        foreach (var (attribute, type) in pending)
+        {
+            if (applied.Contains(attribute!.Id))
+            {
+                continue;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var migration = (Data.Migration.Migration)Activator.CreateInstance(type)!;
+            var builder = new MigrationBuilder();
+            migration.Up(builder);
+
+            await _executor.ApplyAsync(builder.Operations, cancellationToken).ConfigureAwait(false);
+            await _history
+                .RecordAsync(new AppliedMigration(attribute.Id, attribute.Title, attribute.Date, DateTime.UtcNow), cancellationToken)
+                .ConfigureAwait(false);
+
+            count++;
+        }
+
+        return count;
+    }
+}

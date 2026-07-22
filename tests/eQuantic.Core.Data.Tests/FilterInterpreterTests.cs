@@ -157,6 +157,16 @@ public sealed class FilterInterpreterTests
     }
 
     [Test]
+    public void CompareTo_against_zero_normalizes_to_the_direct_comparison()
+    {
+        var filter = (ComparisonFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.CompareTo("m") > 0);
+
+        Assert.That(filter.Member, Is.EqualTo("Name"));
+        Assert.That(filter.Operator, Is.EqualTo(ComparisonOperator.GreaterThan));
+        Assert.That(filter.Value, Is.EqualTo("m"));
+    }
+
+    [Test]
     public void Parameter_referencing_operand_stays_unsupported()
     {
         Assert.That(() => FilterInterpreter.Interpret<Sample>(x => x.TenantId == x.Name.Length),

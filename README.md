@@ -103,14 +103,18 @@ This package is the **contracts** (`IRepository`, `IUnitOfWork`, `QueryOptions`,
 `IRepository<TEntity, TKey>`, not `IRepository<TUnitOfWork, TEntity, TKey>`. The Entity Framework
 implementation lives in the provider packages (`eQuantic.Core.Data.EntityFramework` and friends).
 
-## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra
+## Native providers — MongoDB, Azure Cosmos DB, Apache Cassandra, PostgreSQL
 
 The same contracts implemented **directly on each official driver — no Entity Framework** — with a
 lean write model: `Add`/`Modify`/`Remove` buffer typed writes and one native batch runs on `Commit`
 (no change tracking or snapshotting). Explicit transactions are opt-in: multi-document sessions on
 MongoDB (reads inside the transaction see its writes), a single-partition `TransactionalBatch` on
-Cosmos, an atomic `LOGGED BATCH` on Cassandra. All three ship the same **fluent, typed migrations**,
-authored with member selectors instead of field strings:
+Cosmos, an atomic `LOGGED BATCH` on Cassandra — and on PostgreSQL the commit itself is **atomic**
+(one batched flush in a transaction, generated keys read back with `RETURNING`, explicit
+transactions spanning commits with read-your-writes). The relational provider is a thin dialect
+over the shared `eQuantic.Core.Data.Relational` engine — MySQL and SQL Server follow the same seam.
+All providers ship the same **fluent, typed migrations**, authored with member selectors instead of
+field strings:
 
 ```csharp
 services.AddMongoRepositories("mongodb://localhost:27017", "shop");
@@ -132,6 +136,10 @@ await serviceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
 
 ### The engine — what the providers add on top of the drivers
 
+- **A complete SQL target (PostgreSQL)** — `OR`/`NOT`/`!=`/`NULL` push down whole with C# semantics
+  preserved (`== null` → `IS NULL`, `!=` matches `NULL` rows, `Contains` with a `null` in the list
+  matches `NULL` columns), arrays are native (`= ANY`, atomic append/remove), sorting works on any
+  column and paging is native `LIMIT/OFFSET` plus keyset continuation.
 - **Pushdown + residual filtering (Cassandra)** — every clause CQL can express runs on the cluster;
   the ones it cannot (`OR` across columns, `!=`, `NULL`, arbitrary predicates) run client-side over
   the fetched rows behind the explicit `.AllowClientEvaluation()` opt-in, with `.AllowFiltering()`

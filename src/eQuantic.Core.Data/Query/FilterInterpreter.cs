@@ -80,7 +80,60 @@ public static class FilterInterpreter
                 return Or(Visit(binary.Left), Visit(binary.Right));
         }
 
+        if (TryNormalizeCompareTo(binary, out var normalized))
+        {
+            return normalized;
+        }
+
         return Compare(binary, Comparison(binary.NodeType));
+    }
+
+    /// <summary>
+    ///     Normalizes <c>member.CompareTo(value) &lt;op&gt; 0</c> into the direct comparison — the shape ordered
+    ///     comparisons take for types without comparison operators (string, Guid), e.g. keyset paging predicates.
+    /// </summary>
+    private static bool TryNormalizeCompareTo(BinaryNode binary, out QueryFilter filter)
+    {
+        filter = null!;
+        if (!TryComparison(binary.NodeType, out var op))
+        {
+            return false;
+        }
+
+        if (IsZero(binary.Right) && CompareToCall(binary.Left, out var member, out var value))
+        {
+            filter = new ComparisonFilter(member, op, value);
+            return true;
+        }
+
+        if (IsZero(binary.Left) && CompareToCall(binary.Right, out member, out value))
+        {
+            filter = new ComparisonFilter(member, Flip(op), value);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsZero(ExpressionNode node) =>
+        Unwrap(node) is ConstantNode { Value: 0 };
+
+    private static bool CompareToCall(ExpressionNode node, out string member, out object? value)
+    {
+        member = string.Empty;
+        value = null;
+        if (Unwrap(node) is not MethodCallNode { Method.Name: nameof(IComparable.CompareTo), Object: { } receiver, Arguments: [var argument] })
+        {
+            return false;
+        }
+
+        if (Path(receiver) is not { } path || !NodeEvaluation.TryValue(argument, out value))
+        {
+            return false;
+        }
+
+        member = path;
+        return true;
     }
 
     private static QueryFilter Compare(BinaryNode binary, ComparisonOperator op)

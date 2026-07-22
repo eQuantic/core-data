@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Description>Native PostgreSQL implementation of the eQuantic.Core.Data contracts — Npgsql directly over the shared relational engine, no Entity Framework: pushdown SQL from typed filters, atomic batched commits with RETURNING key backfill, arrays, keyset paging and SQL-DDL migrations.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.PostgreSql</AssemblyTitle>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <AssemblyName>eQuantic.Core.Data.PostgreSql</AssemblyName>
+        <PackageId>eQuantic.Core.Data.PostgreSql</PackageId>
+        <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;PostgreSql;Npgsql;Native</PackageTags>
+        <PackageReleaseNotes>Native PostgreSQL (Npgsql) implementation of the eQuantic.Core.Data contracts</PackageReleaseNotes>
+        <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
+        <PackageOutputPath>../../artifacts/</PackageOutputPath>
+        <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
+        <RepositoryType>Git</RepositoryType>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageIcon>Icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Npgsql" Version="9.0.3" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+        <ProjectReference Include="../eQuantic.Core.Data.Relational/eQuantic.Core.Data.Relational.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../eQuantic.Core.Data/Icon.png" Pack="true" PackagePath="Icon.png" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="" />
+        <None Include="../../README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>$(AssemblyName).Tests</_Parameter1>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+</Project>

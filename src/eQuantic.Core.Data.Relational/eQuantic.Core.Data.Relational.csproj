@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Description>The shared ADO.NET core for the native relational eQuantic.Core.Data providers (PostgreSQL, MySQL, SQL Server): repositories and unit of work over DbDataSource, a SQL renderer for the dialect-agnostic filter/update models, schema migrations and the pushdown engine — no Entity Framework.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.Relational</AssemblyTitle>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <AssemblyName>eQuantic.Core.Data.Relational</AssemblyName>
+        <PackageId>eQuantic.Core.Data.Relational</PackageId>
+        <PackageTags>eQuantic;Core;Data;Library;Repository;Pattern;Relational;Sql;Native</PackageTags>
+        <PackageReleaseNotes>Shared ADO.NET core for the native relational eQuantic.Core.Data providers</PackageReleaseNotes>
+        <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
+        <PackageOutputPath>../../artifacts/</PackageOutputPath>
+        <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
+        <RepositoryType>Git</RepositoryType>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageIcon>Icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../eQuantic.Core.Data/Icon.png" Pack="true" PackagePath="Icon.png" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="" />
+        <None Include="../../README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>eQuantic.Core.Data.PostgreSql</_Parameter1>
+        </AssemblyAttribute>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>eQuantic.Core.Data.MySql</_Parameter1>
+        </AssemblyAttribute>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>eQuantic.Core.Data.SqlServer</_Parameter1>
+        </AssemblyAttribute>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>eQuantic.Core.Data.PostgreSql.Tests</_Parameter1>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+</Project>
