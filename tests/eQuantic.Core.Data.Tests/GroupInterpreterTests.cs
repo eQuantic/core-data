@@ -16,6 +16,11 @@ public sealed class GroupInterpreterTests
         Expression<Func<IGrouping<TKey, Sample>, TResult>> resultSelector) =>
         GroupInterpreter.Interpret(keySelector, resultSelector);
 
+    private static GroupPredicate Having<TKey>(
+        Expression<Func<Sample, TKey>> keySelector,
+        Expression<Func<IGrouping<TKey, Sample>, bool>> having) =>
+        GroupInterpreter.InterpretHaving(having, GroupInterpreter.Interpret(keySelector, g => new { g.Key }).Key);
+
     [Test]
     public void Single_key_with_count_sum_and_average()
     {
@@ -66,6 +71,56 @@ public sealed class GroupInterpreterTests
         Assert.That(query.Bindings.Select(binding => binding.Target), Is.EqualTo(new[] { "Tenant", "Orders", "Smallest" }));
         var min = (GroupAggregateBinding)query.Bindings[2];
         Assert.That((min.Aggregate, min.Member), Is.EqualTo((GroupAggregate.Min, "Total")));
+    }
+
+    [Test]
+    public void Having_compares_aggregates_and_the_key()
+    {
+        var predicate = (GroupLogical)Having(x => x.Name, g => g.Sum(x => x.Total) > 100m && g.Key == "a");
+
+        Assert.That(predicate.Operator, Is.EqualTo(LogicalOperator.And));
+        var sum = (GroupComparison)predicate.Operands[0];
+        Assert.That((sum.Aggregate, sum.Member, sum.Operator, sum.Value),
+            Is.EqualTo(((GroupAggregate?)GroupAggregate.Sum, "Total", ComparisonOperator.GreaterThan, (object?)100m)));
+        var key = (GroupComparison)predicate.Operands[1];
+        Assert.That((key.Aggregate, key.Member, key.Operator, key.Value),
+            Is.EqualTo(((GroupAggregate?)null, "Name", ComparisonOperator.Equal, (object?)"a")));
+    }
+
+    [Test]
+    public void Having_flips_reversed_comparisons_and_negates_with_de_morgan()
+    {
+        var flipped = (GroupComparison)Having(x => x.Name, g => 2 <= g.Count());
+        Assert.That((flipped.Aggregate, flipped.Operator, flipped.Value),
+            Is.EqualTo(((GroupAggregate?)GroupAggregate.Count, ComparisonOperator.GreaterThanOrEqual, (object?)2)));
+
+        var inverted = (GroupComparison)Having(x => x.Name, g => !(g.Count() >= 2));
+        Assert.That(inverted.Operator, Is.EqualTo(ComparisonOperator.LessThan));
+
+        var demorgan = (GroupLogical)Having(x => x.Name, g => !(g.Count() >= 2 && g.Key == "a"));
+        Assert.That(demorgan.Operator, Is.EqualTo(LogicalOperator.Or));
+        Assert.That(((GroupComparison)demorgan.Operands[0]).Operator, Is.EqualTo(ComparisonOperator.LessThan));
+        Assert.That(((GroupComparison)demorgan.Operands[1]).Operator, Is.EqualTo(ComparisonOperator.NotEqual));
+    }
+
+    [Test]
+    public void Having_composite_key_members_resolve_to_their_entity_paths()
+    {
+        var comparison = (GroupComparison)Having(x => new { x.Name, x.TenantId }, g => g.Key.TenantId >= 5);
+        Assert.That((comparison.Aggregate, comparison.Member, comparison.Operator, comparison.Value),
+            Is.EqualTo(((GroupAggregate?)null, "TenantId", ComparisonOperator.GreaterThanOrEqual, (object?)5)));
+
+        Assert.That(() => Having(x => new { x.Name, x.TenantId }, g => g.Key == null),
+            Throws.TypeOf<NotSupportedException>(), "a composite key compares one member at a time");
+    }
+
+    [Test]
+    public void Having_rejects_unsupported_shapes_with_the_supported_ones()
+    {
+        Assert.That(() => Having(x => x.Name, g => g.First().Total > 1m),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"));
+        Assert.That(() => Having(x => x.Name, g => g.Select(x => x.Total).Any()),
+            Throws.TypeOf<NotSupportedException>());
     }
 
     [Test]

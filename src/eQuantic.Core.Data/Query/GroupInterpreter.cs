@@ -64,6 +64,37 @@ public sealed class GroupAggregateBinding(string target, GroupAggregate aggregat
 /// <param name="ConstructorProjection">Whether the result is built positionally (anonymous/ctor) rather than by member init.</param>
 public sealed record GroupQuery(IReadOnlyList<GroupKeyMember> Key, IReadOnlyList<GroupBinding> Bindings, bool ConstructorProjection);
 
+/// <summary>A predicate over a group — the dialect-agnostic <c>HAVING</c> model.</summary>
+public abstract class GroupPredicate
+{
+}
+
+/// <summary>Compares an aggregate — or a key member — against a value.</summary>
+public sealed class GroupComparison(GroupAggregate? aggregate, string? member, ComparisonOperator op, object? value) : GroupPredicate
+{
+    /// <summary>The aggregate, or <c>null</c> when the comparison is over a key member.</summary>
+    public GroupAggregate? Aggregate { get; } = aggregate;
+
+    /// <summary>The aggregated member path (<c>null</c> for <see cref="GroupAggregate.Count" />), or the key member's entity path.</summary>
+    public string? Member { get; } = member;
+
+    /// <summary>The comparison operator.</summary>
+    public ComparisonOperator Operator { get; } = op;
+
+    /// <summary>The compared value.</summary>
+    public object? Value { get; } = value;
+}
+
+/// <summary>Combines group predicates with <c>AND</c>/<c>OR</c>.</summary>
+public sealed class GroupLogical(LogicalOperator op, IReadOnlyList<GroupPredicate> operands) : GroupPredicate
+{
+    /// <summary>The logical operator.</summary>
+    public LogicalOperator Operator { get; } = op;
+
+    /// <summary>The combined operands.</summary>
+    public IReadOnlyList<GroupPredicate> Operands { get; } = operands;
+}
+
 /// <summary>
 ///     Interprets a typed <c>GroupBy</c> — a key selector plus a result selector over the grouping — into the
 ///     dialect-agnostic <see cref="GroupQuery" />. Only the shapes a store can aggregate server-side are
@@ -160,18 +191,160 @@ public static class GroupInterpreter
                 case nameof(Enumerable.Sum) or nameof(Enumerable.Min) or nameof(Enumerable.Max) or nameof(Enumerable.Average)
                     when arguments.Count == 2 && NodeEvaluation.Unwrap(arguments[1]) is LambdaNode selector
                          && MemberPath(selector.Body) is { } member:
-                    return new GroupAggregateBinding(target, call.Method.Name switch
-                    {
-                        nameof(Enumerable.Sum) => GroupAggregate.Sum,
-                        nameof(Enumerable.Min) => GroupAggregate.Min,
-                        nameof(Enumerable.Max) => GroupAggregate.Max,
-                        _ => GroupAggregate.Average,
-                    }, member);
+                    return new GroupAggregateBinding(target, AggregateOf(call.Method.Name), member);
             }
         }
 
         throw Unsupported($"'{target}'");
     }
+
+    /// <summary>
+    ///     Interprets a <c>HAVING</c> predicate over the grouping into the dialect-agnostic model. Supported
+    ///     shapes: comparisons (<c>==</c>, <c>!=</c>, <c>&gt;</c>, <c>&gt;=</c>, <c>&lt;</c>, <c>&lt;=</c>) of
+    ///     <c>g.Count()</c>, <c>g.Sum/Min/Max/Average(x =&gt; x.Member)</c> or a key member (<c>g.Key</c>,
+    ///     <c>g.Key.Member</c>) against values, combined with <c>&amp;&amp;</c>, <c>||</c> and <c>!</c>.
+    /// </summary>
+    /// <param name="having">The predicate over the grouping.</param>
+    /// <param name="key">The interpreted grouping key (from <see cref="Interpret{TEntity,TKey,TResult}" />).</param>
+    public static GroupPredicate InterpretHaving<TEntity, TKey>(
+        Expression<Func<IGrouping<TKey, TEntity>, bool>> having, IReadOnlyList<GroupKeyMember> key)
+    {
+        var lambda = FilterInterpreter.ToNode(having);
+        return Having(lambda.Body, lambda.Parameters[0], key, negated: false);
+    }
+
+    private static GroupPredicate Having(ExpressionNode node, ParameterNode grouping, IReadOnlyList<GroupKeyMember> key, bool negated)
+    {
+        node = NodeEvaluation.Unwrap(node);
+        switch (node)
+        {
+            case BinaryNode { NodeType: ExpressionType.AndAlso or ExpressionType.And } logical:
+                return new GroupLogical(negated ? LogicalOperator.Or : LogicalOperator.And,
+                    [Having(logical.Left, grouping, key, negated), Having(logical.Right, grouping, key, negated)]);
+
+            case BinaryNode { NodeType: ExpressionType.OrElse or ExpressionType.Or } logical:
+                return new GroupLogical(negated ? LogicalOperator.And : LogicalOperator.Or,
+                    [Having(logical.Left, grouping, key, negated), Having(logical.Right, grouping, key, negated)]);
+
+            case UnaryNode { NodeType: ExpressionType.Not, Operand: { } operand }:
+                return Having(operand, grouping, key, !negated);
+
+            case BinaryNode binary when ComparisonOf(binary.NodeType) is { } op:
+            {
+                if (TryAtom(binary.Left, grouping, key, out var aggregate, out var member)
+                    && NodeEvaluation.TryValue(binary.Right, out var value))
+                {
+                    return new GroupComparison(aggregate, member, Apply(op, negated), value);
+                }
+
+                if (TryAtom(binary.Right, grouping, key, out aggregate, out member)
+                    && NodeEvaluation.TryValue(binary.Left, out value))
+                {
+                    return new GroupComparison(aggregate, member, Apply(Flip(op), negated), value);
+                }
+
+                throw UnsupportedHaving();
+            }
+
+            default:
+                throw UnsupportedHaving();
+        }
+    }
+
+    private static bool TryAtom(ExpressionNode node, ParameterNode grouping, IReadOnlyList<GroupKeyMember> key,
+        out GroupAggregate? aggregate, out string? member)
+    {
+        aggregate = null;
+        member = null;
+        node = NodeEvaluation.Unwrap(node);
+
+        // g.Count() / g.Sum(x => x.Member) and friends.
+        if (node is MethodCallNode { Object: null, Arguments: { Count: >= 1 } arguments } call
+            && IsGrouping(arguments[0], grouping))
+        {
+            switch (call.Method.Name)
+            {
+                case nameof(Enumerable.Count) or nameof(Enumerable.LongCount) when arguments.Count == 1:
+                    aggregate = GroupAggregate.Count;
+                    return true;
+                case nameof(Enumerable.Sum) or nameof(Enumerable.Min) or nameof(Enumerable.Max) or nameof(Enumerable.Average)
+                    when arguments.Count == 2 && NodeEvaluation.Unwrap(arguments[1]) is LambdaNode selector
+                         && MemberPath(selector.Body) is { } path:
+                    aggregate = AggregateOf(call.Method.Name);
+                    member = path;
+                    return true;
+            }
+
+            return false;
+        }
+
+        // g.Key — a single-member key compares whole; a composite key compares one member at a time.
+        if (node is MemberNode { Member.Name: "Key", Expression: { } owner } && IsGrouping(owner, grouping))
+        {
+            if (key is not [{ Name: null } single])
+            {
+                return false;
+            }
+
+            member = single.Path;
+            return true;
+        }
+
+        // g.Key.Member of a composite key → that member's entity path.
+        if (node is MemberNode { Expression: { } inner } outer
+            && NodeEvaluation.Unwrap(inner) is MemberNode { Member.Name: "Key", Expression: { } keyOwner }
+            && IsGrouping(keyOwner, grouping))
+        {
+            member = key.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, outer.Member.Name, StringComparison.OrdinalIgnoreCase))?.Path;
+            return member is not null;
+        }
+
+        return false;
+    }
+
+    private static ComparisonOperator? ComparisonOf(ExpressionType type) => type switch
+    {
+        ExpressionType.Equal => ComparisonOperator.Equal,
+        ExpressionType.NotEqual => ComparisonOperator.NotEqual,
+        ExpressionType.GreaterThan => ComparisonOperator.GreaterThan,
+        ExpressionType.GreaterThanOrEqual => ComparisonOperator.GreaterThanOrEqual,
+        ExpressionType.LessThan => ComparisonOperator.LessThan,
+        ExpressionType.LessThanOrEqual => ComparisonOperator.LessThanOrEqual,
+        _ => null,
+    };
+
+    private static ComparisonOperator Flip(ComparisonOperator op) => op switch
+    {
+        ComparisonOperator.GreaterThan => ComparisonOperator.LessThan,
+        ComparisonOperator.GreaterThanOrEqual => ComparisonOperator.LessThanOrEqual,
+        ComparisonOperator.LessThan => ComparisonOperator.GreaterThan,
+        ComparisonOperator.LessThanOrEqual => ComparisonOperator.GreaterThanOrEqual,
+        _ => op,
+    };
+
+    private static ComparisonOperator Apply(ComparisonOperator op, bool negated) => !negated ? op : op switch
+    {
+        ComparisonOperator.Equal => ComparisonOperator.NotEqual,
+        ComparisonOperator.NotEqual => ComparisonOperator.Equal,
+        ComparisonOperator.GreaterThan => ComparisonOperator.LessThanOrEqual,
+        ComparisonOperator.GreaterThanOrEqual => ComparisonOperator.LessThan,
+        ComparisonOperator.LessThan => ComparisonOperator.GreaterThanOrEqual,
+        _ => ComparisonOperator.GreaterThan,
+    };
+
+    private static GroupAggregate AggregateOf(string method) => method switch
+    {
+        nameof(Enumerable.Sum) => GroupAggregate.Sum,
+        nameof(Enumerable.Min) => GroupAggregate.Min,
+        nameof(Enumerable.Max) => GroupAggregate.Max,
+        _ => GroupAggregate.Average,
+    };
+
+    private static NotSupportedException UnsupportedHaving() => new(
+        "Cannot interpret the HAVING predicate. Supported shapes: comparisons (==, !=, >, >=, <, <=) of g.Count(), " +
+        "g.Sum/Min/Max/Average(x => x.Member) or a key member (g.Key, g.Key.Member) against values, combined with " +
+        "&&, || and !.");
 
     private static bool IsGrouping(ExpressionNode node, ParameterNode grouping) =>
         NodeEvaluation.Unwrap(node) is ParameterNode parameter && parameter.Id == grouping.Id;

@@ -155,14 +155,34 @@ public sealed class MySqlRepositoryTests : MySqlIntegrationTest
             NewOrder("a", 10m, "open", quantity: 1), NewOrder("a", 20m, "closed", quantity: 3),
             NewOrder("b", 40m, "open", quantity: 2));
 
-        var groups = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+        var grouped = (IGroupedReadRepository<SaleOrder>)repo;
+        var groups = (await grouped.GroupByAsync(
                 x => x.Customer,
                 g => new { g.Key, Orders = g.Count(), Revenue = g.Sum(x => x.Total), Mean = g.Average(x => x.Quantity) },
-                new QueryOptions<SaleOrder>().Where(x => x.Status != null)))
+                options: new QueryOptions<SaleOrder>().Where(x => x.Status != null)))
             .OrderBy(x => x.Key).ToList();
 
         Assert.That(groups.Select(x => (x.Key, x.Orders, x.Revenue, x.Mean)),
             Is.EqualTo(new[] { ("a", 2, 30m, 2d), ("b", 1, 40m, 2d) }));
+
+        var big = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Revenue = g.Sum(x => x.Total) },
+            having: g => g.Sum(x => x.Total) > 35m);
+        Assert.That(big.Single().Key, Is.EqualTo("b"), "HAVING filtered the groups on the server");
+    }
+
+    [Test]
+    public async Task Typed_union_combines_branches_with_tags_and_pages()
+    {
+        using var db = await NewSchemaAsync();
+        await Seed(db, NewOrder("a", 10m, "open"), NewOrder("b", 20m, "closed"), NewOrder("c", 30m, "open"));
+
+        var rows = await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Where(x => x.Status == "open").Select(x => new { x.Customer, Origin = "open" }),
+                Union.Of<SaleOrder>().Where(x => x.Status == "closed").Select(x => new { x.Customer, Origin = "closed" }))
+            .OrderByDescending(row => row.Customer).Take(2));
+
+        Assert.That(rows.Select(x => (x.Customer, x.Origin)),
+            Is.EqualTo(new[] { ("c", "open"), ("b", "closed") }), "the union ordered and paged on the server");
     }
 
     [Test]

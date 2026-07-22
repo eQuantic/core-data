@@ -60,7 +60,14 @@ public sealed class QueryFilters
     /// <param name="services">The scope's service provider (handed to per-request factories).</param>
     public Expression<Func<TEntity, bool>>? FilterFor<TEntity>(IServiceProvider services)
         where TEntity : class =>
-        _factories.TryGetValue(typeof(TEntity), out var factory)
-            ? (Expression<Func<TEntity, bool>>?)factory(services)
-            : null;
+        (Expression<Func<TEntity, bool>>?)FilterFor(typeof(TEntity), services);
+
+    /// <summary>
+    ///     Resolves the global filter for <paramref name="entityType" /> in the given scope, or <c>null</c> when
+    ///     none applies — the runtime-typed path multi-entity reads (union branches) resolve per branch.
+    /// </summary>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="services">The scope's service provider (handed to per-request factories).</param>
+    public LambdaExpression? FilterFor(Type entityType, IServiceProvider services) =>
+        _factories.TryGetValue(entityType, out var factory) ? factory(services) : null;
 }

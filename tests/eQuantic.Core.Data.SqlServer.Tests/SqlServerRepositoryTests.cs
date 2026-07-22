@@ -187,6 +187,33 @@ public sealed class SqlServerRepositoryTests : SqlServerIntegrationTest
 
         Assert.That(groups.Select(x => (x.Customer, x.Status, x.Revenue, x.Orders)),
             Is.EqualTo(new[] { ("a", "closed", 20m, 1), ("a", "open", 10m, 1), ("b", "open", 40m, 1) }));
+
+        var big = await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
+            x => x.Customer, g => new { g.Key, Revenue = g.Sum(x => x.Total) },
+            having: g => g.Sum(x => x.Total) > 35m);
+        Assert.That(big.Single().Key, Is.EqualTo("b"), "HAVING filtered the groups on the server");
+    }
+
+    [Test]
+    public async Task Typed_union_pages_the_combined_result_with_offset_fetch()
+    {
+        using var db = await NewSchemaAsync();
+        await Seed(db, NewOrder("a", 10m, "open"), NewOrder("b", 20m, "closed"), NewOrder("c", 30m, "open"));
+
+        var union = UnionQuery.All(
+                Union.Of<SaleOrder>().Where(x => x.Status == "open").Select(x => new { x.Customer, Origin = "open" }),
+                Union.Of<SaleOrder>().Where(x => x.Status == "closed").Select(x => new { x.Customer, Origin = "closed" }))
+            .OrderBy(row => row.Customer).Take(2);
+
+        var rows = await Uow(db).UnionAsync(union);
+        Assert.That(rows.Select(x => (x.Customer, x.Origin)),
+            Is.EqualTo(new[] { ("a", "open"), ("b", "closed") }), "OFFSET/FETCH paged the union");
+
+        Assert.That(async () => await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Select(x => new { x.Customer }),
+                Union.Of<SaleOrder>().Select(x => new { x.Customer })).Take(1)),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("ORDER BY"),
+            "paging a union without ordering is rejected on this dialect");
     }
 
     [Test]

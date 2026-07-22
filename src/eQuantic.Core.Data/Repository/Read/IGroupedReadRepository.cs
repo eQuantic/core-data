@@ -27,12 +27,18 @@ public interface IGroupedReadRepository<TEntity>
     /// <typeparam name="TResult">The projected result type (anonymous or member-init).</typeparam>
     /// <param name="keySelector">The grouping key selector.</param>
     /// <param name="resultSelector">The per-group projection (<c>g =&gt; new { g.Key, Total = g.Sum(x =&gt; x.Total) }</c>).</param>
+    /// <param name="having">
+    ///     Optional predicate over each <b>group</b> — a native <c>HAVING</c>
+    ///     (<c>g =&gt; g.Sum(x =&gt; x.Total) &gt; 100 &amp;&amp; g.Count() &gt;= 2</c>): comparisons of
+    ///     aggregates or key members, combined with <c>&amp;&amp;</c>/<c>||</c>/<c>!</c>.
+    /// </param>
     /// <param name="options">Optional query shaping — the filter applies <b>before</b> grouping; sorting does not apply.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>One projected result per group.</returns>
     Task<IReadOnlyList<TResult>> GroupByAsync<TKey, TResult>(
         Expression<Func<TEntity, TKey>> keySelector,
         Expression<Func<IGrouping<TKey, TEntity>, TResult>> resultSelector,
+        Expression<Func<IGrouping<TKey, TEntity>, bool>>? having = null,
         QueryOptions<TEntity>? options = null,
         CancellationToken cancellationToken = default);
 }

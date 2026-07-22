@@ -239,15 +239,16 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     /// <remarks>
-    ///     Renders to a native <c>GROUP BY</c> — the filter pushes into the <c>WHERE</c> (before grouping) and
-    ///     only the grouped rows travel. A filter with a client-side residual degrades, behind
-    ///     <c>.AllowClientEvaluation()</c>, to fetching the matching rows and grouping them with the selectors
-    ///     themselves — identical semantics, explicit cost. Group order is store-defined; order the result
-    ///     client-side.
+    ///     Renders to a native <c>GROUP BY</c> — the filter pushes into the <c>WHERE</c> (before grouping), the
+    ///     <paramref name="having" /> predicate into <c>HAVING</c> (over the groups), and only the grouped rows
+    ///     travel. A filter with a client-side residual degrades, behind <c>.AllowClientEvaluation()</c>, to
+    ///     fetching the matching rows and grouping (and having-filtering) them with the selectors themselves —
+    ///     identical semantics, explicit cost. Group order is store-defined; order the result client-side.
     /// </remarks>
     public async Task<IReadOnlyList<TResult>> GroupByAsync<TGroup, TResult>(
         Expression<Func<TEntity, TGroup>> keySelector,
         Expression<Func<IGrouping<TGroup, TEntity>, TResult>> resultSelector,
+        Expression<Func<IGrouping<TGroup, TEntity>, bool>>? having = null,
         QueryOptions<TEntity>? options = null,
         CancellationToken cancellationToken = default)
     {
@@ -263,12 +264,19 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
         // Interpret first so the contract is uniform: only server-side aggregate shapes are accepted on every path.
         var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
+        var predicate = having is null ? null : GroupInterpreter.InterpretHaving(having, group.Key);
         var plan = GatedPlan(options, null);
 
         if (plan.Residual.Count > 0)
         {
             var rows = await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false);
-            return rows.GroupBy(keySelector.Compile()).Select(resultSelector.Compile()).ToList();
+            var groups = rows.GroupBy(keySelector.Compile());
+            if (having is not null)
+            {
+                groups = groups.Where(having.Compile());
+            }
+
+            return groups.Select(resultSelector.Compile()).ToList();
         }
 
         var keys = group.Key
@@ -278,13 +286,15 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             .ToList();
 
         var select = keys.Select(column => _dialect.Quote(column.Name))
-            .Concat(group.Bindings.OfType<GroupAggregateBinding>().Select(AggregateSql))
+            .Concat(group.Bindings.OfType<GroupAggregateBinding>()
+                .Select(aggregate => AggregateSql(aggregate.Aggregate, aggregate.Member)))
             .ToList();
 
         var grouped = string.Join(", ", keys.Select(column => _dialect.Quote(column.Name)));
         var sql = $"SELECT {string.Join(", ", select)} FROM {_dialect.Quote(_configuration.TableName)}"
                   + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
-                  + $" GROUP BY {grouped}";
+                  + $" GROUP BY {grouped}"
+                  + (predicate is not null ? $" HAVING {HavingSql(predicate)}" : string.Empty);
 
         await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -298,18 +308,18 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
         return results;
 
-        string AggregateSql(GroupAggregateBinding aggregate)
+        string AggregateSql(GroupAggregate aggregate, string? member)
         {
-            if (aggregate.Aggregate == GroupAggregate.Count)
+            if (aggregate == GroupAggregate.Count)
             {
                 return "COUNT(*)";
             }
 
-            var column = _configuration.ColumnFor(aggregate.Member!)
+            var column = _configuration.ColumnFor(member!)
                          ?? throw new NotSupportedException(
-                             $"'{typeof(TEntity).Name}' has no mapped member '{aggregate.Member}' to aggregate.");
+                             $"'{typeof(TEntity).Name}' has no mapped member '{member}' to aggregate.");
             var quoted = _dialect.Quote(column.Name);
-            return aggregate.Aggregate switch
+            return aggregate switch
             {
                 GroupAggregate.Sum => $"SUM({quoted})",
                 GroupAggregate.Min => $"MIN({quoted})",
@@ -317,6 +327,47 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 _ => $"AVG(CAST({quoted} AS {_dialect.SqlType(typeof(double))}))",
             };
         }
+
+        string HavingSql(GroupPredicate node) => node switch
+        {
+            GroupLogical logical => "(" + string.Join(
+                logical.Operator == LogicalOperator.And ? " AND " : " OR ",
+                logical.Operands.Select(HavingSql)) + ")",
+            GroupComparison comparison => ComparisonSql(comparison),
+            _ => throw new NotSupportedException($"Unknown group predicate '{node.GetType().Name}'."),
+        };
+
+        string ComparisonSql(GroupComparison comparison)
+        {
+            var fragment = comparison.Aggregate is { } aggregate
+                ? AggregateSql(aggregate, comparison.Member)
+                : _dialect.Quote((_configuration.ColumnFor(comparison.Member!)
+                                  ?? throw new NotSupportedException(
+                                      $"'{typeof(TEntity).Name}' has no mapped member '{comparison.Member}' in HAVING.")).Name);
+
+            if (comparison.Value is null)
+            {
+                return comparison.Operator switch
+                {
+                    ComparisonOperator.Equal => $"{fragment} IS NULL",
+                    ComparisonOperator.NotEqual => $"{fragment} IS NOT NULL",
+                    _ => throw new NotSupportedException("Only == null and != null compare a group value against null."),
+                };
+            }
+
+            plan.Parameters.Add(_dialect.BindValue(comparison.Value));
+            return $"{fragment} {ComparisonToken(comparison.Operator)} @p{plan.Parameters.Count - 1}";
+        }
+
+        static string ComparisonToken(ComparisonOperator op) => op switch
+        {
+            ComparisonOperator.Equal => "=",
+            ComparisonOperator.NotEqual => "<>",
+            ComparisonOperator.GreaterThan => ">",
+            ComparisonOperator.GreaterThanOrEqual => ">=",
+            ComparisonOperator.LessThan => "<",
+            _ => "<=",
+        };
     }
 
     /// <summary>
@@ -325,14 +376,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     /// </summary>
     private static Func<DbDataReader, TResult> GroupProjector<TGroup, TResult>(GroupQuery group)
     {
-        var constructor = group.ConstructorProjection ? typeof(TResult).GetConstructors().Single() : null;
-        var targets = group.Bindings
-            .Select((binding, index) => constructor is not null
-                ? constructor.GetParameters()[index].ParameterType
-                : (typeof(TResult).GetProperty(binding.Target)
-                   ?? throw new NotSupportedException($"'{typeof(TResult).Name}' has no member '{binding.Target}'.")).PropertyType)
-            .ToList();
-
+        var projector = new RelationalProjector<TResult>(
+            group.Bindings.Select(binding => binding.Target).ToList(), group.ConstructorProjection);
         var keyConstructor = group.Key is [{ Name: not null }, ..] ? typeof(TGroup).GetConstructors().Single() : null;
         var aggregateOrdinals = new Dictionary<GroupBinding, int>();
         foreach (var binding in group.Bindings.OfType<GroupAggregateBinding>())
@@ -354,29 +399,19 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 values[index] = group.Bindings[index] switch
                 {
                     GroupKeyBinding { KeyName: null } when keyConstructor is null =>
-                        ChangeValue(keyValues[0], typeof(TGroup)),
+                        RelationalMaterializer.ChangeValue(keyValues[0], typeof(TGroup)),
                     GroupKeyBinding { KeyName: null } => keyConstructor.Invoke(keyConstructor.GetParameters()
-                        .Select((parameter, position) => ChangeValue(keyValues[position], parameter.ParameterType))
+                        .Select((parameter, position) => RelationalMaterializer.ChangeValue(keyValues[position], parameter.ParameterType))
                         .ToArray()),
-                    GroupKeyBinding named => ChangeValue(keyValues[KeyIndex(group.Key, named.KeyName!)], targets[index]),
-                    var aggregate => ChangeValue(
+                    GroupKeyBinding named => RelationalMaterializer.ChangeValue(
+                        keyValues[KeyIndex(group.Key, named.KeyName!)], projector.TargetType(index)),
+                    var aggregate => RelationalMaterializer.ChangeValue(
                         reader.IsDBNull(aggregateOrdinals[aggregate]) ? null : reader.GetValue(aggregateOrdinals[aggregate]),
-                        targets[index]),
+                        projector.TargetType(index)),
                 };
             }
 
-            if (constructor is not null)
-            {
-                return (TResult)constructor.Invoke(values);
-            }
-
-            var result = Activator.CreateInstance<TResult>()!;
-            for (var index = 0; index < values.Length; index++)
-            {
-                typeof(TResult).GetProperty(group.Bindings[index].Target)!.SetValue(result, values[index]);
-            }
-
-            return result;
+            return projector.Create(values);
         };
 
         static int KeyIndex(IReadOnlyList<GroupKeyMember> key, string name)
@@ -391,22 +426,6 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
             throw new NotSupportedException($"The key has no member '{name}'.");
         }
-    }
-
-    private static object? ChangeValue(object? value, Type target)
-    {
-        if (value is null or DBNull)
-        {
-            return null;
-        }
-
-        var type = Nullable.GetUnderlyingType(target) ?? target;
-        if (type.IsInstanceOfType(value))
-        {
-            return value;
-        }
-
-        return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 
     // ---------------------------------------------------------------- continuation paging (keyset)

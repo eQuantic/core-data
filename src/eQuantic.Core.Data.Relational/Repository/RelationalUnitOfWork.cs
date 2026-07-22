@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using eQuantic.Core.Data.Diagnostics;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 
@@ -15,7 +16,7 @@ namespace eQuantic.Core.Data.Relational.Repository;
 ///     transaction (<see cref="BeginTransactionAsync" />) spans multiple commits: each commit flushes into it —
 ///     visible to this unit of work's own reads — and <see cref="CommitTransactionAsync" /> makes it durable.
 /// </summary>
-public abstract class RelationalUnitOfWork : IQueryableUnitOfWork
+public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly DbDataSource DataSource;
@@ -41,7 +42,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork
     internal RelationalEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
 
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
-    internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
+    internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class =>
+        (Expression<Func<TEntity, bool>>?)GlobalFilter(typeof(TEntity));
+
+    /// <summary>The global filter registered for <paramref name="entityType" /> in this scope, or <c>null</c> — union branches resolve per branch.</summary>
+    internal LambdaExpression? GlobalFilter(Type entityType)
     {
         if (!_queryFiltersResolved)
         {
@@ -49,7 +54,49 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork
             _queryFiltersResolved = true;
         }
 
-        return _queryFilters?.FilterFor<TEntity>(ServiceProvider);
+        return _queryFilters?.FilterFor(entityType, ServiceProvider);
+    }
+
+    // -------------------------------------------------------------- union reads
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Renders one <c>SELECT</c> per branch — each branch's filters (the entity's global filter included
+    ///     unless the branch opted out) push into its <c>WHERE</c> — combined with <c>UNION</c>/<c>UNION ALL</c>
+    ///     on the store; ordering and paging apply to the combined rows. A branch filter SQL cannot express is
+    ///     rejected with guidance: a union cannot run part of a branch client-side.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> UnionAsync<TResult>(UnionQuery<TResult> query, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        var (sql, parameters, shape) = RelationalUnion.Build(Dialect, Model, query, GlobalFilter);
+
+        using var activity = DataActivitySource.Instance.StartActivity($"{Dialect.System}.union", ActivityKind.Client);
+        if (activity is not null)
+        {
+            activity.SetTag("db.system", Dialect.System);
+            activity.SetTag("equantic.union_branches", query.Branches.Count);
+            activity.SetTag("equantic.union_all", query.All);
+        }
+
+        var projector = new RelationalProjector<TResult>(
+            shape.Bindings.Select(binding => binding.Target).ToList(), shape.ConstructorProjection);
+        var results = new List<TResult>();
+        await using var command = await CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var values = new object?[shape.Bindings.Count];
+            for (var index = 0; index < values.Length; index++)
+            {
+                values[index] = RelationalMaterializer.ChangeValue(
+                    reader.IsDBNull(index) ? null : reader.GetValue(index), projector.TargetType(index));
+            }
+
+            results.Add(projector.Create(values));
+        }
+
+        return results;
     }
 
     // -------------------------------------------------------------- connection / command plumbing

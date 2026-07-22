@@ -61,6 +61,23 @@ internal static class RelationalMaterializer
         return entity;
     }
 
+    /// <summary>Converts a reader value into a target CLR type (nullable unwrap, enum and numeric coercions).</summary>
+    internal static object? ChangeValue(object? value, Type target)
+    {
+        if (value is null or DBNull)
+        {
+            return null;
+        }
+
+        var type = Nullable.GetUnderlyingType(target) ?? target;
+        if (type.IsInstanceOfType(value))
+        {
+            return value;
+        }
+
+        return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
+    }
+
     private static void Assign(object entity, PropertyInfo property, object value)
     {
         var target = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;

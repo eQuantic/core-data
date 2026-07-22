@@ -282,7 +282,7 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
 
         var groups = (await ((IGroupedReadRepository<SaleOrder>)repo).GroupByAsync(
                 x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
-                new QueryOptions<SaleOrder>().Where(x => x.Status == "open")))
+                options: new QueryOptions<SaleOrder>().Where(x => x.Status == "open")))
             .OrderBy(x => x.Key).ToList();
 
         Assert.That(groups.Select(x => (x.Key, x.Total)), Is.EqualTo(new[] { ("a", 10m), ("b", 5m) }),
@@ -328,6 +328,28 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
     }
 
     [Test]
+    public async Task Group_by_having_filters_groups_on_the_server()
+    {
+        using var db = await NewSchemaAsync();
+        var repo = OrderRepo(db);
+        await Seed(db, NewOrder("a", 10m), NewOrder("a", 20m), NewOrder("b", 40m), NewOrder("c", 5m));
+        var grouped = (IGroupedReadRepository<SaleOrder>)repo;
+
+        var big = (await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
+                having: g => g.Sum(x => x.Total) > 15m))
+            .OrderBy(x => x.Key).ToList();
+        Assert.That(big.Select(x => (x.Key, x.Total)), Is.EqualTo(new[] { ("a", 30m), ("b", 40m) }));
+
+        var busy = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Orders = g.Count() },
+            having: g => g.Sum(x => x.Total) > 15m && g.Count() >= 2);
+        Assert.That(busy.Single().Key, Is.EqualTo("a"), "aggregates combine in HAVING");
+
+        var named = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Rows = g.Count() },
+            having: g => g.Key != "a" && g.Count() >= 1);
+        Assert.That(named.Select(x => x.Key), Is.EquivalentTo(new[] { "b", "c" }), "key members work in HAVING");
+    }
+
+    [Test]
     public async Task Group_by_residual_filter_degrades_to_gated_client_grouping()
     {
         using var db = await NewSchemaAsync();
@@ -336,13 +358,18 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         var grouped = (IGroupedReadRepository<SaleOrder>)repo;
 
         Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Rows = g.Count() },
-                new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4)),
+                options: new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4)),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
 
         var groups = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
-            new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4).AllowClientEvaluation());
+            options: new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 4).AllowClientEvaluation());
         Assert.That(groups.Single(), Is.EqualTo(new { Key = "alpha", Total = 30m }),
             "the gated fallback groups the fetched rows with the selectors themselves");
+
+        var kept = await grouped.GroupByAsync(x => x.Customer, g => new { g.Key, Total = g.Sum(x => x.Total) },
+            having: g => g.Count() >= 2,
+            options: new QueryOptions<SaleOrder>().Where(x => x.Customer.Length > 1).AllowClientEvaluation());
+        Assert.That(kept.Single().Key, Is.EqualTo("alpha"), "the fallback applies HAVING to the client-side groups");
     }
 
     [Test]
@@ -354,8 +381,95 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { Odd = g.Count() * 2 }),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("Supported shapes"));
         Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { g.Key },
-                new QueryOptions<SaleOrder>().OrderBy(x => x.Total)),
+                options: new QueryOptions<SaleOrder>().OrderBy(x => x.Total)),
             Throws.TypeOf<NotSupportedException>().With.Message.Contains("Sorting"));
+        Assert.That(async () => await grouped.GroupByAsync(x => x.Customer, g => new { g.Key },
+                having: g => g.First().Total > 1m),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("HAVING"));
+    }
+
+    // ---------------------------------------------------------------- typed Union / UnionAll
+
+    [Test]
+    public async Task Union_all_combines_entities_into_a_common_shape_with_branch_tags()
+    {
+        using var db = await NewSchemaAsync();
+        var buyers = db.Resolve<IAsyncRepository<Buyer, Guid>>();
+        await buyers.AddAsync(new Buyer { Id = Guid.NewGuid(), Name = "zed" });
+        await Seed(db, NewOrder("alice", 10m, "open"), NewOrder("bob", 5m, "closed"));
+
+        var rows = await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Where(x => x.Status == "open")
+                    .Select(x => new { Name = x.Customer, Origin = "order" }),
+                Union.Of<Buyer>().Select(x => new { x.Name, Origin = "buyer" }))
+            .OrderBy(row => row.Name));
+
+        Assert.That(rows.Select(x => (x.Name, x.Origin)),
+            Is.EqualTo(new[] { ("alice", "order"), ("zed", "buyer") }),
+            "two entities combined into one shape, tagged per branch, ordered on the store");
+    }
+
+    [Test]
+    public async Task Union_distinct_collapses_duplicates_and_all_keeps_them()
+    {
+        using var db = await NewSchemaAsync();
+        await Seed(db, NewOrder("dup", 10m, "open"), NewOrder("dup", 20m, "open"));
+
+        var open = Union.Of<SaleOrder>().Where(x => x.Status == "open").Select(x => new { x.Customer });
+        var every = Union.Of<SaleOrder>().Select(x => new { x.Customer });
+
+        Assert.That(await Uow(db).UnionAsync(UnionQuery.All(open, every)), Has.Count.EqualTo(4),
+            "UNION ALL keeps every row from every branch");
+        Assert.That((await Uow(db).UnionAsync(UnionQuery.Distinct(open, every))).Single().Customer, Is.EqualTo("dup"),
+            "UNION collapses duplicate projected rows on the store");
+    }
+
+    [Test]
+    public async Task Union_orders_and_pages_the_combined_result()
+    {
+        using var db = await NewSchemaAsync();
+        await Seed(db, NewOrder("a", 1m, "open"), NewOrder("b", 2m, "closed"), NewOrder("c", 3m, "open"), NewOrder("d", 4m, "closed"));
+
+        var rows = await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Where(x => x.Status == "open").Select(x => new UnionRow { Name = x.Customer, Origin = "open" }),
+                Union.Of<SaleOrder>().Where(x => x.Status == "closed").Select(x => new UnionRow { Name = x.Customer, Origin = "closed" }))
+            .OrderByDescending(row => row.Name).Take(2).Skip(1));
+
+        Assert.That(rows.Select(x => (x.Name, x.Origin)), Is.EqualTo(new[] { ("c", "open"), ("b", "closed") }),
+            "member-init shape, ordered descending, paged on the store");
+    }
+
+    [Test]
+    public async Task Union_global_filters_scope_each_branch_with_per_branch_opt_out()
+    {
+        using var db = await NewSchemaAsync(services =>
+            services.AddSingleton(new QueryFilters().For<SaleOrder>(x => x.Customer != "hidden")));
+        await Seed(db, NewOrder("hidden", 1m), NewOrder("visible", 2m));
+
+        var rows = await Uow(db).UnionAsync(UnionQuery.All(
+            Union.Of<SaleOrder>().Select(x => new { x.Customer, Origin = "scoped" }),
+            Union.Of<SaleOrder>().IgnoringQueryFilters().Select(x => new { x.Customer, Origin = "all" })));
+
+        Assert.That(rows.Count(x => x.Origin == "scoped"), Is.EqualTo(1), "the global filter scoped the branch");
+        Assert.That(rows.Count(x => x.Origin == "all"), Is.EqualTo(2), "IgnoringQueryFilters opted the branch out");
+    }
+
+    [Test]
+    public async Task Union_rejects_unpushable_filters_and_misaligned_shapes()
+    {
+        using var db = await NewSchemaAsync();
+
+        Assert.That(async () => await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Where(x => x.Customer.Length > 4).Select(x => new { x.Customer }),
+                Union.Of<SaleOrder>().Select(x => new { x.Customer }))),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("separate reads"),
+            "a union cannot run part of a branch client-side");
+
+        Assert.That(async () => await Uow(db).UnionAsync(UnionQuery.All(
+                Union.Of<SaleOrder>().Select(x => new UnionRow { Name = x.Customer }),
+                Union.Of<Buyer>().Select(x => new UnionRow { Origin = "buyer" }))),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("same shape"),
+            "every branch must project the same members");
     }
 
     [Test]
@@ -551,5 +665,13 @@ public sealed class PostgreSqlRepositoryTests : PostgreSqlIntegrationTest
         public int Orders { get; set; }
 
         public decimal Smallest { get; set; }
+    }
+
+    /// <summary>A named union-projection target for the member-init union shape.</summary>
+    private sealed class UnionRow
+    {
+        public string Name { get; set; } = "";
+
+        public string Origin { get; set; } = "";
     }
 }
