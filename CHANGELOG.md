@@ -1,5 +1,14 @@
 # Changelog
 
+## [6.1.0](https://github.com/eQuantic/core-data/compare/v6.0.0...v6.1.0) (2026-07-22)
+
+### Features
+
+* **modeling:** close the annotation asymmetries across providers ([095ed4c](https://github.com/eQuantic/core-data/commit/095ed4ce2f9ae164515c4f6a80fb7d0d7bd9c7b0))
+* **modeling:** hierarchical partition keys, portable ClusteringKey, composite keys and facets ([01f1790](https://github.com/eQuantic/core-data/commit/01f1790e142559727a6f603e977335eb28b715b0))
+* **modeling:** optimistic concurrency, native TTL and search indexes reach every store that has them ([067d1d8](https://github.com/eQuantic/core-data/commit/067d1d85642b94ec6a59dbecc07e5984e83e94c4))
+* **modeling:** serializer-backed mappings on Cosmos DB and a fluent MongoDB model ([ea4884a](https://github.com/eQuantic/core-data/commit/ea4884ac9c58c009215885a504050621a4236ab2))
+
 ## [6.0.0](https://github.com/eQuantic/core-data/compare/v5.8.0...v6.0.0) (2026-07-22)
 
 ### ⚠ BREAKING CHANGES
