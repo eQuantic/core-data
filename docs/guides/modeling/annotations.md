@@ -47,6 +47,30 @@ The vocabulary is designed around **what you mean**, letting each store implemen
   lifecycle `CreatedAt` by convention, or an explicit member via fluent). The mechanism differences
   are documented, not hidden — see [Time to live](../writing/ttl.md).
 
+## Compile-time diagnostics
+
+The `eQuantic.Core.Data` package ships a Roslyn analyzer (no extra install), so the misuses that
+are wrong on **every** provider surface while typing — as `EQD` warnings with the fix in the
+message — instead of at model build:
+
+| Id | Fires when |
+|---|---|
+| `EQD001` | `[ConcurrencyToken]` on a type no provider can version (not int/long/Guid/string) |
+| `EQD002` / `EQD003` | several `[PartitionKey]` / `[ClusteringKey]` members share an `Order` (ambiguous composition) |
+| `EQD004` | more than one `[EntityKey]` member (composite keys are fluent: `Key(x => new { … })`) |
+| `EQD005` | `[TimeToLive]` with a non-positive lifetime |
+| `EQD006` | an invalid `[Facet]` (negative values, `Scale` > `Precision`, `Length` on a non-string, `Precision` on a non-decimal, or an empty facet) |
+| `EQD007` | an `[Unmapped]` member also carrying mapping annotations |
+| `EQD008` | `[SearchIndex]` on a non-string member |
+| `EQD009` | `[Counter]` on a non-integral member |
+| `EQD010` | `[EntityKey(Generated = true)]` on a type identity cannot generate (non-integral) |
+| `EQD011` | an empty storage name on `[Entity]` / `[StoredAs]` |
+
+Provider-*relative* rules (what one store supports and another does not) deliberately stay at
+runtime, where the provider is known and the message can be exact. Severity is Warning by default;
+elevate per rule in `.editorconfig` (`dotnet_diagnostic.EQD001.severity = error`) if you want the
+build to refuse.
+
 ## Details worth knowing
 
 - **`[EntityKey]` and generated keys.** `[EntityKey(Generated = true)]` declares an identity key on

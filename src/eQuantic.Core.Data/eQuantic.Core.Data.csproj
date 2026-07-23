@@ -38,6 +38,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The modeling analyzer ships inside this package (analyzers/dotnet/cs): every consumer gets the
+         EQD compile-time diagnostics with no extra install. -->
+    <ProjectReference Include="../eQuantic.Core.Data.Analyzers/eQuantic.Core.Data.Analyzers.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="../eQuantic.Core.Data.Analyzers/bin/$(Configuration)/netstandard2.0/eQuantic.Core.Data.Analyzers.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="Icon.png" Pack="true" PackagePath="Icon.png" />
     <None Include="Icon_details.png" Pack="true" PackagePath="Icon_details.png" />
     <None Include="Icon_dialog.png" Pack="true" PackagePath="Icon_dialog.png" />
