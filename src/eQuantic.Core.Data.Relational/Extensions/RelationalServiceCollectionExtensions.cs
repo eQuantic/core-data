@@ -144,7 +144,37 @@ public static class RelationalServiceCollectionExtensions
         services.TryAddScoped<IMigrationHistory>(sp => new RelationalMigrationHistory(
             sp.GetRequiredService<DbDataSource>(), sp.GetRequiredService<SqlDialect>()));
         services.TryAddScoped<IMigrationRunner>(sp => new RelationalMigrationRunner(
-            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(), scanned));
+            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(), scanned,
+            sp.GetService(typeof(MigrationSource)) as MigrationSource));
+
+        return services;
+    }
+
+    /// <summary>
+    ///     Registers the migration runner over <b>explicitly named</b> migrations — the trim/NativeAOT-safe
+    ///     form, since nothing is discovered by reflection (assembly scanning finds nothing once the trimmer has
+    ///     removed the constructors of types only reachable that way):
+    ///     <code>services.AddRelationalMigrations(source => source.Add&lt;ProductsSetup&gt;().Add&lt;ProductsBackfill&gt;());</code>
+    ///     Ordering still comes from each migration's <c>[Migration]</c> timestamp, so registration order does
+    ///     not matter.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="migrations">Registers the migrations to run.</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddRelationalMigrations(this IServiceCollection services,
+        Action<MigrationSource> migrations)
+    {
+        var source = new MigrationSource();
+        migrations(source);
+        services.TryAddSingleton(source);
+
+        services.TryAddScoped<IMigrationExecutor>(sp => new RelationalMigrationExecutor(
+            sp.GetRequiredService<DbDataSource>(), sp.GetRequiredService<SqlDialect>(), sp.GetRequiredService<RelationalModel>()));
+        services.TryAddScoped<IMigrationHistory>(sp => new RelationalMigrationHistory(
+            sp.GetRequiredService<DbDataSource>(), sp.GetRequiredService<SqlDialect>()));
+        services.TryAddScoped<IMigrationRunner>(sp => new RelationalMigrationRunner(
+            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(),
+            [], sp.GetRequiredService<MigrationSource>()));
 
         return services;
     }

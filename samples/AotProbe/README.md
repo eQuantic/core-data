@@ -30,5 +30,10 @@ OK
 ```
 
 Without `PG_CONN` it runs the offline path only (still a full AOT exercise of the query machinery).
-The probe demonstrates the three AOT registration rules — closed-generic repositories, the bundled
-source generator, and rooting the migration type — documented on the AOT page.
+
+The probe is deliberately plain application code — no `[DynamicDependency]`, no trimmer descriptor,
+no ILLink XML. Everything AOT needs is a library concern now, and the probe shows the two
+registration choices that make it so: `AddPostgreSqlRepository<Widget, Guid>()` (closed-generic
+repositories plus the unit of work through an explicit factory) and
+`AddPostgreSqlMigrations(source => source.Add<WidgetsSetup>())` (migrations named instead of
+scanned). The bundled source generator supplies the reflection-free accessors on its own.

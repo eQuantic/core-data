@@ -39,9 +39,17 @@ public sealed class ProductsSetup : Migration
 ## Running
 
 ```csharp
-services.AddPostgreSqlMigrations(typeof(ProductsSetup).Assembly);   // per provider
+services.AddPostgreSqlMigrations(typeof(ProductsSetup).Assembly);   // discover by scanning
+// …or name them explicitly (no reflection — required for trimming/NativeAOT, and a faster startup):
+services.AddPostgreSqlMigrations(source => source.Add<ProductsSetup>().Add<ProductsBackfill>());
+
 var applied = await provider.GetRequiredService<IMigrationRunner>().RunAsync();
 ```
+
+Both forms exist on every provider and behave identically: the `[Migration]` timestamp orders the
+run, so registration order never matters. Two different migrations claiming the same id is a
+mistake and throws — see [Trimming and NativeAOT](../operations/aot.md) for why the explicit form
+is the AOT-safe one.
 
 The runner discovers migrations in the given assemblies, orders them by timestamp, applies each
 **once** and records it in the history (a `_migrations` table/collection/container per store).

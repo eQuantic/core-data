@@ -14,16 +14,19 @@ public sealed class CassandraMigrationRunner : IMigrationRunner
     private readonly IMigrationExecutor _executor;
     private readonly IMigrationHistory _history;
     private readonly IReadOnlyList<Assembly> _assemblies;
+    private readonly MigrationSource? _source;
 
     /// <summary>Initializes the runner.</summary>
     /// <param name="executor">Applies each migration's declared operations.</param>
     /// <param name="history">Tracks which migrations have already run.</param>
     /// <param name="assemblies">The assemblies scanned for migrations.</param>
-    public CassandraMigrationRunner(IMigrationExecutor executor, IMigrationHistory history, IEnumerable<Assembly> assemblies)
+    public CassandraMigrationRunner(IMigrationExecutor executor, IMigrationHistory history, IEnumerable<Assembly> assemblies,
+        MigrationSource? source = null)
     {
         _executor = executor;
         _history = history;
         _assemblies = assemblies.Distinct().ToArray();
+        _source = source;
     }
 
     /// <inheritdoc />
@@ -40,7 +43,7 @@ public sealed class CassandraMigrationRunner : IMigrationRunner
         var applied = new HashSet<string>(await _history.GetAppliedIdsAsync(cancellationToken).ConfigureAwait(false));
 
         var count = 0;
-        foreach (var (attribute, type) in pending)
+        foreach (var (attribute, migration) in pending)
         {
             if (applied.Contains(attribute.Id))
             {
@@ -49,7 +52,6 @@ public sealed class CassandraMigrationRunner : IMigrationRunner
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            var migration = (Data.Migration.Migration)Activator.CreateInstance(type)!;
             var builder = new MigrationBuilder();
             migration.Up(builder);
 
@@ -64,28 +66,6 @@ public sealed class CassandraMigrationRunner : IMigrationRunner
         return count;
     }
 
-    private List<(MigrationAttribute Attribute, Type Type)> Discover()
-    {
-        var migrations = _assemblies
-            .SelectMany(assembly => assembly.GetTypes())
-            .Where(type => typeof(Data.Migration.Migration).IsAssignableFrom(type) && type is { IsAbstract: false, IsClass: true })
-            .Select(type => (Attribute: type.GetCustomAttribute<MigrationAttribute>(), Type: type))
-            .Where(entry => entry.Attribute is not null)
-            .Select(entry => (Attribute: entry.Attribute!, entry.Type))
-            .OrderBy(entry => entry.Attribute.Date)
-            .ThenBy(entry => entry.Attribute.Id, StringComparer.Ordinal)
-            .ToList();
-
-        var duplicate = migrations
-            .GroupBy(entry => entry.Attribute.Id, StringComparer.Ordinal)
-            .FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null)
-        {
-            throw new InvalidOperationException(
-                $"Two migrations share the id '{duplicate.Key}': {string.Join(", ", duplicate.Select(entry => entry.Type.FullName))}. " +
-                "Give them distinct titles or timestamps.");
-        }
-
-        return migrations;
-    }
+    private IReadOnlyList<(MigrationAttribute Attribute, Data.Migration.Migration Instance)> Discover() =>
+        MigrationDiscovery.Pending(_assemblies, _source);
 }

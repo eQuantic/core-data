@@ -47,18 +47,23 @@ The generator that emits reflection-free entity accessors is bundled in the pack
 needed. Under AOT it is what materializes rows and reads members without reflection. The probe
 confirms it: `accessor generated for Widget: True`.
 
-### 3. Root your migration types
+### 3. Register migrations explicitly
 
-Migrations are discovered by scanning an assembly for `[Migration]` types — reflection, so the
-trimmer removes their constructors (nothing references them statically). Either root them:
+Assembly scanning for `[Migration]` types is reflection: the trimmer removes the constructors of
+types reachable only that way, so a scan finds nothing under AOT. Name them instead:
 
 ```csharp
-[DynamicDependency(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor, typeof(WidgetsSetup))]
+services.AddPostgreSqlMigrations(source => source
+    .Add<ProductsSetup>()
+    .Add<ProductsBackfill>());
 ```
 
-— or, the pattern most teams already use, **run migrations at deploy time under the JIT** and ship
-the native binary for the read/write workload only. (An explicit
-`AddMigration<T>()` registration that roots the type for you is on the roadmap.)
+`source.Add<T>()` constructs with a plain `new` — statically rooted, no reflection, and faster
+startup (no scan). Ordering still comes from each migration's `[Migration]` timestamp, so
+registration order does not matter, and `Add(instance)` takes a migration with constructor
+arguments. The same overload exists on every provider
+(`AddMongoMigrations`, `AddCosmosMigrations`, `AddCassandraMigrations`). The scanning overload is
+unchanged for JIT apps, and honours an explicitly registered source too.
 
 ## What the engine handles for you
 

@@ -351,14 +351,16 @@ public sealed class RelationalMigrationRunner : IMigrationRunner
     private readonly IMigrationExecutor _executor;
     private readonly IMigrationHistory _history;
     private readonly IReadOnlyList<System.Reflection.Assembly> _assemblies;
+    private readonly Data.Migration.MigrationSource? _source;
 
     /// <summary>Initializes the runner.</summary>
     public RelationalMigrationRunner(IMigrationExecutor executor, IMigrationHistory history,
-        IEnumerable<System.Reflection.Assembly> assemblies)
+        IEnumerable<System.Reflection.Assembly> assemblies, Data.Migration.MigrationSource? source = null)
     {
         _executor = executor;
         _history = history;
         _assemblies = assemblies.Distinct().ToArray();
+        _source = source;
     }
 
     /// <inheritdoc />
@@ -366,13 +368,7 @@ public sealed class RelationalMigrationRunner : IMigrationRunner
     {
         await _history.EnsureCreatedAsync(cancellationToken).ConfigureAwait(false);
 
-        var pending = _assemblies
-            .SelectMany(assembly => assembly.GetTypes())
-            .Where(type => typeof(Data.Migration.Migration).IsAssignableFrom(type) && type is { IsAbstract: false, IsClass: true })
-            .Select(type => (Attribute: type.GetCustomAttribute<MigrationAttribute>(), Type: type))
-            .Where(candidate => candidate.Attribute is not null)
-            .OrderBy(candidate => candidate.Attribute!.Date)
-            .ToList();
+        var pending = Data.Migration.MigrationDiscovery.Pending(_assemblies, _source);
         if (pending.Count == 0)
         {
             return 0;
@@ -381,16 +377,15 @@ public sealed class RelationalMigrationRunner : IMigrationRunner
         var applied = new HashSet<string>(await _history.GetAppliedIdsAsync(cancellationToken).ConfigureAwait(false));
 
         var count = 0;
-        foreach (var (attribute, type) in pending)
+        foreach (var (attribute, migration) in pending)
         {
-            if (applied.Contains(attribute!.Id))
+            if (applied.Contains(attribute.Id))
             {
                 continue;
             }
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            var migration = (Data.Migration.Migration)Activator.CreateInstance(type)!;
             var builder = new MigrationBuilder();
             migration.Up(builder);
 

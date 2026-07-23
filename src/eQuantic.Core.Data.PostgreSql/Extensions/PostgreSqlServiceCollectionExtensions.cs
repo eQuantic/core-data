@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Reflection;
+using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.PostgreSql.Repository;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Relational.Extensions;
@@ -111,4 +112,16 @@ public static class PostgreSqlServiceCollectionExtensions
     /// <returns>The same service collection for chaining.</returns>
     public static IServiceCollection AddPostgreSqlMigrations(this IServiceCollection services, params Assembly[] assemblies) =>
         services.AddRelationalMigrations(assemblies.Length > 0 ? assemblies : [Assembly.GetCallingAssembly()]);
+
+    /// <summary>
+    ///     Registers the migration runner over explicitly named migrations — the trim/NativeAOT-safe form
+    ///     (nothing discovered by reflection):
+    ///     <code>services.AddPostgreSqlMigrations(source => source.Add&lt;ProductsSetup&gt;());</code>
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="migrations">Registers the migrations to run.</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddPostgreSqlMigrations(this IServiceCollection services,
+        Action<MigrationSource> migrations) =>
+        services.AddRelationalMigrations(migrations);
 }

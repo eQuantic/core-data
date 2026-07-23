@@ -16,7 +16,7 @@ services.AddPostgreSqlDatabase(
     Environment.GetEnvironmentVariable("PG_CONN") ?? "Host=localhost;Database=probe;Username=probe;Password=probe",
     model => model.Entity<Widget>(entity => entity.Table("widgets")));
 services.AddPostgreSqlRepository<Widget, Guid>();   // AOT-friendly: unit of work + closed-generic repos, no open generics
-services.AddPostgreSqlMigrations(typeof(Program).Assembly);
+services.AddPostgreSqlMigrations(source => source.Add<WidgetsSetup>());   // explicit: no reflection, no rooting
 var provider = services.BuildServiceProvider();
 
 // Offline: build a plan. This runs model building, column mapping, the filter interpreter and SQL rendering.
@@ -75,15 +75,3 @@ public sealed class WidgetsSetup : Migration
 
 public sealed record WidgetRow(Guid Id, string Name, decimal Price);
 
-// Migration types are discovered by reflection (assembly scan), so AOT trims their constructors unless
-// rooted. A real app roots its migration types the same way — or runs migrations at deploy time under the
-// JIT and ships the native binary read/write only. (An explicit migration-registration API is on the roadmap.)
-internal static class ProbeRoots
-{
-    [System.Runtime.CompilerServices.ModuleInitializer]
-    [System.Diagnostics.CodeAnalysis.DynamicDependency(
-        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicParameterlessConstructor, typeof(WidgetsSetup))]
-    internal static void Root()
-    {
-    }
-}

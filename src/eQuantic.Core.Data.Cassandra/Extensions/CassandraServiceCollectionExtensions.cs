@@ -92,7 +92,34 @@ public static class CassandraServiceCollectionExtensions
             sp.GetRequiredService<ISession>(), sp.GetRequiredService<CassandraModel>()));
         services.TryAddScoped<IMigrationHistory>(sp => new CassandraMigrationHistory(sp.GetRequiredService<ISession>()));
         services.TryAddScoped<IMigrationRunner>(sp => new CassandraMigrationRunner(
-            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(), scanned));
+            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(), scanned,
+            sp.GetService(typeof(MigrationSource)) as MigrationSource));
+
+        return services;
+    }
+
+    /// <summary>
+    ///     Registers the migration runner over <b>explicitly named</b> migrations — the trim/NativeAOT-safe
+    ///     form, since nothing is discovered by reflection:
+    ///     <code>services.AddCassandraMigrations(source => source.Add&lt;ProductsSetup&gt;());</code>
+    ///     Ordering still comes from each migration's <c>[Migration]</c> timestamp.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="migrations">Registers the migrations to run.</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddCassandraMigrations(this IServiceCollection services,
+        Action<MigrationSource> migrations)
+    {
+        var source = new MigrationSource();
+        migrations(source);
+        services.TryAddSingleton(source);
+
+        services.TryAddScoped<IMigrationExecutor>(sp => new CassandraMigrationExecutor(
+            sp.GetRequiredService<ISession>(), sp.GetRequiredService<CassandraModel>()));
+        services.TryAddScoped<IMigrationHistory>(sp => new CassandraMigrationHistory(sp.GetRequiredService<ISession>()));
+        services.TryAddScoped<IMigrationRunner>(sp => new CassandraMigrationRunner(
+            sp.GetRequiredService<IMigrationExecutor>(), sp.GetRequiredService<IMigrationHistory>(),
+            [], sp.GetRequiredService<MigrationSource>()));
 
         return services;
     }
