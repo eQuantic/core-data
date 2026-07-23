@@ -5,6 +5,8 @@ using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace eQuantic.Core.Data.Relational.Repository;
 
@@ -175,8 +177,19 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             command.Parameters.Add(parameter);
         }
 
-        return command;
+        // Every command the engine creates funnels through here, so the logging/metrics seam wraps once and
+        // catches everything — reads, aggregates, set-based writes, includes.
+        return new Diagnostics.LoggingDbCommand(command, CommandLogger, Dialect.System,
+            Conventions.EnableSensitiveDataLogging);
     }
+
+    private ILogger? _commandLogger;
+
+    /// <summary>The command-log category: <c>eQuantic.Core.Data.{provider}.Command</c> (a null logger without DI logging).</summary>
+    internal ILogger CommandLogger =>
+        _commandLogger ??= (ServiceProvider.GetService(typeof(ILoggerFactory)) as ILoggerFactory)
+            ?.CreateLogger($"eQuantic.Core.Data.{Dialect.System}.Command")
+            ?? NullLogger.Instance;
 
     // -------------------------------------------------------------- write staging
 
@@ -219,8 +232,30 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         activity?.SetTag("db.system", Dialect.System);
         activity?.SetTag("equantic.writes", writes.Count);
 
-        // Behind the RetryCommits opt-in, a transient failure re-runs the whole flush (its transaction rolled back).
-        return await RetryAsync(write: true, _ => FlushAsync(writes, cancellationToken), cancellationToken).ConfigureAwait(false);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            // Behind the RetryCommits opt-in, a transient failure re-runs the whole flush (its transaction rolled back).
+            var flushed = await RetryAsync(write: true, _ => FlushAsync(writes, cancellationToken), cancellationToken).ConfigureAwait(false);
+
+            DataMetrics.Commits.Add(1, new KeyValuePair<string, object?>("db.system", Dialect.System));
+            DataMetrics.Writes.Add(flushed, new KeyValuePair<string, object?>("db.system", Dialect.System));
+            if (CommandLogger.IsEnabled(LogLevel.Information))
+            {
+                CommandLogger.Log(LogLevel.Information, DataEvents.CommitExecuted,
+                    "Committed {Writes} staged write(s) ({Elapsed:0.0} ms)", flushed, stopwatch.Elapsed.TotalMilliseconds);
+            }
+
+            return flushed;
+        }
+        catch (ConcurrencyConflictException conflict)
+        {
+            DataMetrics.ConcurrencyConflicts.Add(1, new KeyValuePair<string, object?>("db.system", Dialect.System));
+            CommandLogger.Log(LogLevel.Warning, DataEvents.ConcurrencyConflict, conflict,
+                "Concurrency conflict: expected {Expected} row(s), affected {Affected} — the flush rolled back",
+                conflict.Expected, conflict.Affected);
+            throw;
+        }
     }
 
     private async Task<int> FlushAsync(List<PendingWrite> writes, CancellationToken cancellationToken)

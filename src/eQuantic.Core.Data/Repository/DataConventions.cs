@@ -33,4 +33,12 @@ public sealed class DataConventions
     ///     provider. Return <c>null</c> to leave the members untouched (e.g. background work with no user).
     /// </summary>
     public Func<IServiceProvider, object?>? CurrentUserId { get; set; }
+
+    /// <summary>
+    ///     Whether log events may carry <b>parameter values</b> (and, on document stores, command bodies).
+    ///     Off by default: statements log with placeholders only — the same policy the traces follow. Turn it
+    ///     on in development the way EF's <c>EnableSensitiveDataLogging</c> is turned on: deliberately, knowing
+    ///     the values land wherever the logs land.
+    /// </summary>
+    public bool EnableSensitiveDataLogging { get; set; }
 }

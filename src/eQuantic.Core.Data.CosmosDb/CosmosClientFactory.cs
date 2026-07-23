@@ -24,11 +24,18 @@ public static class CosmosClientFactory
 
     /// <summary>The client options for a model (its <c>Converts</c> registrations join the serializer).</summary>
     /// <param name="model">The Cosmos model.</param>
-    public static CosmosClientOptions OptionsFor(CosmosModel model) => new()
+    /// <param name="loggerFactory">The logging factory feeding the request log/metrics pipeline, or <c>null</c>.</param>
+    public static CosmosClientOptions OptionsFor(CosmosModel model, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
     {
-        AllowBulkExecution = true,
-        Serializer = new CosmosEntitySerializer(CosmosEntitySerializer.BuildOptions(model)),
-    };
+        var options = new CosmosClientOptions
+        {
+            AllowBulkExecution = true,
+            Serializer = new CosmosEntitySerializer(CosmosEntitySerializer.BuildOptions(model)),
+        };
+        options.CustomHandlers.Add(new Diagnostics.CosmosRequestLogging(
+            loggerFactory?.CreateLogger("eQuantic.Core.Data.cosmosdb.Request")));
+        return options;
+    }
 
     /// <summary>Creates a client from a connection string with the default options.</summary>
     /// <param name="connectionString">The Cosmos connection string.</param>
@@ -37,5 +44,8 @@ public static class CosmosClientFactory
     /// <summary>Creates a client whose serializer carries the model's value converters.</summary>
     /// <param name="connectionString">The Cosmos connection string.</param>
     /// <param name="model">The Cosmos model.</param>
-    public static CosmosClient Create(string connectionString, CosmosModel model) => new(connectionString, OptionsFor(model));
+    /// <param name="loggerFactory">The logging factory feeding the request log/metrics pipeline, or <c>null</c>.</param>
+    public static CosmosClient Create(string connectionString, CosmosModel model,
+        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null) =>
+        new(connectionString, OptionsFor(model, loggerFactory));
 }

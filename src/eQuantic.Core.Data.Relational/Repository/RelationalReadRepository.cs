@@ -673,6 +673,15 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             activity.SetTag("equantic.client_evaluation", residuals.Count > 0);
         }
 
+        if (residuals.Count > 0)
+        {
+            // The gate engaged: the opt-in allowed it, and the logs/metrics make it operable in production.
+            DataMetrics.ClientEvaluations.Add(1, new KeyValuePair<string, object?>("db.system", _dialect.System));
+            Microsoft.Extensions.Logging.LoggerExtensions.Log(UnitOfWork.CommandLogger,
+                Microsoft.Extensions.Logging.LogLevel.Warning, DataEvents.ClientEvaluation,
+                "Client evaluation engaged for '{Entity}': {Residual}", typeof(TEntity).Name, plan.ResidualText);
+        }
+
         // LIMIT/OFFSET would cut/shift rows before the residual filter sees them, so they only push when nothing is residual.
         var push = residuals.Count == 0;
         var sql = SelectSql(selected, plan.Where, options, orderByKeyWhenUnsorted || offset is not null,

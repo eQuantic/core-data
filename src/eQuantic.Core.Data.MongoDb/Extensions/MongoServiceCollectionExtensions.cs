@@ -23,7 +23,21 @@ public static class MongoServiceCollectionExtensions
     public static IServiceCollection AddMongoDatabase(this IServiceCollection services, string connectionString, string databaseName)
     {
         MongoModeling.Register();
-        services.TryAddSingleton<IMongoClient>(_ => new MongoClient(connectionString));
+        services.TryAddSingleton<IMongoClient>(serviceProvider =>
+        {
+            var settings = MongoClientSettings.FromConnectionString(connectionString);
+
+            // The driver's command events feed the engine's logs and metrics — the same category/event-id
+            // discipline every provider follows; bodies (which carry values) only log behind the opt-in.
+            var logger = (serviceProvider.GetService(typeof(Microsoft.Extensions.Logging.ILoggerFactory))
+                    as Microsoft.Extensions.Logging.ILoggerFactory)
+                ?.CreateLogger("eQuantic.Core.Data.mongodb.Command");
+            var sensitive = (serviceProvider.GetService(typeof(eQuantic.Core.Data.Repository.DataConventions))
+                as eQuantic.Core.Data.Repository.DataConventions)?.EnableSensitiveDataLogging ?? false;
+            settings.ClusterConfigurator = cluster => Diagnostics.MongoCommandLogging.Subscribe(cluster, logger, sensitive);
+
+            return new MongoClient(settings);
+        });
         services.TryAddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(databaseName));
         return services;
     }

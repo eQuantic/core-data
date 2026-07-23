@@ -37,7 +37,7 @@ internal static class CassandraStatements
 
     /// <summary>Prepares (once), binds and executes the statement, optionally at an explicit consistency level.</summary>
     public static async Task<RowSet> ExecuteAsync(ISession session, string cql, object?[] values,
-        ConsistencyLevel? consistency = null)
+        ConsistencyLevel? consistency = null, Microsoft.Extensions.Logging.ILogger? logger = null, bool sensitive = false)
     {
         var bound = await BindAsync(session, cql, values).ConfigureAwait(false);
         if (consistency is { } level)
@@ -56,6 +56,35 @@ internal static class CassandraStatements
             }
         }
 
-        return await session.ExecuteAsync(bound).ConfigureAwait(false);
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var rows = await session.ExecuteAsync(bound).ConfigureAwait(false);
+
+            DataMetrics.Commands.Add(1, new KeyValuePair<string, object?>("db.system", "cassandra"));
+            DataMetrics.CommandDuration.Record(stopwatch.Elapsed.TotalMilliseconds,
+                new KeyValuePair<string, object?>("db.system", "cassandra"));
+            if (logger is not null && logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            {
+                Microsoft.Extensions.Logging.LoggerExtensions.Log(logger,
+                    Microsoft.Extensions.Logging.LogLevel.Information, DataEvents.CommandExecuted,
+                    "Executed ({Elapsed:0.0} ms){Parameters}\n{Statement}",
+                    stopwatch.Elapsed.TotalMilliseconds, sensitive && values.Length > 0 ? $" [{string.Join(", ", values)}]" : string.Empty, cql);
+            }
+
+            return rows;
+        }
+        catch (Exception exception)
+        {
+            DataMetrics.CommandFailures.Add(1, new KeyValuePair<string, object?>("db.system", "cassandra"));
+            if (logger is not null)
+            {
+                Microsoft.Extensions.Logging.LoggerExtensions.Log(logger,
+                    Microsoft.Extensions.Logging.LogLevel.Error, DataEvents.CommandFailed, exception,
+                    "Failed ({Elapsed:0.0} ms)\n{Statement}", stopwatch.Elapsed.TotalMilliseconds, cql);
+            }
+
+            throw;
+        }
     }
 }

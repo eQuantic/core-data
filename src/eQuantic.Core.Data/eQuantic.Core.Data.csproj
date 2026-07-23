@@ -35,6 +35,9 @@
     <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
     <PackageReference Include="eQuantic.Linq.Specification" Version="3.7.1" />
     <PackageReference Include="eQuantic.Linq.Web" Version="3.7.1" />
+    <!-- The logging abstraction floors at the TFM's own generation so consumers are never forced upward. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" Condition="'$(TargetFramework)' == 'net8.0'" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" Condition="'$(TargetFramework)' == 'net10.0'" />
   </ItemGroup>
 
   <ItemGroup>

@@ -219,7 +219,8 @@ public sealed class CosmosModelBuilder
 
     /// <summary>
     ///     Builds the model. The DI extensions call this for you; call it directly when hosting without DI — the
-    ///     built model feeds <see cref="CosmosClientFactory.Create(string, CosmosModel)" /> and <see cref="CosmosModel.Explain" />.
+    ///     built model feeds <see cref="CosmosClientFactory.Create(string, CosmosModel, Microsoft.Extensions.Logging.ILoggerFactory?)" />
+    ///     and <see cref="CosmosModel.Explain" />.
     /// </summary>
     public CosmosModel Build() => _model;
 

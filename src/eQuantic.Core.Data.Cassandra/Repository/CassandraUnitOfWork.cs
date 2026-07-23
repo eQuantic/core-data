@@ -46,6 +46,18 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     /// <summary>The scope's service provider (handed to per-request convention accessors).</summary>
     internal IServiceProvider Services => ServiceProvider;
 
+    private Microsoft.Extensions.Logging.ILogger? _commandLogger;
+
+    /// <summary>The command-log category (<c>eQuantic.Core.Data.cassandra.Command</c>; null logger without DI logging).</summary>
+    internal Microsoft.Extensions.Logging.ILogger CommandLogger =>
+        _commandLogger ??= (ServiceProvider.GetService(typeof(Microsoft.Extensions.Logging.ILoggerFactory))
+                as Microsoft.Extensions.Logging.ILoggerFactory)
+            ?.CreateLogger("eQuantic.Core.Data.cassandra.Command")
+            ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+
+    /// <summary>Whether log events may carry parameter values (the explicit opt-in).</summary>
+    internal bool SensitiveLogging => Conventions.EnableSensitiveDataLogging;
+
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
     /// <remarks>A soft-delete entity's live-rows filter is ANDed in by convention.</remarks>
     internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class
@@ -169,7 +181,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         var results = await Task.WhenAll(statements.Select(async statement =>
         {
             var (cql, values) = WithTtl((statement.Cql, statement.Values), ttlSeconds);
-            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency).ConfigureAwait(false);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
             return statement.Conditional && rows.FirstOrDefault() is { } row && !row.GetValue<bool>("[applied]") ? 0 : 1;
         })).ConfigureAwait(false);
 

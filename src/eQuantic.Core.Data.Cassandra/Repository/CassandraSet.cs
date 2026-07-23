@@ -42,7 +42,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
     private async Task<List<TEntity>> ExecuteAsync(CancellationToken cancellationToken = default)
     {
-        var rows = await CassandraStatements.ExecuteAsync(_session, $"SELECT * FROM {_configuration.TableName}", []).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(_session, $"SELECT * FROM {_configuration.TableName}", [], null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         return rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row)).ToList();
     }
 
@@ -51,7 +51,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
     {
         var rows = await CassandraStatements.ExecuteAsync(_session,
-            $"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", [key]).ConfigureAwait(false);
+            $"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", [key], null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         var row = rows.FirstOrDefault();
         return row is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, row);
     }
@@ -78,7 +78,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         }
 
         var count = await CountAsync(where, values, cancellationToken).ConfigureAwait(false);
-        await CassandraStatements.ExecuteAsync(_session, $"DELETE FROM {_configuration.TableName} WHERE {where}", values).ConfigureAwait(false);
+        await CassandraStatements.ExecuteAsync(_session, $"DELETE FROM {_configuration.TableName} WHERE {where}", values, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         return count;
     }
 
@@ -97,14 +97,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         var (set, setValues) = CassandraUpdate.Build(_configuration, updateExpression);
         var count = await CountAsync(where, whereValues, cancellationToken).ConfigureAwait(false);
         await CassandraStatements.ExecuteAsync(_session,
-            $"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray()).ConfigureAwait(false);
+            $"UPDATE {_configuration.TableName} SET {set} WHERE {where}", setValues.Concat(whereValues).ToArray(), null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         return count;
     }
 
     private async Task<long> CountAsync(string where, object?[] values, CancellationToken cancellationToken)
     {
         var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}" + (where.Length > 0 ? $" WHERE {where}" : string.Empty);
-        var rows = await CassandraStatements.ExecuteAsync(_session, cql, values).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(_session, cql, values, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         return rows.First().GetValue<long>(0);
     }
 }

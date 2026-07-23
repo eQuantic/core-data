@@ -48,7 +48,7 @@ public class CassandraRepository<TEntity, TKey> :
         }
 
         var (cql, values) = CassandraMapper.BuildUpsert(configuration, item);
-        var rows = await CassandraStatements.ExecuteAsync(Session, cql + " IF NOT EXISTS", values).ConfigureAwait(false);
+        var rows = await CassandraStatements.ExecuteAsync(Session, cql + " IF NOT EXISTS", values, null, UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
         return rows.First().GetValue<bool>("[applied]");
     }
 

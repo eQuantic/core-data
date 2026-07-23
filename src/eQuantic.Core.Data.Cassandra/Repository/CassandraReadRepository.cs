@@ -117,7 +117,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                       + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                       + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
             var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
+                CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
             return rows.First().GetValue<long>(0);
         }
 
@@ -207,7 +207,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                           + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
                 var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                    CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false)).First();
+                    CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
                 return row.IsNull(0) ? default! : read(row);
             }
         }
@@ -295,7 +295,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-            CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
+            CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
 
         var constructor = group.ConstructorProjection ? typeof(TResult).GetConstructors().Single() : null;
         var properties = group.ConstructorProjection
@@ -748,7 +748,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var values = pushLimit ? [.. plan.Values, limit!.Value] : plan.Values;
 
         var rows = await CassandraStatements.ExecuteAsync(Session, cql, values,
-            CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false);
+            CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
 
         // The RowSet pages lazily; composing Where/Take before materializing the list stops fetching once satisfied.
         IEnumerable<TEntity> entities = rows.Select(row => CassandraMapper.Materialize<TEntity>(_configuration, row, selected));
@@ -839,6 +839,32 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                     "The client-evaluated filter is not scoped to a partition, so the fetch scans the whole table; " +
                     "call .AllowFiltering() as well to acknowledge the scan.");
             }
+        }
+
+        // The gates the opt-ins allowed through: logged and counted, so a hot path quietly leaning on them is
+        // an alert in production, not an archaeology project.
+        if (plan.RequiresAllowFiltering)
+        {
+            DataMetrics.AllowFiltering.Add(1, new KeyValuePair<string, object?>("db.system", "cassandra"));
+            Microsoft.Extensions.Logging.LoggerExtensions.Log(UnitOfWork.CommandLogger,
+                Microsoft.Extensions.Logging.LogLevel.Warning, DataEvents.AllowFiltering,
+                "ALLOW FILTERING engaged for '{Entity}' (server-side scan)", typeof(TEntity).Name);
+        }
+
+        if (plan.Residual.Count > 0)
+        {
+            DataMetrics.ClientEvaluations.Add(1, new KeyValuePair<string, object?>("db.system", "cassandra"));
+            Microsoft.Extensions.Logging.LoggerExtensions.Log(UnitOfWork.CommandLogger,
+                Microsoft.Extensions.Logging.LogLevel.Warning, DataEvents.ClientEvaluation,
+                "Client evaluation engaged for '{Entity}': {Residual}", typeof(TEntity).Name, plan.ResidualText);
+        }
+
+        if (plan.Alternatives.Count > 0)
+        {
+            DataMetrics.QuerySplits.Add(1, new KeyValuePair<string, object?>("db.system", "cassandra"));
+            Microsoft.Extensions.Logging.LoggerExtensions.Log(UnitOfWork.CommandLogger,
+                Microsoft.Extensions.Logging.LogLevel.Warning, DataEvents.QuerySplit,
+                "OR split into {Branches} native queries for '{Entity}'", plan.Alternatives.Count, typeof(TEntity).Name);
         }
 
         return plan;
@@ -956,7 +982,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                           + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                           + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
                 var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                    CassandraQueryOptionsExtensions.ConsistencyOf(options)).ConfigureAwait(false)).First();
+                    CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
                 return row.IsNull(0) ? default! : row.GetValue<TSum>(0);
             }
         }
