@@ -21,7 +21,10 @@ internal static class RelationalMaterializer
     /// <summary>Materializes the current row (non-generic — the include loader works over runtime types).</summary>
     public static object Materialize(Type entityType, DbDataReader reader, IReadOnlyList<RelationalColumn> selected)
     {
-        var entity = Activator.CreateInstance(entityType)!;
+        // Generated accessors (shipped with the package's source generator) replace the reflection calls —
+        // construction and member writes become direct code; reflection remains the fallback contract.
+        var accessor = eQuantic.Core.Data.Repository.EntityAccessors.For(entityType);
+        var entity = accessor?.Create() ?? Activator.CreateInstance(entityType)!;
         for (var ordinal = 0; ordinal < selected.Count; ordinal++)
         {
             if (reader.IsDBNull(ordinal))
@@ -29,7 +32,16 @@ internal static class RelationalMaterializer
                 continue;
             }
 
-            Assign(entity, selected[ordinal], reader.GetValue(ordinal));
+            var column = selected[ordinal];
+            var value = Cell(column, reader.GetValue(ordinal), column.Property.PropertyType);
+            if (accessor is not null)
+            {
+                accessor.Set(entity, column.Property.Name, value);
+            }
+            else
+            {
+                column.Property.SetValue(entity, value);
+            }
         }
 
         return entity;

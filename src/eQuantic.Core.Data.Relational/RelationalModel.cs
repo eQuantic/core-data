@@ -22,6 +22,9 @@ public sealed record RelationalNavigation(string Member, string ForeignKey, bool
 /// <param name="Converter">The value converter, or <c>null</c> when the member stores as-is.</param>
 public sealed record RelationalColumn(PropertyInfo Property, string Name, RelationalConverter? Converter = null)
 {
+    private Data.Repository.EntityAccessor? _accessor;
+    private bool _accessorResolved;
+
     /// <summary>The stored CLR type — the converter's, or the member's own.</summary>
     public Type StoredType => Converter?.StoredType ?? Property.PropertyType;
 
@@ -37,7 +40,15 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
     public object? Read(object entity)
     {
-        var value = Property.GetValue(entity);
+        // A generated accessor (from the package's source generator) reads without reflection; the lookup
+        // resolves once per column and reflection remains the fallback contract.
+        if (!_accessorResolved)
+        {
+            _accessor = Property.DeclaringType is { } declaring ? Data.Repository.EntityAccessors.For(declaring) : null;
+            _accessorResolved = true;
+        }
+
+        var value = _accessor is not null ? _accessor.Get(entity, Property.Name) : Property.GetValue(entity);
         return Converter is null ? value : Converter.ToStored(value);
     }
 

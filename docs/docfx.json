@@ -5,7 +5,7 @@
         {
           "src": "../src",
           "files": ["**/*.csproj"],
-          "exclude": ["**/bin/**", "**/obj/**", "eQuantic.Core.Data.Analyzers/**"]
+          "exclude": ["**/bin/**", "**/obj/**", "eQuantic.Core.Data.Analyzers/**", "eQuantic.Core.Data.Generators/**"]
         }
       ],
       "dest": "api",

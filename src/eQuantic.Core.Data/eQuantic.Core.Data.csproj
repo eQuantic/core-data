@@ -38,11 +38,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The modeling analyzer ships inside this package (analyzers/dotnet/cs): every consumer gets the
-         EQD compile-time diagnostics with no extra install. -->
+    <!-- The modeling analyzer and the accessor source generator ship inside this package
+         (analyzers/dotnet/cs): every consumer gets the EQD compile-time diagnostics and reflection-free
+         entity accessors with no extra install. -->
     <ProjectReference Include="../eQuantic.Core.Data.Analyzers/eQuantic.Core.Data.Analyzers.csproj"
                       ReferenceOutputAssembly="false" PrivateAssets="all" />
     <None Include="../eQuantic.Core.Data.Analyzers/bin/$(Configuration)/netstandard2.0/eQuantic.Core.Data.Analyzers.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <ProjectReference Include="../eQuantic.Core.Data.Generators/eQuantic.Core.Data.Generators.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <None Include="../eQuantic.Core.Data.Generators/bin/$(Configuration)/netstandard2.0/eQuantic.Core.Data.Generators.dll"
           Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 

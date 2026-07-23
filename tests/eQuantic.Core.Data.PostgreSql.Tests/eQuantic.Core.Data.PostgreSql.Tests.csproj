@@ -21,6 +21,8 @@
 
     <ItemGroup>
         <ProjectReference Include="../../src/eQuantic.Core.Data.PostgreSql/eQuantic.Core.Data.PostgreSql.csproj" />
+        <ProjectReference Include="../../src/eQuantic.Core.Data.Generators/eQuantic.Core.Data.Generators.csproj"
+                          OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     </ItemGroup>
 
     <ItemGroup>

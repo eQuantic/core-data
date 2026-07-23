@@ -24,7 +24,11 @@ indexed category), each stack set up the way its own documentation recommends:
 BenchmarkDotNet `ShortRun` (1 launch, 3 warmup, 3 iterations) with `MemoryDiagnoser`. Environment:
 Apple M4 Pro (arm64), .NET 10.0.9, macOS, PostgreSQL 17 in Docker on the same machine. Short runs
 trade tight confidence intervals for practical runtime; treat single-digit-percent deltas as noise
-and the shape of the table as the signal.
+and the shape of the table as the signal. The eQuantic rows run through the package's
+**source-generated entity accessors** (reflection-free materialization — see
+[the architecture guide](../architecture/internals.md#generated-accessors--reflection-out-of-the-hot-paths));
+measured effect vs the reflection path is within noise, which is itself the honest finding: the
+accessors exist for trimming/AOT readiness, not for these tables.
 
 ## Reads
 

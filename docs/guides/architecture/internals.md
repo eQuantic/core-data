@@ -56,6 +56,21 @@ statement, Cosmos point operation) → `Commit` flushes the store's best batch �
 (affected rows, `[applied]`, matched counts) and `ConcurrencyConflictException` surfaces lost
 races. No tracker, no snapshots: the staged write *is* the state.
 
+## Generated accessors — reflection out of the hot paths
+
+The package ships a **source generator** (beside the analyzer, no extra install) that emits a
+reflection-free accessor per entity — construction, member reads and member writes as direct code
+behind a name switch — registered into the engine's `EntityAccessors` registry by a module
+initializer. Relational materialization and column reads consult the registry first; **reflection
+remains the fallback contract**, so assemblies compiled without the generator behave identically.
+
+Honesty notes: entities the generated code could not honor faithfully (init-only or non-public
+setters on mapped-shaped members, no accessible parameterless constructor) are skipped entirely —
+no accessor beats a lossy one — and stay on the reflection path. Measured effect on the
+[benchmarks](../operations/benchmarks.md): within noise (the database dominates); the point of the
+accessors is eliminating the reflection dependence itself — the groundwork for trimming/NativeAOT
+support.
+
 ## The model registry
 
 Each provider builds an immutable model at startup (annotations pre-pass seeds each entity
