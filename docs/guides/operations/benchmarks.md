@@ -65,6 +65,13 @@ Reading it honestly:
 | Insert 100 rows, one commit | 1 496 µs / 175 KB | 9.86× (per-row) / 251 KB | 1.68× / 878 KB | **0.90×** / 456 KB |
 | Set-based update (500 rows) | 627.1 µs / 2.6 KB | 1.00× / 3.1 KB | 1.10× / 10.1 KB | 1.13× / 10.4 KB |
 
+Bulk loading 1 000 rows gets its own table, because the comparison is between *mechanisms*, not
+stacks — the baseline is a hand-written 1 000-statement `DbBatch`:
+
+| Scenario | raw Npgsql (batch) | EF Core | eQuantic (staged commit) | eQuantic (`BulkInsertAsync`) |
+|---|---:|---:|---:|---:|
+| Load 1 000 rows | 13.18 ms / 1 725 KB | 3.06× / 9 168 KB | 0.95× / 4 510 KB | **0.49×** / 491 KB |
+
 Reading it honestly:
 
 - **A single insert now runs at raw speed (1.00×)** — the fastest of the four stacks in this run.
@@ -77,6 +84,12 @@ Reading it honestly:
   and **11× faster** than Dapper's idiomatic per-row `ExecuteAsync(sql, list)` (that asymmetry is
   Dapper's usage pattern, not a rigged comparison — batching by hand in Dapper means writing the
   `DbBatch` yourself, which is the baseline column).
+- **`BulkInsertAsync` is worth the extra API.** Binary `COPY` loads 1 000 rows in **half the time
+  of a hand-written 1 000-statement batch** (0.49×) and **6.2× faster than EF Core**, at 0.28× the
+  baseline's allocations — it streams rows instead of building a command object per row. That gap
+  is why the method exists and why a dialect without a native path
+  [refuses rather than faking it](../writing/bulk-and-raw-sql.md): a "bulk" API that is secretly
+  row-by-row would report the same call and deliver none of this.
 - **Set-based updates are server-dominated.** Across runs this scenario oscillates between 0.95×
   and 1.13× (ShortRun jitter on a ~0.6 ms server-bound statement); the typed `UpdateManyAsync`
   translation itself costs single-digit microseconds.

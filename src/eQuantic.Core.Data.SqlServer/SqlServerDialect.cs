@@ -75,6 +75,44 @@ public class SqlServerDialect : SqlDialect
     /// <param name="length">The maximum length.</param>
     protected override string SizedTextType(int length) => $"nvarchar({length})";
 
+    /// <inheritdoc />
+    public override bool SupportsBulkInsert => true;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>SqlBulkCopy</c> — the bulk-load API of the SQL Server client, streaming rows to the server without
+    ///     a statement per row. Column mappings are explicit (ordinal to name), so the row order the engine
+    ///     produces is authoritative regardless of the table's physical column order.
+    /// </remarks>
+    public override async Task<long> BulkInsertAsync(System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction, string quotedTable,
+        IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows, CancellationToken cancellationToken)
+    {
+        using var bulk = new Microsoft.Data.SqlClient.SqlBulkCopy(
+            (Microsoft.Data.SqlClient.SqlConnection)connection,
+            Microsoft.Data.SqlClient.SqlBulkCopyOptions.Default,
+            (Microsoft.Data.SqlClient.SqlTransaction?)transaction)
+        {
+            DestinationTableName = quotedTable,
+        };
+
+        var table = new System.Data.DataTable();
+        for (var index = 0; index < columns.Count; index++)
+        {
+            var stored = Nullable.GetUnderlyingType(columns[index].StoredType) ?? columns[index].StoredType;
+            table.Columns.Add(columns[index].Name, stored);
+            bulk.ColumnMappings.Add(index, columns[index].Name);
+        }
+
+        foreach (var row in rows)
+        {
+            table.Rows.Add(row.Select(value => value ?? DBNull.Value).ToArray());
+        }
+
+        await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
+        return rows.Count;
+    }
+
     public override string SqlType(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;

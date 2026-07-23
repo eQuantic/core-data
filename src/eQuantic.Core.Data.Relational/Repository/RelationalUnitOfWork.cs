@@ -349,6 +349,131 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         return writes.Count;
     }
 
+    // -------------------------------------------------------------- bulk load
+
+    /// <summary>
+    ///     Loads entities through the store's <b>native bulk mechanism</b> — PostgreSQL binary <c>COPY</c>,
+    ///     SQL Server <c>SqlBulkCopy</c>, MySQL's bulk loader — bypassing the staged flush entirely: the rows go
+    ///     straight to the server with no statement per row. Runs <b>immediately</b> (like the other set-based
+    ///     writes), joins an open explicit transaction when there is one, and applies the lifecycle stamps
+    ///     (<c>CreatedAt</c>/<c>UpdatedAt</c> and the WHO members) exactly as a staged insert would.
+    ///     <para>
+    ///         The honest limits: generated keys are not read back (bulk paths do not return them — assign
+    ///         client-side keys), concurrency tokens are stamped but not checked (there is nothing to conflict
+    ///         with on an insert), and a dialect without a native path <b>refuses</b> instead of quietly running
+    ///         an ordinary batch, because "bulk" that is secretly row-by-row is exactly the kind of hidden cost
+    ///         this engine does not ship — stage and <c>Commit()</c> there, which already batches.
+    ///     </para>
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <param name="entities">The entities to load.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of rows loaded.</returns>
+    public async Task<long> BulkInsertAsync<TEntity>(IEnumerable<TEntity> entities,
+        CancellationToken cancellationToken = default)
+        where TEntity : class
+    {
+        var configuration = Model.For(typeof(TEntity));
+        if (!Dialect.SupportsBulkInsert)
+        {
+            throw new NotSupportedException(
+                $"{Dialect.System} has no native bulk-load path; stage the entities and Commit() — the flush " +
+                "already batches them into one round trip.");
+        }
+
+        var materialized = entities as IReadOnlyList<TEntity> ?? entities.ToList();
+        if (materialized.Count == 0)
+        {
+            return 0;
+        }
+
+        // A generated key has no value to send and none comes back, so the column is simply not part of the load.
+        var columns = configuration.KeyIsGenerated
+            ? configuration.Columns.Where(column => column != configuration.Key).ToList()
+            : configuration.Columns.ToList();
+
+        var rows = new List<object?[]>(materialized.Count);
+        foreach (var entity in materialized)
+        {
+            EntityLifecycle.StampForInsert(entity, Conventions, ServiceProvider);
+            EntityLifecycle.StampForUpdate(entity, Conventions, ServiceProvider);
+            rows.Add(columns.Select(column => Dialect.BindValue(column.Read(entity))).ToArray());
+        }
+
+        using var activity = DataActivitySource.Instance.StartActivity($"{Dialect.System}.bulk_insert", ActivityKind.Client);
+        activity?.SetTag("db.system", Dialect.System);
+        activity?.SetTag("equantic.writes", rows.Count);
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var loaded = await Dialect.BulkInsertAsync(connection, _transaction, Dialect.Quote(configuration.TableName),
+            columns, rows, cancellationToken).ConfigureAwait(false);
+
+        DataMetrics.Writes.Add(loaded, new KeyValuePair<string, object?>("db.system", Dialect.System));
+        if (CommandLogger.IsEnabled(LogLevel.Information))
+        {
+            CommandLogger.Log(LogLevel.Information, DataEvents.CommandExecuted,
+                "Bulk-loaded {Rows} row(s) into {Table} ({Elapsed:0.0} ms)",
+                loaded, configuration.TableName, stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        return loaded;
+    }
+
+    // -------------------------------------------------------------- raw SQL escape hatch
+
+    /// <summary>
+    ///     Runs arbitrary SQL and materializes each row into <typeparamref name="TResult" /> <b>by column
+    ///     name</b> — the typed escape hatch for the query the engine cannot express (window functions, CTEs,
+    ///     vendor extensions, a reporting shape that is nobody's entity). Values convert into the target member
+    ///     the same way entity materialization converts them; result columns with no matching member are
+    ///     ignored, and members with no matching column keep their default.
+    ///     <para>
+    ///         The SQL is yours: no global query filter, no soft-delete filter and no pushdown analysis apply.
+    ///         Parameters bind positionally as <c>@p0, @p1…</c> — never interpolate values into the text.
+    ///     </para>
+    /// </summary>
+    /// <typeparam name="TResult">The result shape (a DTO, a record, or the entity itself).</typeparam>
+    /// <param name="sql">The SQL text.</param>
+    /// <param name="parameters">The values bound as <c>@p0…</c>, in order.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The materialized rows.</returns>
+    public Task<IReadOnlyList<TResult>> QueryAsync<TResult>(string sql, IReadOnlyList<object?>? parameters = null,
+        CancellationToken cancellationToken = default)
+        where TResult : new() =>
+        RetryAsync<IReadOnlyList<TResult>>(write: false, async _ =>
+        {
+            await using var command = await CommandAsync(sql,
+                (parameters ?? []).Select(Dialect.BindValue).ToList(), cancellationToken).ConfigureAwait(false);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+            var results = new List<TResult>();
+            var binder = RelationalRowBinder<TResult>.For(reader);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                results.Add(binder.Bind(reader));
+            }
+
+            return results;
+        }, cancellationToken);
+
+    /// <summary>
+    ///     Runs arbitrary non-query SQL (DDL, a vendor-specific statement, a maintenance command) and reports
+    ///     the rows affected. The SQL is yours — parameters bind positionally as <c>@p0…</c>.
+    /// </summary>
+    /// <param name="sql">The SQL text.</param>
+    /// <param name="parameters">The values bound as <c>@p0…</c>, in order.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of rows affected.</returns>
+    public Task<int> ExecuteAsync(string sql, IReadOnlyList<object?>? parameters = null,
+        CancellationToken cancellationToken = default) =>
+        RetryAsync(write: true, async _ =>
+        {
+            await using var command = await CommandAsync(sql,
+                (parameters ?? []).Select(Dialect.BindValue).ToList(), cancellationToken).ConfigureAwait(false);
+            return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }, cancellationToken);
+
     public int CommitAndRefreshChanges() => Commit();
     public int CommitAndRefreshChanges(Action<SaveOptions> options) => Commit();
     public Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);

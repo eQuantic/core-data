@@ -1,5 +1,7 @@
+using System.Data.Common;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Relational;
+using MySqlConnector;
 
 namespace eQuantic.Core.Data.MySql;
 
@@ -92,4 +94,55 @@ public class MySqlDialect : SqlDialect
         Enum enumValue => Convert.ToInt32(enumValue),
         _ => value,
     };
+
+    /// <inheritdoc />
+    public override bool SupportsBulkInsert => true;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     MySqlConnector's <c>MySqlBulkCopy</c> — the client-side bulk loader, which streams rows without a
+    ///     statement per row. Column mappings are explicit (ordinal to name), so the engine's row order is
+    ///     authoritative regardless of the table's physical column order.
+    /// </remarks>
+    public override async Task<long> BulkInsertAsync(DbConnection connection, DbTransaction? transaction,
+        string quotedTable, IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows,
+        CancellationToken cancellationToken)
+    {
+        var bulk = new MySqlBulkCopy((MySqlConnection)connection, (MySqlTransaction?)transaction)
+        {
+            DestinationTableName = quotedTable,
+        };
+        for (var index = 0; index < columns.Count; index++)
+        {
+            bulk.ColumnMappings.Add(new MySqlBulkCopyColumnMapping(index, columns[index].Name));
+        }
+
+        var table = new System.Data.DataTable();
+        foreach (var column in columns)
+        {
+            table.Columns.Add(column.Name, Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType);
+        }
+
+        foreach (var row in rows)
+        {
+            table.Rows.Add(row.Select(value => value ?? DBNull.Value).ToArray());
+        }
+
+        try
+        {
+            var result = await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
+            return result.RowsInserted;
+        }
+        catch (NotSupportedException exception)
+        {
+            // MySQL's bulk loader rides LOAD DATA LOCAL INFILE, which both sides must opt into — the client
+            // in its connection string and the server in its configuration. That is a deployment decision with
+            // security weight (the server can ask the client for local files), so the engine surfaces it
+            // instead of turning it on behind your back.
+            throw new NotSupportedException(
+                "MySQL's bulk load needs LOAD DATA LOCAL INFILE enabled on both sides: add " +
+                "'AllowLoadLocalInfile=true' to the connection string and set 'local_infile=1' on the server. " +
+                "Without it, stage the entities and Commit() — the flush already batches them.", exception);
+        }
+    }
 }

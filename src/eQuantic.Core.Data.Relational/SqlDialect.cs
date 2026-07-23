@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text;
 using eQuantic.Core.Data.Query;
 
@@ -150,6 +151,32 @@ public abstract class SqlDialect
     /// <param name="quotedTable">The quoted table.</param>
     /// <param name="quotedColumn">The quoted column.</param>
     public virtual IReadOnlyList<string> SearchIndexSql(string indexName, string quotedTable, string quotedColumn) => [];
+
+    /// <summary>
+    ///     Whether the engine has a <b>native bulk-load path</b> for this dialect (PostgreSQL <c>COPY</c>,
+    ///     SQL Server <c>SqlBulkCopy</c>, MySQL's bulk loader). <c>BulkInsertAsync</c> refuses on dialects that
+    ///     answer <c>false</c> rather than quietly running an ordinary batch — asking for a bulk load and
+    ///     getting row-by-row inserts is exactly the kind of silent cost this engine does not ship.
+    /// </summary>
+    public virtual bool SupportsBulkInsert => false;
+
+    /// <summary>
+    ///     Bulk-loads rows through the store's native mechanism. Implemented by the dialects that declare
+    ///     <see cref="SupportsBulkInsert" />; each row carries the column values in <paramref name="columns" />
+    ///     order, already converted to their stored form by the engine.
+    /// </summary>
+    /// <param name="connection">The open connection (inside the caller's transaction, when there is one).</param>
+    /// <param name="transaction">The ambient transaction, or <c>null</c>.</param>
+    /// <param name="quotedTable">The quoted target table.</param>
+    /// <param name="columns">The target columns, in the order each row's values arrive.</param>
+    /// <param name="rows">The rows to load.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The number of rows loaded.</returns>
+    public virtual Task<long> BulkInsertAsync(DbConnection connection, DbTransaction? transaction, string quotedTable,
+        IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows, CancellationToken cancellationToken) =>
+        throw new NotSupportedException(
+            $"{GetType().Name} has no native bulk-load path; stage the entities and Commit() — the flush already " +
+            "batches them into one round trip.");
 
     /// <summary>The DDL adding a column to an existing table (added nullable, matching create-table semantics).</summary>
     /// <param name="quotedTable">The quoted table.</param>

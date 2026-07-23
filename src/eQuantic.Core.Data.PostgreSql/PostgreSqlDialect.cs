@@ -1,6 +1,7 @@
 using System.Collections;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Relational;
+using Npgsql;
 
 namespace eQuantic.Core.Data.PostgreSql;
 
@@ -109,6 +110,44 @@ public sealed class PostgreSqlDialect : SqlDialect
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
         $"CREATE INDEX IF NOT EXISTS {Quote(indexName)} ON {quotedTable} USING GIN ({quotedColumn} gin_trgm_ops)",
     ];
+
+    /// <inheritdoc />
+    public override bool SupportsBulkInsert => true;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     PostgreSQL's binary <c>COPY</c> — the fastest load path the server offers: rows stream in the wire
+    ///     format with no per-row statement, parse or plan. Npgsql infers each value's type from the CLR value,
+    ///     which is why the engine hands over already-converted stored values.
+    /// </remarks>
+    public override async Task<long> BulkInsertAsync(System.Data.Common.DbConnection connection,
+        System.Data.Common.DbTransaction? transaction, string quotedTable,
+        IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows, CancellationToken cancellationToken)
+    {
+        var target = $"{quotedTable} ({string.Join(", ", columns.Select(column => Quote(column.Name)))})";
+        var npgsql = (NpgsqlConnection)connection;
+
+        await using var writer = await npgsql.BeginBinaryImportAsync(
+            $"COPY {target} FROM STDIN (FORMAT BINARY)", cancellationToken).ConfigureAwait(false);
+
+        foreach (var row in rows)
+        {
+            await writer.StartRowAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var value in row)
+            {
+                if (value is null)
+                {
+                    await writer.WriteNullAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await writer.WriteAsync(value, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        return (long)await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public override string AddColumnSql(string quotedTable, string quotedColumn, string sqlType) =>

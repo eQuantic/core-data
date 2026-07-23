@@ -1,6 +1,7 @@
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using Dapper;
+using eQuantic.Core.Data.PostgreSql.Repository;
 using eQuantic.Core.Data.Repository;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -34,7 +35,7 @@ public class CompareWriteBenchmarks
     {
         _stacks = new CompareStacks();
         using var command = _stacks.DataSource.CreateCommand(
-            $"DELETE FROM {BenchmarkEnvironment.Table} WHERE category LIKE 'inserted-%' OR category LIKE 'batch-%'");
+            $"DELETE FROM {BenchmarkEnvironment.Table} WHERE category LIKE 'inserted-%' OR category LIKE 'batch-%' OR category LIKE 'bulkbench-%'");
         command.ExecuteNonQuery();
     }
 
@@ -150,6 +151,60 @@ public class CompareWriteBenchmarks
         }
 
         return await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+    }
+
+    // ---------------------------------------------------------------- bulk load (1000 rows)
+
+    [BenchmarkCategory("8. bulk 1000"), Benchmark(Baseline = true, Description = "raw Npgsql (batch)")]
+    public async Task<int> Bulk_RawBatch()
+    {
+        await using var connection = await _stacks.DataSource.OpenConnectionAsync();
+        await using var batch = connection.CreateBatch();
+        for (var index = 0; index < 1000; index++)
+        {
+            var product = NewProduct("bulkbench-raw");
+            var command = batch.CreateBatchCommand();
+            command.CommandText =
+                $"INSERT INTO {BenchmarkEnvironment.Table} (id, name, category, price, quantity, created_at) VALUES ($1, $2, $3, $4, $5, $6)";
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.Id });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.Name });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.Category });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.Price });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.Quantity });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter { Value = product.CreatedAt });
+            batch.BatchCommands.Add(command);
+        }
+
+        return await batch.ExecuteNonQueryAsync();
+    }
+
+    [BenchmarkCategory("8. bulk 1000"), Benchmark(Description = "EF Core")]
+    public async Task<int> Bulk_EfCore()
+    {
+        await using var context = _stacks.EfFactory.CreateDbContext();
+        context.Products.AddRange(Enumerable.Range(0, 1000).Select(_ => NewProduct("bulkbench-ef")));
+        return await context.SaveChangesAsync();
+    }
+
+    [BenchmarkCategory("8. bulk 1000"), Benchmark(Description = "eQuantic (staged commit)")]
+    public async Task<int> Bulk_EquanticCommit()
+    {
+        using var scope = _stacks.Equantic.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IAsyncRepository<BenchProduct, Guid>>();
+        for (var index = 0; index < 1000; index++)
+        {
+            await repository.AddAsync(NewProduct("bulkbench-staged"));
+        }
+
+        return await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+    }
+
+    [BenchmarkCategory("8. bulk 1000"), Benchmark(Description = "eQuantic (COPY)")]
+    public async Task<long> Bulk_EquanticCopy()
+    {
+        using var scope = _stacks.Equantic.CreateScope();
+        var uow = scope.ServiceProvider.GetRequiredService<PostgreSqlDefaultUnitOfWork>();
+        return await uow.BulkInsertAsync(Enumerable.Range(0, 1000).Select(_ => NewProduct("bulkbench-copy")));
     }
 
     // ---------------------------------------------------------------- set-based update (500 rows, server-side)

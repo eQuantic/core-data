@@ -80,7 +80,8 @@ public sealed class MySqlTestServer
     {
         try
         {
-            _container = new MySqlBuilder().WithUsername("root").Build();
+            // local_infile lets the suite exercise the bulk-load path (MySqlBulkCopy rides LOAD DATA LOCAL INFILE).
+            _container = new MySqlBuilder().WithUsername("root").WithCommand("--local-infile=1").Build();
             await _container.StartAsync();
             AdminConnectionString = _container.GetConnectionString();
         }
@@ -120,7 +121,7 @@ public sealed class MySqlTestServer
             await command.ExecuteNonQueryAsync();
         }
 
-        var builder = new MySqlConnectionStringBuilder(AdminConnectionString) { Database = name };
+        var builder = new MySqlConnectionStringBuilder(AdminConnectionString) { Database = name, AllowLoadLocalInfile = true };
         return new MySqlTestDatabase(builder.ConnectionString, configure);
     }
 }
