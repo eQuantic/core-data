@@ -625,7 +625,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             if (plan.Residual.Count == 0)
             {
                 var selected = SelectedColumns(mapColumns, plan);
-                if (RelationalMapCompiler.TryCompile(map, selected) is { } projector)
+                if (RelationalMapCompiler.GetOrCompile(map, selected) is { } projector)
                 {
                     return await UnitOfWork.RetryAsync(write: false, async _ =>
                     {

@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Data.Common;
 using System.Linq.Expressions;
 using System.Reflection;
+using eQuantic.Linq.Expressions.Comparison;
 
 namespace eQuantic.Core.Data.Relational;
 
@@ -16,6 +18,74 @@ namespace eQuantic.Core.Data.Relational;
 /// </summary>
 internal static class RelationalMapCompiler
 {
+    // Projectors (and the "not reader-direct" verdicts) cache by the map's STRUCTURE — the shared structural
+    // comparer from eQuantic.Linq.Expressions — because C# rebuilds the expression tree on every call even for
+    // a lexically identical lambda. Reader-direct maps are closure-free by construction (every source is an
+    // entity member read), so a cached projector can never smuggle a stale captured value. Bounded: past the
+    // cap (dynamically generated maps), the build simply runs uncached.
+    private static readonly ConcurrentDictionary<ProjectorKey, object?> Projectors = new();
+    private const int CacheCap = 1024;
+
+    /// <summary>The cached reader projector for the map, built on first sight of its structure.</summary>
+    /// <typeparam name="TEntity">The entity type the map reads from.</typeparam>
+    /// <typeparam name="TResult">The projected result type.</typeparam>
+    /// <param name="map">The projection.</param>
+    /// <param name="selected">The columns the SELECT lists, in ordinal order.</param>
+    public static Func<DbDataReader, TResult>? GetOrCompile<TEntity, TResult>(
+        Expression<Func<TEntity, TResult>> map, IReadOnlyList<RelationalColumn> selected)
+    {
+        var key = new ProjectorKey(typeof(TEntity), typeof(TResult), ColumnNames(selected), map);
+        if (Projectors.TryGetValue(key, out var cached))
+        {
+            return (Func<DbDataReader, TResult>?)cached;
+        }
+
+        var built = TryCompile(map, selected);
+
+        // Only reader-direct verdicts cache: a "not reader-direct" map may carry captured values, and its tree
+        // would key one dead entry per captured value — polluting the cap that protects real shapes. The
+        // re-scan a non-cacheable map pays instead is microseconds.
+        if (built is not null && Projectors.Count < CacheCap)
+        {
+            Projectors.TryAdd(key, built);
+        }
+
+        return built;
+    }
+
+    private static string ColumnNames(IReadOnlyList<RelationalColumn> selected)
+    {
+        var names = new string[selected.Count];
+        for (var index = 0; index < selected.Count; index++)
+        {
+            names[index] = selected[index].Name;
+        }
+
+        return string.Join(",", names);
+    }
+
+    private sealed class ProjectorKey(Type entity, Type result, string columns, LambdaExpression map)
+        : IEquatable<ProjectorKey>
+    {
+        private readonly int _hash = HashCode.Combine(entity, result, columns,
+            ExpressionEqualityComparer.Instance.GetHashCode(map));
+
+        public bool Equals(ProjectorKey? other) =>
+            other is not null
+            && entity == other.Entity && result == other.Result
+            && string.Equals(columns, other.Columns, StringComparison.Ordinal)
+            && ExpressionEqualityComparer.Instance.Equals(map, other.Map);
+
+        public override bool Equals(object? obj) => obj is ProjectorKey other && Equals(other);
+
+        public override int GetHashCode() => _hash;
+
+        private Type Entity => entity;
+        private Type Result => result;
+        private string Columns => columns;
+        private LambdaExpression Map => map;
+    }
+
     /// <summary>Builds the reader projector, or <c>null</c> when the map's shape is not reader-direct.</summary>
     /// <typeparam name="TEntity">The entity type the map reads from.</typeparam>
     /// <typeparam name="TResult">The projected result type.</typeparam>

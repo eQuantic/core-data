@@ -30,25 +30,28 @@ and the shape of the table as the signal.
 
 | Scenario | raw Npgsql | Dapper | EF Core | eQuantic |
 |---|---:|---:|---:|---:|
-| Point read by key | 173.2 µs / 2.7 KB | 1.02× / 3.4 KB | 1.12× / 8.7 KB | **0.99×** / 8.9 KB |
-| Filtered 500 rows (entities) | 414.6 µs / 97 KB | 1.05× / 152 KB | 1.16× / 199 KB | **1.01×** / 175 KB |
-| Projection 500 rows (3 columns) | 368.0 µs / 62 KB | 1.01× / 93 KB | 1.10× / 165 KB | **1.04×** / 129 KB |
-| Offset page (count + 20 rows) | 510.3 µs / 8.4 KB | 1.03× / 10.8 KB | 1.26× / 29.5 KB | **0.99×** / 22.2 KB |
+| Point read by key | 190.1 µs / 2.7 KB | 1.03× / 3.4 KB | 1.25× / 8.7 KB | **0.92×** / 8.9 KB |
+| Filtered 500 rows (entities) | 454.0 µs / 97 KB | 1.05× / 152 KB | 1.13× / 198 KB | **1.04×** / 175 KB |
+| Projection 500 rows (3 columns) | 438.2 µs / 62 KB | 0.90× / 93 KB | 1.14× / 166 KB | **0.92×** / 130 KB |
+| Offset page (count + 20 rows) | 572.6 µs / 8.4 KB | 1.07× / 10.8 KB | 1.07× / 29.4 KB | **0.94×** / 22.3 KB |
 
 Reading it honestly:
 
-- **Every read runs at raw-driver speed** — within ±4% of hand-written Npgsql, ahead of EF Core in
-  all four scenarios, at or ahead of Dapper in three — *while* going through DI scoping, the
-  repository contract, expression interpretation and the pushdown pipeline. Translation costs
-  single-digit microseconds (see [the translation table](#translation-microbenchmarks)); the
-  database dominates.
+- **Every read runs at raw-driver speed** — statistically indistinguishable from hand-written
+  Npgsql (the sub-1.0 ratios are ShortRun noise, not magic), ahead of EF Core in all four
+  scenarios, tied with Dapper — *while* going through DI scoping, the repository contract,
+  expression interpretation and the pushdown pipeline. Translation costs single-digit microseconds
+  (see [the translation table](#translation-microbenchmarks)); the database dominates.
 - **Projection was our one slow read, and the first run of this suite caught it.** The original
   `GetMappedAsync` materialized entity shells and then applied the map — 1.29× and the worst line
-  of the first published table. The engine now compiles the common map shapes (constructor
-  projections, member inits, single members) into **reader-direct projectors** — cached
-  constructor invocation, no per-query expression compilation — and the scenario sits at 1.04×.
-  Maps the projector cannot prove (whole-entity uses, computed shapes) fall back to the previous
-  path, with identical results.
+  of the first published table. Two engine changes later it ties the floor: the common map shapes
+  (constructor projections, member inits, single members) compile into **reader-direct
+  projectors** — cached constructor invocation, no per-query expression compilation — and the
+  projectors themselves are **cached by the map's structure** (the structural
+  `ExpressionEqualityComparer` from eQuantic.Linq.Expressions), since C# rebuilds the expression
+  tree on every call even for a lexically identical lambda. Reader-direct maps are closure-free by
+  construction, so a cached projector can never smuggle a stale captured value; shapes the
+  projector cannot prove fall back to the entity path, with identical results.
 
 ## Writes
 
