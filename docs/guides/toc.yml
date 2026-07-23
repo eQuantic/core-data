@@ -80,6 +80,8 @@
       href: operations/resilience.md
     - name: Benchmarks
       href: operations/benchmarks.md
+    - name: Trimming and NativeAOT
+      href: operations/aot.md
 - name: Cookbook
   items:
     - name: Multi-tenancy

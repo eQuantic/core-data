@@ -71,6 +71,38 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddRelationalRepositories<TUnitOfWork>(lifetime);
 
     /// <summary>
+    ///     Registers the repository interfaces for <b>one</b> entity as closed generics — the NativeAOT-friendly
+    ///     registration (the open-generic form cannot close a value-type key under AOT). Register the unit of
+    ///     work once with <see cref="AddPostgreSqlRepositories(IServiceCollection, ServiceLifetime)" />, then this
+    ///     per entity. See <c>AddRelationalRepository</c> for the full rationale.
+    /// </summary>
+    /// <typeparam name="TEntity">The entity type.</typeparam>
+    /// <typeparam name="TKey">The key type.</typeparam>
+    /// <param name="services">The service collection.</param>
+    /// <param name="lifetime">The repository lifetime (scoped by default).</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddPostgreSqlRepository<TEntity, TKey>(this IServiceCollection services,
+        ServiceLifetime lifetime = ServiceLifetime.Scoped)
+        where TEntity : class, eQuantic.Core.Data.Repository.IEntity<TKey> =>
+        services.AddPostgreSqlUnitOfWork(lifetime)
+            .AddRelationalRepository<TEntity, TKey>(lifetime);
+
+    /// <summary>
+    ///     Registers the <see cref="PostgreSqlDefaultUnitOfWork" /> through an explicit factory — the
+    ///     NativeAOT-safe form (no reflection over the constructor). The base of the AOT registration path;
+    ///     <see cref="AddPostgreSqlRepository{TEntity, TKey}" /> calls it for you.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="lifetime">The lifetime (scoped by default).</param>
+    /// <returns>The same service collection for chaining.</returns>
+    public static IServiceCollection AddPostgreSqlUnitOfWork(this IServiceCollection services,
+        ServiceLifetime lifetime = ServiceLifetime.Scoped) =>
+        services.AddRelationalUnitOfWork(sp => new PostgreSqlDefaultUnitOfWork(sp,
+            sp.GetRequiredService<DbDataSource>(),
+            sp.GetRequiredService<SqlDialect>(),
+            sp.GetRequiredService<RelationalModel>()), lifetime);
+
+    /// <summary>
     ///     Registers the SQL-DDL migration runner. Migrations are discovered in the supplied assemblies (the
     ///     calling assembly when none are given); resolve <c>IMigrationRunner</c> and call <c>RunAsync</c> on startup.
     /// </summary>

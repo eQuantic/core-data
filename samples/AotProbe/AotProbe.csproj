@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- The point of the probe: compile the PostgreSQL stack to a native single binary and run a real
+         round-trip. PublishAot turns on every ILLink/ILC analyzer, so `dotnet publish` reports the exact
+         reflection surface — the honest AOT status, measured, not claimed. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/eQuantic.Core.Data.PostgreSql/eQuantic.Core.Data.PostgreSql.csproj" />
+    <!-- The accessor source generator, wired the way the shipped package wires it, so the runtime data path
+         is the reflection-free generated one. -->
+    <ProjectReference Include="../../src/eQuantic.Core.Data.Generators/eQuantic.Core.Data.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
