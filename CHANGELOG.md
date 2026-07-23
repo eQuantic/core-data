@@ -1,5 +1,18 @@
 # Changelog
 
+## [6.2.0](https://github.com/eQuantic/core-data/compare/v6.1.0...v6.2.0) (2026-07-23)
+
+### Features
+
+* **analyzers:** compile-time model diagnostics (EQD001-EQD011), shipped inside the core package ([8cbe815](https://github.com/eQuantic/core-data/commit/8cbe815233f3cab02fb88f130bff5ad18c2bf1fd))
+* **generators:** source-generated entity accessors — reflection out of the hot paths ([dda62c7](https://github.com/eQuantic/core-data/commit/dda62c7952d698efb81b35d5b2942d22260cf030))
+
+### Performance Improvements
+
+* **benchmarks:** comparative suite vs EF Core, Dapper and raw Npgsql — with published numbers ([2590602](https://github.com/eQuantic/core-data/commit/2590602dbb9a466e5e1bc625456a3d0a0a5f5a6a))
+* **relational:** reader-direct projections and one-statement commits — the two published weak spots, erased ([6edb1fe](https://github.com/eQuantic/core-data/commit/6edb1fe45583b4414e9b5e24ac109bae970600ec))
+* **relational:** structural projector cache — mapped reads tie the raw-driver floor ([fe2c099](https://github.com/eQuantic/core-data/commit/fe2c099c0031d9f82f2b9cdcd34a799f723a6cf0))
+
 ## [6.1.0](https://github.com/eQuantic/core-data/compare/v6.0.0...v6.1.0) (2026-07-22)
 
 ### Features
