@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.3.0](https://github.com/eQuantic/core-data/compare/v6.2.0...v6.3.0) (2026-07-23)
+
+### Features
+
+* **observability:** first-class logging and metrics — EF-style categories, no per-logger packages ([7faaba2](https://github.com/eQuantic/core-data/commit/7faaba22ef7a37419010d53d5b11eedca92c639f))
+
 ## [6.2.0](https://github.com/eQuantic/core-data/compare/v6.1.0...v6.2.0) (2026-07-23)
 
 ### Features
