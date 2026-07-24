@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.5.0](https://github.com/eQuantic/core-data/compare/v6.4.0...v6.5.0) (2026-07-24)
+
+### Features
+
+* **datamodel:** bring the data model into this repository ([db04672](https://github.com/eQuantic/core-data/commit/db046723742aeea0f8f34b416e735a594d35797a))
+
 ## [6.4.0](https://github.com/eQuantic/core-data/compare/v6.3.0...v6.4.0) (2026-07-24)
 
 ### Features
