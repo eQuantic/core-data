@@ -1,5 +1,13 @@
 # Changelog
 
+## [6.4.0](https://github.com/eQuantic/core-data/compare/v6.3.0...v6.4.0) (2026-07-24)
+
+### Features
+
+* **aot:** NativeAOT-friendly registration + operator rooting — the stack runs as a native binary ([7c4b205](https://github.com/eQuantic/core-data/commit/7c4b20527e377fe4b06da541637364cc4feaa31e))
+* **migrations:** explicit registration — the last NativeAOT wall closes ([44f50d0](https://github.com/eQuantic/core-data/commit/44f50d0f48d83636122d0a2de633e5122bc51fec))
+* **relational:** native bulk load + typed raw SQL — the two escape hatches, honest about their cost ([fd4b9ac](https://github.com/eQuantic/core-data/commit/fd4b9ac394237f65cf3bf5c10b9499d2cd4dcdc6))
+
 ## [6.3.0](https://github.com/eQuantic/core-data/compare/v6.2.0...v6.3.0) (2026-07-23)
 
 ### Features
