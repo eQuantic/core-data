@@ -30,7 +30,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="eQuantic.Core.DataModel" Version="4.0.0" />
+    <ProjectReference Include="..\eQuantic.Core.DataModel\eQuantic.Core.DataModel.csproj" />
     <PackageReference Include="eQuantic.Core.Domain" Version="4.0.0" />
     <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
     <PackageReference Include="eQuantic.Linq.Specification" Version="3.7.1" />
