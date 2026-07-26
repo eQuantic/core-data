@@ -4,6 +4,9 @@
 tells you when a database has stopped matching the model. It generates ordinary source you read and
 edit — it does not run anything, and it does not know what your data means.
 
+Generation works on **all six stores**. Drift checking works on five of them, and says plainly why
+not on the sixth — see [what each store can answer](#what-each-store-can-answer).
+
 ```bash
 dotnet tool install --global eQuantic.Core.Data.Tools
 ```
@@ -108,6 +111,37 @@ public string Channel { get; set; } = "";
 model.Entity<OrderData>(order => order.Default(x => x.Channel, "web"));
 ```
 
+The attribute works on **all six stores**; the fluent form is relational, where the model has a
+column to hang it on. On a document store the attribute is the only place the answer can live — the
+class *is* the schema — which is also why it does more there than remove a diagnostic.
+
+### Adding a member on a document store
+
+A collection or container needs no declaration to accept a new field: documents gain one on write.
+The documents already there are the problem. Absent the field, deserialization hands your application
+`default(T)` — a `0`, an `Unspecified` date, the first value of an enum — and none of those is
+distinguishable from a value somebody meant.
+
+So on MongoDB and Cosmos DB, `AddField` **writes the declared default into the documents that predate
+the member**:
+
+```csharp
+public sealed class Ledger
+{
+    [DefaultValue("web")] public string Channel { get; set; } = "";
+}
+
+migration.For<Ledger>(ledger => ledger.AddField(x => x.Channel));
+// every document without `channel` now has "web"; the ones that had a value keep it
+```
+
+Declare nothing and it stays a no-op, deliberately: an absent field is at least visible, and a value
+nobody chose is not. Cosmos has no set-based update, so this costs one read and one patch per
+document that lacks the field — the query filters on absence for exactly that reason.
+
+Cassandra needs none of this. It has a real schema, so `AddField` is an `ALTER TABLE ... ADD` and a
+missing value reads as null.
+
 ### Refusals
 
 Some changes are not generated at all, and nothing is written when one appears — generating the rest
@@ -148,15 +182,28 @@ another application's column is not yours. Tables you do not map are not read at
 not drift: the database is behind the code on purpose until a migration runs. It is worth saying
 because the two are easy to confuse when reading a failure.
 
-### What it checks, and what it does not
+### What each store can answer
 
-Only the relational providers read their own catalogue today — PostgreSQL, MySQL, MariaDB and SQL
-Server. They compare every mapped table and column, each column's type, and its nullability. The
-document stores have no schema to introspect, so `drift` reports that it cannot answer for them
-rather than answering wrongly.
+A drift check can only compare what a store keeps, and they keep different amounts.
 
-One thing worth knowing about nullability: the engine's `CREATE TABLE` writes no `NOT NULL` for
-ordinary columns — only the primary key is required, and that by the store's own rule. So `drift`
-expects every non-key column to be nullable, and a column that *has* a `NOT NULL` is reported as
-having been tightened by hand. It is the constraint that starts rejecting writes your code allows,
-so it is worth knowing about either way round.
+| Store | What is compared |
+|---|---|
+| PostgreSQL · MySQL · MariaDB · SQL Server | every mapped table and column, each column's type and nullability |
+| Cassandra | every mapped table and column, each column's CQL type, **and the partition key** |
+| Cosmos DB | the containers and **the partition key paths** they were created with |
+| MongoDB | nothing — and it says so |
+
+MongoDB is the honest gap. A collection has no shape beyond the documents in it, and sampling those
+would describe the documents that came back rather than the collection. `drift` reports that it
+cannot answer rather than answering wrongly.
+
+**The partition key is the finding worth having.** It is fixed when a table or container is created,
+so a different one cannot be migrated at all — only rebuilt alongside and copied into. The report
+says that outright when it sees one, because it is a thing to learn from a check rather than from a
+deployment.
+
+One thing worth knowing about nullability on the relational stores: the engine's `CREATE TABLE`
+writes no `NOT NULL` for ordinary columns — only the primary key is required, and that by the
+store's own rule. So `drift` expects every non-key column to be nullable, and a column that *has* a
+`NOT NULL` is reported as having been tightened by hand. It is the constraint that starts rejecting
+writes your code allows, so it is worth knowing about either way round.

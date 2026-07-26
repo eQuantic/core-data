@@ -32,6 +32,16 @@ public static class CosmosServiceCollectionExtensions
         model(builder);
 
         services.TryAddSingleton(builder.Build());
+
+        // Describes the model for the tooling that compares one version of it against another.
+        services.TryAddSingleton<Data.Evolution.IModelSnapshotSource>(provider =>
+            new Evolution.CosmosModelSnapshotSource(provider.GetRequiredService<CosmosModel>()));
+
+        // Reads the containers as they actually are — which for Cosmos means the containers and their
+        // partition keys, the only schema it keeps.
+        services.TryAddSingleton<Data.Evolution.IDatabaseSnapshotSource>(provider =>
+            new Evolution.CosmosDatabaseSnapshotSource(provider.GetRequiredService<CosmosModel>(),
+                provider.GetRequiredService<Database>()));
         services.TryAddSingleton(serviceProvider =>
             CosmosClientFactory.Create(connectionString, serviceProvider.GetRequiredService<CosmosModel>(),
                 serviceProvider.GetService(typeof(Microsoft.Extensions.Logging.ILoggerFactory))

@@ -64,6 +64,15 @@ public static class CassandraServiceCollectionExtensions
         model(builder);
         services.TryAddSingleton(builder.Build());
 
+        // Describes the model for the tooling that compares one version of it against another.
+        services.TryAddSingleton<Data.Evolution.IModelSnapshotSource>(provider =>
+            new Evolution.CassandraModelSnapshotSource(provider.GetRequiredService<CassandraModel>()));
+
+        // Reads the keyspace as it actually is, so the model can be checked against reality.
+        services.TryAddSingleton<Data.Evolution.IDatabaseSnapshotSource>(provider =>
+            new Evolution.CassandraDatabaseSnapshotSource(provider.GetRequiredService<CassandraModel>(),
+                provider.GetRequiredService<ISession>()));
+
         services.TryAdd(new ServiceDescriptor(typeof(TUnitOfWork), typeof(TUnitOfWork), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));

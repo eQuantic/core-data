@@ -28,6 +28,18 @@ public sealed record DatabaseSnapshot(string Provider, IReadOnlyList<DatabaseCol
 /// <param name="Fields">Its fields.</param>
 public sealed record DatabaseCollection(string Name, string EntityType, IReadOnlyList<DatabaseField> Fields)
 {
+    /// <summary>
+    ///     What the store distributes the rows or documents by, in order, where it has such a thing. Empty for the
+    ///     relational stores, which do not.
+    ///     <para>
+    ///         Worth comparing above everything else: a partition key is fixed when the table or container is
+    ///         created, so finding a different one means the store cannot be brought to the model at all — no
+    ///         migration relocates what is already written. That is a thing to learn from a check rather than from
+    ///         a deployment.
+    ///     </para>
+    /// </summary>
+    public IReadOnlyList<string> PartitionKeys { get; init; } = [];
+
     /// <summary>The field stored under the given name, or <c>null</c>.</summary>
     /// <param name="name">The stored name.</param>
     public DatabaseField? Field(string name) =>

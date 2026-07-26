@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using eQuantic.Core.Data.Evolution;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Linq.Expressions;
 using MongoDB.Bson;
@@ -51,8 +52,8 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
                 case EnsureIndexOperation index:
                     await EnsureIndexAsync(index, cancellationToken).ConfigureAwait(false);
                     break;
-                case AddFieldOperation:
-                    // Documents gain fields on write; there is nothing to declare up front.
+                case AddFieldOperation add:
+                    await AddFieldAsync(add, cancellationToken).ConfigureAwait(false);
                     break;
                 case DropFieldOperation drop:
                     await Collection(drop.EntityType).UpdateManyAsync(
@@ -207,6 +208,32 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
         var update = new PipelineUpdateDefinition<BsonDocument>(pipeline);
         await collection.UpdateManyAsync(FilterDefinition<BsonDocument>.Empty, update, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    ///     Writes a newly mapped field into the documents that predate it, when the model says what they hold.
+    ///     <para>
+    ///         A collection needs no declaration to accept a new field — documents gain one on write. What it does
+    ///         need is the documents already there: absent the field, deserialization hands the application
+    ///         <c>default(T)</c>, and a zero or an <c>Unspecified</c> date is indistinguishable from a value
+    ///         somebody meant. Declaring <c>[DefaultValue]</c> on the member is what turns that silence into a
+    ///         value; without it this stays the no-op it has to be, because guessing would be worse.
+    ///     </para>
+    /// </summary>
+    private async Task AddFieldAsync(AddFieldOperation operation, CancellationToken cancellationToken)
+    {
+        var member = MemberVocabulary.Find(operation.EntityType, operation.Field.GetMemberName());
+        if (!MemberVocabulary.TryDefaultValue(member, out var value) || member is null)
+        {
+            return;
+        }
+
+        var field = MongoFieldNames.Resolve(operation.EntityType, member);
+        await Collection(operation.EntityType).UpdateManyAsync(
+            Builders<BsonDocument>.Filter.Exists(field, false),
+            Builders<BsonDocument>.Update.Set(field,
+                MongoFieldNames.Serialize(operation.EntityType, member, value)),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     private async Task RenameFieldAsync(RenameFieldOperation operation, CancellationToken cancellationToken)

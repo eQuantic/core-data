@@ -12,12 +12,18 @@ using System.Runtime.CompilerServices;
 // already compiled: every public type the split took away is forwarded from here.
 //
 // Regenerate rather than edit: the list is every exported top-level type of the Abstractions assembly.
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.CSharpLiteral))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.ClusteringSnapshot))]
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.DatabaseCollection))]
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.DatabaseField))]
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.DatabaseSnapshot))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.EntitySnapshot))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.FieldSnapshot))]
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.IDatabaseSnapshotSource))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.IDesignTimeServices))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.IModelSnapshotFile))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.IModelSnapshotSource))]
+[assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.MemberVocabulary))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.ModelSnapshot))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Evolution.SearchSnapshot))]
 [assembly: TypeForwardedTo(typeof(eQuantic.Core.Data.Migration.AddFieldOperation))]

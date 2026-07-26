@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using eQuantic.Core.Data.Evolution;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Linq.Expressions;
 using Microsoft.Azure.Cosmos;
@@ -50,8 +51,8 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
                 case EnsureIndexOperation index:
                     await EnsureCompositeIndexAsync(index, cancellationToken).ConfigureAwait(false);
                     break;
-                case AddFieldOperation:
-                    // Documents gain fields on write; there is nothing to declare up front.
+                case AddFieldOperation add:
+                    await AddFieldAsync(add, cancellationToken).ConfigureAwait(false);
                     break;
                 case DropFieldOperation:
                     throw new NotSupportedException(
@@ -156,6 +157,45 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
             properties.IndexingPolicy.CompositeIndexes.Add(composite);
             await container.ReplaceContainerAsync(properties, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    ///     Writes a newly mapped field into the documents that predate it, when the model says what they hold.
+    ///     <para>
+    ///         A container needs no declaration to accept a new field. What it needs is the documents already
+    ///         there: absent the field, deserialization hands the application <c>default(T)</c>, which reads as a
+    ///         value somebody chose. <c>[DefaultValue]</c> on the member is what says otherwise; without it this
+    ///         stays a no-op, because there is nothing to write.
+    ///     </para>
+    ///     <para>
+    ///         Cosmos has no set-based update, so this costs one read and one patch per document that lacks the
+    ///         field — the price is real and it is the reason the query filters on absence rather than rewriting
+    ///         everything.
+    ///     </para>
+    /// </summary>
+    private async Task AddFieldAsync(AddFieldOperation operation, CancellationToken cancellationToken)
+    {
+        var member = MemberVocabulary.Find(operation.EntityType, operation.Field.GetMemberName());
+        if (!MemberVocabulary.TryDefaultValue(member, out var value))
+        {
+            return;
+        }
+
+        var configuration = _model.For(operation.EntityType);
+        var container = _database.GetContainer(configuration.ContainerName);
+        var field = FieldElement(operation.Field);
+        var partitionField = FlatPartitionField(configuration);
+        var declared = JsonValue.Create(value);
+
+        var query = new QueryDefinition(
+            $"SELECT c[\"id\"], c[\"{partitionField}\"] FROM c WHERE NOT IS_DEFINED(c[\"{field}\"])");
+
+        await ForEachDocumentAsync(container, query, async (_, id, partitionKey) =>
+        {
+            await container.PatchItemAsync<JsonObject>(id, partitionKey,
+                [PatchOperation.Add("/" + field, declared)], cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }, partitionField, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ConvertFieldAsync(ConvertFieldOperation operation, CancellationToken cancellationToken)

@@ -43,11 +43,23 @@ public static class DriftComparer
                 continue;
             }
 
+            if (!collection.PartitionKeys.SequenceEqual(actual.PartitionKeys, StringComparer.OrdinalIgnoreCase))
+            {
+                findings.Add(new DriftFinding(DriftKind.PartitionKeyDiffers, collection.EntityType, collection.Name)
+                {
+                    Expected = Join(collection.PartitionKeys),
+                    Found = Join(actual.PartitionKeys),
+                });
+            }
+
             CompareFields(collection, actual, findings);
         }
 
         return new DriftReport(expected.Provider, findings);
     }
+
+    private static string Join(IReadOnlyList<string> keys) =>
+        keys.Count == 0 ? "no partition key" : string.Join(", ", keys);
 
     private static void CompareFields(DatabaseCollection expected, DatabaseCollection observed,
         List<DriftFinding> findings)

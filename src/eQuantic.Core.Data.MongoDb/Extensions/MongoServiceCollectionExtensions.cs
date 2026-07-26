@@ -57,6 +57,11 @@ public static class MongoServiceCollectionExtensions
         var builder = new MongoModelBuilder();
         model(builder);
         services.TryAddSingleton(builder.Build());
+
+        // Describes the model for the tooling that compares one version of it against another.
+        services.TryAddSingleton<Data.Evolution.IModelSnapshotSource>(provider =>
+            new Evolution.MongoModelSnapshotSource(provider.GetRequiredService<MongoModel>()));
+
         return services.AddMongoDatabase(connectionString, databaseName);
     }
 

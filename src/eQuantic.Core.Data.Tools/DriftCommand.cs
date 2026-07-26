@@ -49,9 +49,11 @@ internal static class DriftCommand
     private static DriftReport Observe(DesignTimeHost host)
     {
         var source = host.Require<IDatabaseSnapshotSource>(
-            "The application's services cannot read the database's own description of itself, so there is nothing " +
-            "to compare the model against. The relational providers register a reader; the document stores do not " +
-            "yet.");
+            "This store cannot describe itself, so there is nothing to compare the model against — which is not " +
+            "the same as there being no drift. PostgreSQL, MySQL, MariaDB, SQL Server and Cassandra keep a schema " +
+            "to read, and Cosmos DB keeps its containers and partition keys. MongoDB keeps neither: a collection " +
+            "has no shape beyond the documents in it, and sampling those would describe the ones that came back " +
+            "rather than the collection.");
 
         var observed = source.ObserveAsync().GetAwaiter().GetResult();
         return DriftComparer.Compare(source.Expect(), observed);
@@ -90,6 +92,15 @@ internal static class DriftCommand
             Console.WriteLine();
         }
 
+        if (report.NeedsRebuild)
+        {
+            Console.WriteLine(
+                "A partition key is fixed when a table or container is created, so the one above cannot be " +
+                "migrated at all. Map the new shape alongside, copy the data across, and retire the old one once " +
+                "the readers have moved.");
+            Console.WriteLine();
+        }
+
         Console.WriteLine(report.Breaks
             ? "The application reads these on every query and the store does not hold them as it expects. Close " +
               "the difference — by migrating the database, or by correcting the model if the database is right."
@@ -103,6 +114,8 @@ internal static class DriftCommand
         DriftKind.UnexpectedField => $"{finding.Field} is there ({finding.Found}) and the model does not map it",
         DriftKind.TypeDiffers => $"{finding.Field} is {finding.Found}, and the model expects {finding.Expected}",
         DriftKind.NullabilityDiffers => $"{finding.Field} is {finding.Found}, and the model expects {finding.Expected}",
+        DriftKind.PartitionKeyDiffers =>
+            $"the data is distributed by {finding.Found}, and the model says {finding.Expected}",
         _ => finding.Kind.ToString(),
     };
 }

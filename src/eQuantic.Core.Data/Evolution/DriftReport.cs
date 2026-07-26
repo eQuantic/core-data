@@ -20,6 +20,9 @@ public enum DriftKind
 
     /// <summary>The field accepts a missing value where the model does not, or the other way round.</summary>
     NullabilityDiffers,
+
+    /// <summary>The store distributes the data by something other than what the model says.</summary>
+    PartitionKeyDiffers,
 }
 
 /// <summary>One disagreement, said plainly enough to act on.</summary>
@@ -43,6 +46,12 @@ public sealed record DriftFinding(DriftKind Kind, string EntityType, string Coll
     ///     another application's column is not this one's problem. Everything else is read on every query.
     /// </remarks>
     public bool Breaks => Kind != DriftKind.UnexpectedField;
+
+    /// <summary>
+    ///     Whether closing this difference needs the data moved rather than the schema altered. A partition key is
+    ///     fixed at creation, so there is no migration for it — only a new collection and a copy.
+    /// </summary>
+    public bool NeedsRebuild => Kind == DriftKind.PartitionKeyDiffers;
 }
 
 /// <summary>What a drift check found.</summary>
@@ -55,4 +64,7 @@ public sealed record DriftReport(string Provider, IReadOnlyList<DriftFinding> Fi
 
     /// <summary>Whether anything found will stop the application working.</summary>
     public bool Breaks => Findings.Any(finding => finding.Breaks);
+
+    /// <summary>Whether anything found cannot be migrated at all, only rebuilt.</summary>
+    public bool NeedsRebuild => Findings.Any(finding => finding.NeedsRebuild);
 }
