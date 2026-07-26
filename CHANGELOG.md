@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.8.0](https://github.com/eQuantic/core-data/compare/v6.7.0...v6.8.0) (2026-07-26)
+
+### Features
+
+* **evolution:** a startup project, MongoDB index drift, one check per container ([52bc4ca](https://github.com/eQuantic/core-data/commit/52bc4cae638ccd4fa4d9edb70069a84ff25a4983))
+* **migrations:** resize, rename and drop a whole collection ([0054cdf](https://github.com/eQuantic/core-data/commit/0054cdfac8715d7cdba212fd4c927c107b5770a5)), closes [#error](https://github.com/eQuantic/core-data/issues/error) [#error](https://github.com/eQuantic/core-data/issues/error)
+
 ## [6.7.0](https://github.com/eQuantic/core-data/compare/v6.6.0...v6.7.0) (2026-07-26)
 
 ### Features

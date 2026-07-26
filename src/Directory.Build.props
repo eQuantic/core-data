@@ -3,7 +3,7 @@
     <!-- Shared metadata and versioning. The Version below is the development default:
          releases stamp the real version via -p:Version (semantic-release). -->
     <PropertyGroup>
-        <Version>6.7.0</Version>
+        <Version>6.8.0</Version>
         <Authors>eQuantic Tech</Authors>
         <Company>eQuantic Tech</Company>
         <Copyright>2026 eQuantic Tech</Copyright>
