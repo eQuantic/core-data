@@ -110,8 +110,10 @@ public static class MigrationWriter
         foreach (var change in undroppable)
         {
             decisions.Add(
-                $"'{entityType}' is no longer mapped, and no store operation drops a collection. Drop " +
-                $"'{change.From}' yourself if the data is finished with, then delete this line.");
+                $"'{entityType}' is no longer mapped. Dropping '{change.From}' would delete everything in it, and " +
+                "nothing here can tell whether that data is finished with — so this one is left to you. " +
+                $"migration.For<T>(t => t.DropCollection(\"{change.From}\")) is the operation, if it is what you " +
+                "want. Then delete this line.");
         }
 
         foreach (var decision in decisions)
@@ -175,15 +177,11 @@ public static class MigrationWriter
                 break;
 
             case ModelChangeKind.ChangeFacets:
-                decisions.Add(
-                    $"'{entityType}.{change.Member}' is resized from {change.From} to {change.To}. No operation " +
-                    "changes a column's facets; alter it yourself and delete this line.");
+                steps.Add($".ResizeField(x => x.{change.Member})");
                 break;
 
             case ModelChangeKind.RenameCollection:
-                decisions.Add(
-                    $"'{entityType}' moves from '{change.From}' to '{change.To}'. No operation renames a " +
-                    "collection; move it yourself and delete this line.");
+                steps.Add($".RenameCollection({Literal(change.From!)}, {Literal(change.To!)})");
                 break;
 
             case ModelChangeKind.DropCollection:

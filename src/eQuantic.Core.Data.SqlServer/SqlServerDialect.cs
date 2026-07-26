@@ -73,6 +73,14 @@ public class SqlServerDialect : SqlDialect
         $"ALTER TABLE {quotedTable} ALTER COLUMN {quotedColumn} {sqlType}";
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     SQL Server has no <c>RENAME</c> statement; it calls <c>sp_rename</c>, whose second argument is the new
+    ///     name alone — schema-qualifying or bracketing it renames the table to something containing brackets.
+    /// </remarks>
+    public override string RenameTableSql(string quotedTable, string target) =>
+        $"EXEC sp_rename '{quotedTable}', '{target}'";
+
+    /// <inheritdoc />
     public override string CreateTableSql(string quotedTable, string columnsDdl) =>
         $"IF OBJECT_ID(N'{quotedTable}', 'U') IS NULL CREATE TABLE {quotedTable} ({columnsDdl})";
 

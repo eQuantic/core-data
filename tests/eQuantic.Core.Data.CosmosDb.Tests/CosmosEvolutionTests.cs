@@ -126,6 +126,41 @@ public sealed class CosmosEvolutionTests : CosmosIntegrationTest
         Assert.That(documents[1]["channel"]!.GetValue<string>(), Is.EqualTo("web"));
     }
 
+    // ---- whole containers --------------------------------------------------------------------------
+
+    [Test]
+    public async Task Dropping_a_container_removes_it()
+    {
+        await ApplyAsync(migration => migration.For<Ledger>(ledger => ledger.DropCollection(Container)));
+
+        var failure = Assert.ThrowsAsync<CosmosException>(() =>
+            Database.GetContainer(Container).ReadContainerAsync());
+        Assert.That(failure!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.NotFound));
+    }
+
+    [Test]
+    public void Renaming_a_container_is_refused_with_what_to_do_instead()
+    {
+        var failure = Assert.ThrowsAsync<NotSupportedException>(() =>
+            ApplyAsync(migration => migration.For<Ledger>(ledger =>
+                ledger.RenameCollection(Container, "ledgers_v2"))));
+
+        Assert.That(failure!.Message, Does.Contain("fixed when it is created"));
+        Assert.That(failure.Message, Does.Contain("copy the documents"),
+            "a refusal that does not say what to do instead is just a wall");
+    }
+
+    [Test]
+    public async Task Resizing_a_field_does_nothing_rather_than_failing()
+    {
+        await SeedAsync("a");
+
+        await ApplyAsync(migration => migration.For<Ledger>(ledger => ledger.ResizeField(x => x.Channel)));
+
+        Assert.That((await ReadAsync()).Single()["id"]!.GetValue<string>(), Is.EqualTo("a"),
+            "a document's property is as big as its value; a migration written once for six stores must not throw");
+    }
+
     // ---- drift -------------------------------------------------------------------------------------
 
     [Test]

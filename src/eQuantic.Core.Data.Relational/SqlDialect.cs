@@ -241,6 +241,20 @@ public abstract class SqlDialect
         $"ALTER TABLE {quotedTable} DROP COLUMN {quotedColumn}";
 
     /// <summary>
+    ///     The DDL renaming a table. The target arrives unquoted because not every dialect renames with a
+    ///     statement — SQL Server calls a procedure, and its second argument is a bare name.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table, as it is now.</param>
+    /// <param name="target">The name it takes, unquoted.</param>
+    public virtual string RenameTableSql(string quotedTable, string target) =>
+        $"ALTER TABLE {quotedTable} RENAME TO {Quote(target)}";
+
+    /// <summary>The DDL dropping a table, and everything that depended on it.</summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    public virtual string DropTableSql(string quotedTable) =>
+        $"DROP TABLE {quotedTable}";
+
+    /// <summary>
     ///     Renders a value as an inline SQL literal — DDL (a filtered index's predicate) cannot carry bind
     ///     parameters. Values a dialect cannot inline are rejected with guidance.
     /// </summary>

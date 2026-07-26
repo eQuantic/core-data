@@ -101,6 +101,48 @@ public sealed class AddFieldOperation(Type entityType, LambdaExpression field) :
     public LambdaExpression Field { get; } = field;
 }
 
+/// <summary>
+///     Restates a field's stored type to the one the model now declares — how a <c>varchar(50)</c> becomes a
+///     <c>varchar(200)</c>.
+///     <para>
+///         Distinct from <see cref="ConvertFieldOperation" />, which changes what kind of thing is stored and has
+///         to rewrite the values. This changes only how much room it has, so the store does the work: a widening
+///         is usually free, and a narrowing is the store's to refuse if it would truncate.
+///     </para>
+/// </summary>
+public sealed class ResizeFieldOperation(Type entityType, LambdaExpression field) : MigrationOperation(entityType)
+{
+    /// <summary>The field selector; the size comes from the model.</summary>
+    public LambdaExpression Field { get; } = field;
+}
+
+/// <summary>
+///     Renames the whole collection — the table, collection or container an entity is stored in.
+/// </summary>
+public sealed class RenameCollectionOperation(Type entityType, string currentName, string newName)
+    : MigrationOperation(entityType)
+{
+    /// <summary>The name it is stored under today.</summary>
+    public string CurrentName { get; } = currentName;
+
+    /// <summary>The name it takes.</summary>
+    public string NewName { get; } = newName;
+}
+
+/// <summary>
+///     Drops the whole collection, and everything in it.
+///     <para>
+///         Named by its stored name rather than taken from the model, because by the time an entity stops being
+///         mapped there is no model entry left to ask. Which also means nothing checks that this is the collection
+///         you meant — it is the one operation here that cannot be undone by running something else afterwards.
+///     </para>
+/// </summary>
+public sealed class DropCollectionOperation(Type entityType, string name) : MigrationOperation(entityType)
+{
+    /// <summary>The stored name of the collection to drop.</summary>
+    public string Name { get; } = name;
+}
+
 /// <summary>Drops a stored column/field by its <b>stored name</b> (the CLR member is usually already gone).</summary>
 public sealed class DropFieldOperation(Type entityType, string field) : MigrationOperation(entityType)
 {

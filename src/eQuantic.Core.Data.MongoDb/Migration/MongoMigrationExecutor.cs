@@ -71,6 +71,19 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
                     await ((Task)ApplyUpdateMethod.MakeGenericMethod(update.EntityType).Invoke(this, [update, cancellationToken])!)
                         .ConfigureAwait(false);
                     break;
+                case DropCollectionOperation discard:
+                    await _database.DropCollectionAsync(discard.Name, cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case RenameCollectionOperation move:
+                    await _database.RenameCollectionAsync(move.CurrentName, move.NewName,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case ResizeFieldOperation:
+                    // A document's field has whatever size its value needs; there is no declaration to restate.
+                    break;
+
                 case RunOperation run:
                     await run.Action(_context, cancellationToken).ConfigureAwait(false);
                     break;

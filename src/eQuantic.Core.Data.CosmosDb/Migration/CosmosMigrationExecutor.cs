@@ -68,6 +68,20 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
                     await ((Task)ApplyUpdateMethod.MakeGenericMethod(update.EntityType).Invoke(this, [update, cancellationToken])!)
                         .ConfigureAwait(false);
                     break;
+                case DropCollectionOperation discard:
+                    await _database.GetContainer(discard.Name)
+                        .DeleteContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case RenameCollectionOperation:
+                    throw new NotSupportedException(
+                        "Cosmos DB cannot rename a container: the name is fixed when it is created. Create the new " +
+                        "container, copy the documents across, and delete the old one once the readers have moved.");
+
+                case ResizeFieldOperation:
+                    // A document's property has whatever size its value needs; there is no declaration to restate.
+                    break;
+
                 case RunOperation run:
                     await run.Action(_context, cancellationToken).ConfigureAwait(false);
                     break;

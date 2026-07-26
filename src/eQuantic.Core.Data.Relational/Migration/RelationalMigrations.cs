@@ -144,6 +144,31 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                     break;
                 }
 
+                case ResizeFieldOperation resize:
+                {
+                    // The size lives in the model, so the column is restated to whatever it now declares —
+                    // the same statement a conversion uses, with the type read from the mapping instead of
+                    // named by the caller.
+                    var configuration = _model.For(resize.EntityType);
+                    var column = Column(configuration, resize.Field.GetMemberName());
+                    await ExecuteAsync(connection,
+                        _dialect.AlterColumnType(_dialect.Quote(configuration.TableName),
+                            _dialect.Quote(column.Name), _dialect.SqlType(column)),
+                        [], cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                case RenameCollectionOperation move:
+                    await ExecuteAsync(connection,
+                        _dialect.RenameTableSql(_dialect.Quote(move.CurrentName), move.NewName),
+                        [], cancellationToken).ConfigureAwait(false);
+                    break;
+
+                case DropCollectionOperation discard:
+                    await ExecuteAsync(connection, _dialect.DropTableSql(_dialect.Quote(discard.Name)),
+                        [], cancellationToken).ConfigureAwait(false);
+                    break;
+
                 case RunOperation run:
                     await run.Action(context, cancellationToken).ConfigureAwait(false);
                     break;

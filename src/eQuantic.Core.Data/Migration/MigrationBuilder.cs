@@ -88,6 +88,24 @@ public sealed class MigrationBuilder : IMigrationBuilder
             return this;
         }
 
+        public ICollectionMigration<TEntity> ResizeField<TField>(Expression<Func<TEntity, TField>> field)
+        {
+            ops.Add(new ResizeFieldOperation(typeof(TEntity), field));
+            return this;
+        }
+
+        public ICollectionMigration<TEntity> RenameCollection(string currentName, string newName)
+        {
+            ops.Add(new RenameCollectionOperation(typeof(TEntity), currentName, newName));
+            return this;
+        }
+
+        public ICollectionMigration<TEntity> DropCollection(string name)
+        {
+            ops.Add(new DropCollectionOperation(typeof(TEntity), name));
+            return this;
+        }
+
         public ICollectionMigration<TEntity> RenameField<TField>(Expression<Func<TEntity, TField>> field, string newName)
         {
             ops.Add(new RenameFieldOperation(typeof(TEntity), field, newName));

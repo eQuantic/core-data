@@ -104,6 +104,21 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                 case ConvertFieldOperation:
                     throw new NotSupportedException(
                         "Cassandra cannot change a column's type; add a new column and backfill it with a Run step instead.");
+                case DropCollectionOperation discard:
+                    await ExecuteAsync(new SimpleStatement($"DROP TABLE IF EXISTS {discard.Name}")).ConfigureAwait(false);
+                    break;
+
+                case RenameCollectionOperation:
+                    throw new NotSupportedException(
+                        "Cassandra cannot rename a table: there is no ALTER that does it, and the rows are laid " +
+                        "out under the old name. Create the new table, copy the data across, and drop the old one " +
+                        "once the readers have moved.");
+
+                case ResizeFieldOperation:
+                    throw new NotSupportedException(
+                        "Cassandra has no sized types to resize — a text column holds what it holds. Nothing needs " +
+                        "doing here; remove the step.");
+
                 case RunOperation run:
                     await run.Action(_context, cancellationToken).ConfigureAwait(false);
                     break;

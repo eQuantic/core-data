@@ -80,6 +80,28 @@ public interface ICollectionMigration<TEntity> where TEntity : class
     /// <param name="to">The target stored type.</param>
     ICollectionMigration<TEntity> ConvertField<TField>(Expression<Func<TEntity, TField>> field, MigrationFieldType from, MigrationFieldType to);
 
+    /// <summary>
+    ///     Restates a field's stored type to the one the model declares — how a <c>varchar(50)</c> becomes a
+    ///     <c>varchar(200)</c>. The size is read from the model, so there is nothing to pass but the field.
+    ///     <para>
+    ///         A document store has no declared size, so this does nothing there rather than pretending to.
+    ///     </para>
+    /// </summary>
+    /// <typeparam name="TField">The field type.</typeparam>
+    /// <param name="field">The field selector.</param>
+    ICollectionMigration<TEntity> ResizeField<TField>(Expression<Func<TEntity, TField>> field);
+
+    /// <summary>Renames the collection this entity is stored in.</summary>
+    /// <param name="currentName">The name it is stored under today.</param>
+    /// <param name="newName">The name it takes.</param>
+    ICollectionMigration<TEntity> RenameCollection(string currentName, string newName);
+
+    /// <summary>
+    ///     Drops the collection, and everything in it. Nothing checks that this is the one you meant.
+    /// </summary>
+    /// <param name="name">The stored name of the collection.</param>
+    ICollectionMigration<TEntity> DropCollection(string name);
+
     /// <summary>Renames a field across existing documents.</summary>
     /// <typeparam name="TField">The field type.</typeparam>
     /// <param name="field">The field selector, whose current name is read from the model.</param>
