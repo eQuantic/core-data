@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.6.0](https://github.com/eQuantic/core-data/compare/v6.5.0...v6.6.0) (2026-07-26)
+
+### Features
+
+* **evolution:** snapshot-driven migrations and drift checking ([8b1115c](https://github.com/eQuantic/core-data/commit/8b1115c033c4ef48ad69befb1dd95c61f8edf472)), closes [#error](https://github.com/eQuantic/core-data/issues/error)
+
 ## [6.5.0](https://github.com/eQuantic/core-data/compare/v6.4.0...v6.5.0) (2026-07-24)
 
 ### Features
