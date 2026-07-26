@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.7.0](https://github.com/eQuantic/core-data/compare/v6.6.0...v6.7.0) (2026-07-26)
+
+### Features
+
+* **evolution:** the tooling reaches all six stores ([84fea9d](https://github.com/eQuantic/core-data/commit/84fea9d9fe25063b7a683a086097b8154370826f))
+
 ## [6.6.0](https://github.com/eQuantic/core-data/compare/v6.5.0...v6.6.0) (2026-07-26)
 
 ### Features
