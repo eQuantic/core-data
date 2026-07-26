@@ -4,8 +4,8 @@
 tells you when a database has stopped matching the model. It generates ordinary source you read and
 edit — it does not run anything, and it does not know what your data means.
 
-Generation works on **all six stores**. Drift checking works on five of them, and says plainly why
-not on the sixth — see [what each store can answer](#what-each-store-can-answer).
+Both work on **all six stores** — though each store can be asked only what it actually keeps, so what a
+drift check compares differs by store. See [what each store can answer](#what-each-store-can-answer).
 
 ```bash
 dotnet tool install --global eQuantic.Core.Data.Tools
@@ -35,9 +35,22 @@ public sealed class DesignTimeServices : IDesignTimeServices
 It hands back the whole provider rather than the model alone, because `drift` needs the same
 connection the application uses, configured the same way.
 
-> The project has to be an **executable**. A class library produces no `runtimeconfig.json`, and
-> without one the tool cannot locate the NuGet assemblies your model depends on. Point `--project`
-> at the application and keep the model wherever you like.
+### When the model lives in a library
+
+The tool runs an application, and only an application can be run: a class library produces no
+`runtimeconfig.json`, and without one the assemblies your model depends on cannot be located. So the
+two roles are named separately.
+
+```bash
+eqdata migrations add AddCustomerTier \
+  --project        src/Shop.Data \
+  --startup-project src/Shop.Api
+```
+
+`--project` is where the migrations belong and whose namespace they take. `--startup-project` is what
+gets run. Both are searched for the `IDesignTimeServices` and for the snapshot, so it does not matter
+which project you put them in. Pass neither and the current directory does both jobs, which is right
+when the model lives in the application.
 
 ## `eqdata migrations add`
 
@@ -75,7 +88,7 @@ Three things trigger it:
 |---|---|
 | A member added with no value declared | every existing record would take `default(T)` — a value nobody chose |
 | A member that appeared while another disappeared, undeclared | generating drop-and-add loses the data (see below) |
-| A change no store operation performs | resizing a column, renaming or dropping a collection |
+| Dropping a collection | it deletes everything in it, and a model diff cannot tell whether that data is finished with |
 
 ### Renames keep the data — if you say so
 
@@ -149,6 +162,12 @@ would move the snapshot past a change that never ran. Cassandra refuses a moved 
 clustering key, because there is no `ALTER` that relocates rows. Any store refuses a redefined key.
 Each refusal names what to do instead.
 
+Two more are refused when a migration runs rather than when it is generated, because they are things
+one store cannot do and another can: Cassandra will not rename a table, and Cosmos DB will not rename
+a container — both fix the name at creation. Resizing a field is a no-op on MongoDB and Cosmos DB,
+deliberately: a document's field is as big as its value, and one migration is written for six stores,
+so a step that means nothing on one of them must not throw there.
+
 ## `eqdata drift`
 
 ```bash
@@ -191,11 +210,22 @@ A drift check can only compare what a store keeps, and they keep different amoun
 | PostgreSQL · MySQL · MariaDB · SQL Server | every mapped table and column, each column's type and nullability |
 | Cassandra | every mapped table and column, each column's CQL type, **and the partition key** |
 | Cosmos DB | the containers and **the partition key paths** they were created with |
-| MongoDB | nothing — and it says so |
+| MongoDB | the collections and **their indexes** |
 
-MongoDB is the honest gap. A collection has no shape beyond the documents in it, and sampling those
-would describe the documents that came back rather than the collection. `drift` reports that it
-cannot answer rather than answering wrongly.
+No field is ever compared on MongoDB or Cosmos DB, and none is claimed: a document either carries a
+property or it does not, and sampling documents would describe the ones that came back rather than the
+collection.
+
+**On MongoDB the index that matters is the TTL one.** A time-to-live declaration is delivered as an
+index, and without it nothing expires — documents that should have been deleted are still being read.
+That is the one index whose absence changes what the store holds, so it is the one that fails the
+check. Every other index changes how fast a query runs, not whether it answers, so a missing or
+differing one is reported without failing the gate. An index nobody declared is reported and ignored,
+like a column nobody mapped.
+
+Sharing a Cosmos container between entity types is the idiom, not a mistake: the check reads it as one
+container named after all the types that map to it, so a difference is reported once rather than once
+per type.
 
 **The partition key is the finding worth having.** It is fixed when a table or container is created,
 so a different one cannot be migrated at all — only rebuilt alongside and copied into. The report

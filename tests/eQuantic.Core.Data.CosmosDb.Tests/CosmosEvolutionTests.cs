@@ -35,10 +35,27 @@ public sealed class CosmosEvolutionTests : CosmosIntegrationTest
         public string? Note { get; set; }
     }
 
+    /// <summary>A second type in the same container — sharing one is the Cosmos idiom, not a mistake.</summary>
+    private sealed class Receipt
+    {
+        public string Id { get; set; } = "";
+
+        public string Tenant { get; set; } = "";
+    }
+
     private static CosmosModel Model()
     {
         var builder = new CosmosModelBuilder();
         builder.Entity<Ledger>(entity => entity.Container(Container).PartitionKey(x => x.Tenant));
+        return builder.Build();
+    }
+
+    /// <summary>Two types, one container.</summary>
+    private static CosmosModel SharedModel()
+    {
+        var builder = new CosmosModelBuilder();
+        builder.Entity<Ledger>(entity => entity.Container(Container).PartitionKey(x => x.Tenant));
+        builder.Entity<Receipt>(entity => entity.Container(Container).PartitionKey(x => x.Tenant));
         return builder.Build();
     }
 
@@ -162,6 +179,34 @@ public sealed class CosmosEvolutionTests : CosmosIntegrationTest
     }
 
     // ---- drift -------------------------------------------------------------------------------------
+
+    [Test]
+    public async Task Two_types_in_one_container_are_checked_once()
+    {
+        var source = new CosmosDatabaseSnapshotSource(SharedModel(), Database);
+
+        var expected = source.Expect();
+        var observed = await source.ObserveAsync();
+
+        Assert.That(expected.Collections, Has.Count.EqualTo(1),
+            "one container is one thing to check, however many types map to it");
+        Assert.That(observed.Collections, Has.Count.EqualTo(1));
+        Assert.That(expected.Collections.Single().EntityType, Does.Contain("Ledger").And.Contain("Receipt"),
+            "and it is named after all of them, so a finding says which types are affected");
+    }
+
+    [Test]
+    public async Task A_shared_container_reports_a_wrong_partition_key_once_rather_than_per_type()
+    {
+        await Database.GetContainer(Container).DeleteContainerAsync();
+        await Database.CreateContainerAsync(new ContainerProperties(Container, "/category"));
+
+        var source = new CosmosDatabaseSnapshotSource(SharedModel(), Database);
+        var report = DriftComparer.Compare(source.Expect(), await source.ObserveAsync());
+
+        Assert.That(report.Findings.Count(found => found.Kind == DriftKind.PartitionKeyDiffers), Is.EqualTo(1),
+            "reporting the same container once per type reads as several problems where there is one");
+    }
 
     [Test]
     public async Task A_container_the_engine_created_reports_nothing()

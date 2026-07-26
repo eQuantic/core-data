@@ -23,6 +23,15 @@ public enum DriftKind
 
     /// <summary>The store distributes the data by something other than what the model says.</summary>
     PartitionKeyDiffers,
+
+    /// <summary>The model declares an index the collection does not carry.</summary>
+    MissingIndex,
+
+    /// <summary>The collection carries an index the model does not declare.</summary>
+    UnexpectedIndex,
+
+    /// <summary>The index is there, on different members.</summary>
+    IndexDiffers,
 }
 
 /// <summary>One disagreement, said plainly enough to act on.</summary>
@@ -40,12 +49,25 @@ public sealed record DriftFinding(DriftKind Kind, string EntityType, string Coll
     /// <summary>What the store has.</summary>
     public string? Found { get; init; }
 
+    /// <summary>
+    ///     Whether an index finding is about the one index that decides whether documents expire. Set only for
+    ///     that, because it is the only index whose absence changes what the store holds.
+    /// </summary>
+    public bool ExpiresDocuments { get; init; }
+
     /// <summary>Whether this finding will stop the application working, rather than merely being untidy.</summary>
     /// <remarks>
-    ///     A field the model does not map is the one kind that usually is not a fault: databases get shared, and
-    ///     another application's column is not this one's problem. Everything else is read on every query.
+    ///     Three kinds are reported without being faults. A field the model does not map belongs to somebody else —
+    ///     databases get shared. And a missing or differing index changes how fast a query runs, not whether it
+    ///     answers — with one exception, the index that expires documents, whose absence means data that should
+    ///     have been deleted is still there.
     /// </remarks>
-    public bool Breaks => Kind != DriftKind.UnexpectedField;
+    public bool Breaks => Kind switch
+    {
+        DriftKind.UnexpectedField or DriftKind.UnexpectedIndex => false,
+        DriftKind.MissingIndex or DriftKind.IndexDiffers => ExpiresDocuments,
+        _ => true,
+    };
 
     /// <summary>
     ///     Whether closing this difference needs the data moved rather than the schema altered. A partition key is

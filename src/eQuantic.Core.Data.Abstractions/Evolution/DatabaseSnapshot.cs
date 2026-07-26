@@ -40,10 +40,38 @@ public sealed record DatabaseCollection(string Name, string EntityType, IReadOnl
     /// </summary>
     public IReadOnlyList<string> PartitionKeys { get; init; } = [];
 
+    /// <summary>
+    ///     The indexes the collection is expected to carry, or does. Empty where a store's drift check does not
+    ///     look at them.
+    ///     <para>
+    ///         Worth its own list because an index is the one thing a schemaless store still declares. A MongoDB
+    ///         collection has no shape to compare, but it does have the indexes the model asked for — and one of
+    ///         them decides whether documents expire at all.
+    ///     </para>
+    /// </summary>
+    public IReadOnlyList<DatabaseIndex> Indexes { get; init; } = [];
+
     /// <summary>The field stored under the given name, or <c>null</c>.</summary>
     /// <param name="name">The stored name.</param>
     public DatabaseField? Field(string name) =>
         Fields.FirstOrDefault(field => field.Name == name);
+
+    /// <summary>The index stored under the given name, or <c>null</c>.</summary>
+    /// <param name="name">The index's name.</param>
+    public DatabaseIndex? Index(string name) =>
+        Indexes.FirstOrDefault(index => index.Name == name);
+}
+
+/// <summary>One index.</summary>
+/// <param name="Name">Its name.</param>
+/// <param name="Keys">The members it is built on, in order, canonicalized so the two sides compare.</param>
+public sealed record DatabaseIndex(string Name, string Keys)
+{
+    /// <summary>
+    ///     Whether this index is what deletes documents when their time is up. Absent, nothing else does — so
+    ///     unlike every other index, its absence changes what the store holds rather than how fast it is read.
+    /// </summary>
+    public bool ExpiresDocuments { get; init; }
 }
 
 /// <summary>One column or field.</summary>

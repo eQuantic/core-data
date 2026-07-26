@@ -29,21 +29,22 @@ internal static class Cli
     private static AddMigrationOptions Options(string name, string[] rest, string[] passthrough)
     {
         var common = Parse(rest, "migrations add", output: true);
-        return new AddMigrationOptions(name, common.Project, common.Output, common.Configuration, common.Build,
-            passthrough);
+        return new AddMigrationOptions(name, common.Project, common.Startup, common.Output, common.Configuration,
+            common.Build, passthrough);
     }
 
     private static DriftOptions Drift(string[] flags, string[] passthrough)
     {
         var common = Parse(flags, "drift", output: false);
-        return new DriftOptions(common.Project, common.Configuration, common.Build, passthrough);
+        return new DriftOptions(common.Project, common.Startup, common.Configuration, common.Build, passthrough);
     }
 
     /// <summary>The options every command shares. <paramref name="output" /> gates the one that only writes files.</summary>
-    private static (string? Project, string Output, string Configuration, bool Build) Parse(string[] arguments,
-        string command, bool output)
+    private static (string? Project, string? Startup, string Output, string Configuration, bool Build) Parse(
+        string[] arguments, string command, bool output)
     {
         string? project = null;
+        string? startup = null;
         var folder = "Migrations";
         var configuration = "Debug";
         var build = true;
@@ -54,6 +55,9 @@ internal static class Cli
             {
                 case "--project" or "-p":
                     project = Value(arguments, ref index);
+                    break;
+                case "--startup-project" or "-s":
+                    startup = Value(arguments, ref index);
                     break;
                 case "--output" or "-o" when output:
                     folder = Value(arguments, ref index);
@@ -69,7 +73,7 @@ internal static class Cli
             }
         }
 
-        return (project, folder, configuration, build);
+        return (project, startup, folder, configuration, build);
     }
 
     private static string Value(string[] arguments, ref int index)
@@ -112,7 +116,12 @@ internal static class Cli
 
               Both commands take:
 
-                -p, --project <path>        The project to read. Defaults to the current directory.
+                -p, --project <path>        Where the migrations belong, and whose namespace they take.
+                                            Defaults to the current directory.
+                -s, --startup-project <p>   The application to run — the one that builds the services. Defaults
+                                            to --project, which is right when the model lives in the
+                                            application. Name it separately when the model is in a library:
+                                            a library produces no runtimeconfig, so it cannot be run.
                 -c, --configuration <name>  The build configuration. Defaults to Debug.
                     --no-build              Use the assembly as it is instead of building first.
                     -- <args>               Passed to the application's IDesignTimeServices.

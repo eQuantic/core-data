@@ -21,24 +21,36 @@ public sealed class CosmosDatabaseSnapshotSource(CosmosModel model, Database dat
 
     /// <inheritdoc />
     public DatabaseSnapshot Expect() =>
-        new(Provider, model.Configurations.Values
-            .Select(configuration => new DatabaseCollection(
-                configuration.ContainerName,
-                configuration.EntityType.FullName ?? configuration.EntityType.Name,
+        new(Provider, Containers()
+            .Select(group => new DatabaseCollection(group.Key,
+                string.Join(", ", group.Select(configuration =>
+                    configuration.EntityType.FullName ?? configuration.EntityType.Name)),
                 [])
             {
-                PartitionKeys = configuration.PartitionKeyPaths,
+                PartitionKeys = group.First().PartitionKeyPaths,
             })
             .ToList());
+
+    /// <summary>
+    ///     The containers the model maps, once each.
+    ///     <para>
+    ///         Sharing a container between entity types is the Cosmos idiom, not a mistake — so a model with five
+    ///         types in one container describes one container, named after all five. Emitting one entry per type
+    ///         instead would compare the same container five times and report every difference five times, which
+    ///         reads as five problems.
+    ///     </para>
+    /// </summary>
+    private IEnumerable<IGrouping<string, CosmosEntityConfiguration>> Containers() =>
+        model.Configurations.Values.GroupBy(configuration => configuration.ContainerName, StringComparer.Ordinal);
 
     /// <inheritdoc />
     public async Task<DatabaseSnapshot> ObserveAsync(CancellationToken cancellationToken = default)
     {
         var collections = new List<DatabaseCollection>();
 
-        foreach (var configuration in model.Configurations.Values)
+        foreach (var group in Containers())
         {
-            var container = database.GetContainer(configuration.ContainerName);
+            var container = database.GetContainer(group.Key);
             ContainerProperties properties;
             try
             {
@@ -51,8 +63,9 @@ public sealed class CosmosDatabaseSnapshotSource(CosmosModel model, Database dat
                 continue;
             }
 
-            collections.Add(new DatabaseCollection(configuration.ContainerName,
-                configuration.EntityType.FullName ?? configuration.EntityType.Name, [])
+            collections.Add(new DatabaseCollection(group.Key,
+                string.Join(", ", group.Select(configuration =>
+                    configuration.EntityType.FullName ?? configuration.EntityType.Name)), [])
             {
                 // A hierarchical key reports its paths; a single key reports one. Either way these are the paths
                 // the container was created with, and nothing can change them afterwards.

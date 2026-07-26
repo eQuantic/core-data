@@ -10,11 +10,11 @@ namespace eQuantic.Core.Data.Tools;
 /// </summary>
 internal sealed class DesignTimeHost
 {
-    private readonly Assembly _assembly;
+    private readonly IReadOnlyList<Assembly> _assemblies;
 
-    private DesignTimeHost(Assembly assembly, IServiceProvider services)
+    private DesignTimeHost(IReadOnlyList<Assembly> assemblies, IServiceProvider services)
     {
-        _assembly = assembly;
+        _assemblies = assemblies;
         Services = services;
     }
 
@@ -29,7 +29,18 @@ internal sealed class DesignTimeHost
         var context = new TargetContext(project.Assembly);
         var assembly = context.LoadFromAssemblyPath(Path.GetFullPath(project.Assembly));
 
-        var factories = Types(assembly)
+        // Both roles are searched. When the model lives in a library and an application starts it, the
+        // design-time factory and the snapshot may sit in either — assuming one project holds both would make
+        // the split unusable.
+        var assemblies = new List<Assembly> { assembly };
+        if (project.OwnAssembly is { } own &&
+            context.LoadFromAssemblyPath(Path.GetFullPath(own)) is { } library &&
+            !assemblies.Contains(library))
+        {
+            assemblies.Add(library);
+        }
+
+        var factories = assemblies.SelectMany(Types)
             .Where(type => typeof(IDesignTimeServices).IsAssignableFrom(type) &&
                            type is { IsAbstract: false, IsInterface: false })
             .ToList();
@@ -37,7 +48,7 @@ internal sealed class DesignTimeHost
         if (factories.Count == 0)
         {
             throw new ToolException(
-                $"'{assembly.GetName().Name}' has no {nameof(IDesignTimeServices)}. The tool reads the model from " +
+                $"'{string.Join("' or '", assemblies.Select(each => each.GetName().Name))}' has no {nameof(IDesignTimeServices)}. The tool reads the model from " +
                 "the application's own registrations, so it needs one class that builds them:" +
                 Environment.NewLine + Environment.NewLine +
                 "    public sealed class DesignTimeServices : IDesignTimeServices" + Environment.NewLine +
@@ -55,7 +66,7 @@ internal sealed class DesignTimeHost
         if (factories.Count > 1)
         {
             throw new ToolException(
-                $"'{assembly.GetName().Name}' has {factories.Count} implementations of " +
+                $"There are {factories.Count} implementations of " +
                 $"{nameof(IDesignTimeServices)} ({string.Join(", ", factories.Select(type => type.Name))}). " +
                 "The tool cannot choose between them; leave one.");
         }
@@ -64,7 +75,7 @@ internal sealed class DesignTimeHost
         var services = factory.Create(arguments)
             ?? throw new ToolException($"'{factories[0].Name}' returned no services.");
 
-        return new DesignTimeHost(assembly, services);
+        return new DesignTimeHost(assemblies, services);
     }
 
     /// <summary>Resolves a service the application must have registered.</summary>
@@ -76,7 +87,7 @@ internal sealed class DesignTimeHost
     /// <summary>The snapshot committed with the last change, or nothing the first time.</summary>
     public ModelSnapshot? LastSnapshot()
     {
-        var files = Types(_assembly)
+        var files = _assemblies.SelectMany(Types)
             .Where(type => typeof(IModelSnapshotFile).IsAssignableFrom(type) &&
                            type is { IsAbstract: false, IsInterface: false })
             .ToList();
@@ -86,7 +97,7 @@ internal sealed class DesignTimeHost
             0 => null,
             1 => ((IModelSnapshotFile)Activator.CreateInstance(files[0])!).Model,
             _ => throw new ToolException(
-                $"There are {files.Count} model snapshots in '{_assembly.GetName().Name}' " +
+                $"There are {files.Count} model snapshots " +
                 $"({string.Join(", ", files.Select(type => type.Name))}). A project records one history; delete " +
                 "the ones that are not it."),
         };

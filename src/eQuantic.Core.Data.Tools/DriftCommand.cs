@@ -17,7 +17,7 @@ internal static class DriftCommand
     /// <param name="options">What was asked for on the command line.</param>
     public static int Run(DriftOptions options)
     {
-        var project = TargetProject.Open(options.Project, options.Configuration, options.Build);
+        var project = TargetProject.Open(options.Project, options.Startup, options.Configuration, options.Build);
         var host = DesignTimeHost.Enter(project, options.Arguments);
 
         var pending = Pending(host);
@@ -122,7 +122,9 @@ internal static class DriftCommand
 
 /// <summary>What <c>drift</c> was asked for.</summary>
 /// <param name="Project">The project to read, or <c>null</c> for the current directory.</param>
+/// <param name="Startup">The application to run, or <c>null</c> to run the project itself.</param>
 /// <param name="Configuration">The build configuration.</param>
 /// <param name="Build">Whether to build the project first.</param>
 /// <param name="Arguments">Anything passed after <c>--</c>, handed to the design-time services.</param>
-internal sealed record DriftOptions(string? Project, string Configuration, bool Build, string[] Arguments);
+internal sealed record DriftOptions(string? Project, string? Startup, string Configuration, bool Build,
+    string[] Arguments);

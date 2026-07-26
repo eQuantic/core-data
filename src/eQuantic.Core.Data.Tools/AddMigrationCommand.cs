@@ -17,7 +17,7 @@ internal static class AddMigrationCommand
     /// <param name="options">What was asked for on the command line.</param>
     public static int Run(AddMigrationOptions options)
     {
-        var project = TargetProject.Open(options.Project, options.Configuration, options.Build);
+        var project = TargetProject.Open(options.Project, options.Startup, options.Configuration, options.Build);
         var host = DesignTimeHost.Enter(project, options.Arguments);
 
         var source = host.Require<IModelSnapshotSource>(
@@ -131,7 +131,8 @@ internal static class AddMigrationCommand
 
 /// <summary>What <c>migrations add</c> was asked for.</summary>
 /// <param name="Name">The migration's name.</param>
-/// <param name="Project">The project to read, or <c>null</c> for the current directory.</param>
+/// <param name="Project">Where the files go, or <c>null</c> for the current directory.</param>
+/// <param name="Startup">The application to run, or <c>null</c> to run the project itself.</param>
 /// <param name="Output">The folder generated files go in, relative to the project.</param>
 /// <param name="Configuration">The build configuration.</param>
 /// <param name="Build">Whether to build the project first.</param>
@@ -139,6 +140,7 @@ internal static class AddMigrationCommand
 internal sealed record AddMigrationOptions(
     string Name,
     string? Project,
+    string? Startup,
     string Output,
     string Configuration,
     bool Build,

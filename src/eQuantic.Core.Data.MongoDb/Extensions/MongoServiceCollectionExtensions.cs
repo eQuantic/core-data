@@ -62,6 +62,12 @@ public static class MongoServiceCollectionExtensions
         services.TryAddSingleton<Data.Evolution.IModelSnapshotSource>(provider =>
             new Evolution.MongoModelSnapshotSource(provider.GetRequiredService<MongoModel>()));
 
+        // Reads the collections as they actually are — which for MongoDB means their indexes, the only thing a
+        // schemaless collection still declares.
+        services.TryAddSingleton<Data.Evolution.IDatabaseSnapshotSource>(provider =>
+            new Evolution.MongoDatabaseSnapshotSource(provider.GetRequiredService<MongoModel>(),
+                provider.GetRequiredService<IMongoDatabase>()));
+
         return services.AddMongoDatabase(connectionString, databaseName);
     }
 

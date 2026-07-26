@@ -53,9 +53,50 @@ public static class DriftComparer
             }
 
             CompareFields(collection, actual, findings);
+            CompareIndexes(collection, actual, findings);
         }
 
         return new DriftReport(expected.Provider, findings);
+    }
+
+    private static void CompareIndexes(DatabaseCollection expected, DatabaseCollection observed,
+        List<DriftFinding> findings)
+    {
+        foreach (var index in expected.Indexes)
+        {
+            var actual = observed.Index(index.Name);
+            if (actual is null)
+            {
+                findings.Add(new DriftFinding(DriftKind.MissingIndex, expected.EntityType, expected.Name)
+                {
+                    Field = index.Name,
+                    Expected = index.Keys,
+                    ExpiresDocuments = index.ExpiresDocuments,
+                });
+                continue;
+            }
+
+            if (!string.Equals(index.Keys, actual.Keys, StringComparison.Ordinal))
+            {
+                findings.Add(new DriftFinding(DriftKind.IndexDiffers, expected.EntityType, expected.Name)
+                {
+                    Field = index.Name,
+                    Expected = index.Keys,
+                    Found = actual.Keys,
+                    ExpiresDocuments = index.ExpiresDocuments,
+                });
+            }
+        }
+
+        var declared = expected.Indexes.Select(index => index.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var index in observed.Indexes.Where(index => !declared.Contains(index.Name)))
+        {
+            findings.Add(new DriftFinding(DriftKind.UnexpectedIndex, expected.EntityType, expected.Name)
+            {
+                Field = index.Name,
+                Found = index.Keys,
+            });
+        }
     }
 
     private static string Join(IReadOnlyList<string> keys) =>
