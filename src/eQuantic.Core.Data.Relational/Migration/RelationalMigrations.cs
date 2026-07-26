@@ -102,10 +102,15 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                 case RenameFieldOperation rename:
                 {
                     var configuration = _model.For(rename.EntityType);
-                    var column = Column(configuration, rename.Field.GetMemberName());
+                    // A stated pair is already in stored form and goes through verbatim. A selector has to be
+                    // resolved against the model, and its target then takes the naming convention the way a
+                    // hand-written rename expects.
+                    var (from, to) = rename.CurrentName is { } stated
+                        ? (stated, rename.NewName)
+                        : (Column(configuration, rename.Field!.GetMemberName()).Name, _dialect.ColumnName(rename.NewName));
                     await ExecuteAsync(connection,
-                        $"ALTER TABLE {_dialect.Quote(configuration.TableName)} RENAME COLUMN {_dialect.Quote(column.Name)} " +
-                        $"TO {_dialect.Quote(_dialect.ColumnName(rename.NewName))}", [], cancellationToken).ConfigureAwait(false);
+                        $"ALTER TABLE {_dialect.Quote(configuration.TableName)} RENAME COLUMN {_dialect.Quote(from)} " +
+                        $"TO {_dialect.Quote(to)}", [], cancellationToken).ConfigureAwait(false);
                     break;
                 }
 

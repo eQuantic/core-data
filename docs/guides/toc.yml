@@ -59,7 +59,11 @@
     - name: Bulk loading and raw SQL
       href: writing/bulk-and-raw-sql.md
 - name: Migrations
-  href: migrations/index.md
+  items:
+    - name: Authoring
+      href: migrations/index.md
+    - name: Generating and drift checking
+      href: migrations/tooling.md
 - name: Providers
   items:
     - name: PostgreSQL

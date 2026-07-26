@@ -35,11 +35,22 @@ overloads and `Action<Configuration>` callbacks, with filters and sorts passed a
 
 ## Getting started
 
-This package is the **contracts** — pair it with a provider that supplies the engine:
+Pair `eQuantic.Core.Data` with a provider that supplies the engine:
 
 ```bash
 dotnet add package eQuantic.Core.Data
 dotnet add package eQuantic.Core.Data.EntityFramework.SqlServer   # or PostgreSql / MySql / MongoDb / CosmosDb
+```
+
+The **contracts** — the repository, unit-of-work and set interfaces, the query and update models, the
+modeling attributes and the migration operations — live on their own in
+`eQuantic.Core.Data.Abstractions`. A layered solution references that from its domain and application
+projects, so they express persistence without compiling against the engine or any store, and only the
+composition root takes the packages above. You get the contracts either way: `eQuantic.Core.Data`
+depends on them.
+
+```bash
+dotnet add package eQuantic.Core.Data.Abstractions
 ```
 
 Give your entities a key via `IEntity<TKey>` (the key is exposed through `GetKey`/`SetKey` — no mandated

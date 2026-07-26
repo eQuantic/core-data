@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Description>The contract surface of eQuantic.Core.Data: repository, unit-of-work and set interfaces, the query and update models, the modeling attributes, migration operations and the model snapshot. Reference this from a domain or application layer to express persistence without depending on the engine or on any store.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.Abstractions</AssemblyTitle>
+        <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <AssemblyName>eQuantic.Core.Data.Abstractions</AssemblyName>
+        <PackageId>eQuantic.Core.Data.Abstractions</PackageId>
+        <PackageTags>eQuantic;Core;Data;Abstractions;Contracts;Repository;Pattern;DDD</PackageTags>
+        <PackageReleaseNotes>Contracts for eQuantic.Core.Data, free of any engine or store dependency</PackageReleaseNotes>
+        <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
+        <PackageOutputPath>../../artifacts/</PackageOutputPath>
+        <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
+        <RepositoryType>Git</RepositoryType>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageIcon>Icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../eQuantic.Core.DataModel/eQuantic.Core.DataModel.csproj" />
+        <PackageReference Include="eQuantic.Core.Domain" Version="4.0.0" />
+        <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
+        <PackageReference Include="eQuantic.Linq.Specification" Version="3.7.1" />
+        <PackageReference Include="eQuantic.Linq.Web" Version="3.7.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../eQuantic.Core.Data/Icon.png" Pack="true" PackagePath="Icon.png" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="" />
+        <None Include="../../README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+</Project>

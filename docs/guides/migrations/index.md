@@ -86,3 +86,10 @@ The same message discipline as queries: what, why, and the way out.
 - **The escape hatch is first-class.** `Run(...)` receives the provider's execution context and a
   cancellation token — anything the store can do, a migration can do, without leaving the
   ordered/recorded pipeline.
+
+## Writing them for you
+
+Everything above is the authoring surface, and it stays the surface: the `eqdata` tool compares your
+model against a snapshot committed beside it and writes one of these classes, which you then read and
+edit. It also checks a live database for having stopped matching the model — the one question the
+migration history cannot answer. See [Generating and drift checking](tooling.md).

@@ -28,6 +28,31 @@ public class SqlServerDialect : SqlDialect
     public override string GeneratedKeyDdl => "IDENTITY(1,1)";
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     <c>sys.columns</c> rather than <c>information_schema</c>, and the type composed here rather than
+    ///     afterwards: only this query knows that <c>max_length</c> counts bytes, so an <c>nvarchar(450)</c>
+    ///     reports 900, and that -1 is how <c>max</c> is stored.
+    /// </remarks>
+    public override string? IntrospectColumnsSql =>
+        """
+        SELECT t.name, c.name,
+               ty.name + CASE
+                   WHEN ty.name IN ('nvarchar', 'nchar')
+                       THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length / 2 AS varchar(11))) + ')'
+                   WHEN ty.name IN ('varchar', 'char', 'varbinary', 'binary')
+                       THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(11))) + ')'
+                   WHEN ty.name IN ('decimal', 'numeric')
+                       THEN '(' + CAST(c.precision AS varchar(11)) + ',' + CAST(c.scale AS varchar(11)) + ')'
+                   ELSE '' END,
+               c.is_nullable
+        FROM sys.columns c
+        JOIN sys.tables t ON t.object_id = c.object_id
+        JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE s.name = SCHEMA_NAME()
+        """;
+
+    /// <inheritdoc />
     public override bool RequiresOrderByForLimit => true;
 
     /// <inheritdoc />

@@ -35,6 +35,16 @@ public static class PostgreSqlServiceCollectionExtensions
         var builder = new RelationalModelBuilder(dialect);
         model(builder);
         services.TryAddSingleton(builder.Build());
+        // Describes the model for the tooling that compares one version of it against another.
+        services.TryAddSingleton<Data.Evolution.IModelSnapshotSource>(provider =>
+            new Relational.Evolution.RelationalModelSnapshotSource(
+                provider.GetRequiredService<RelationalModel>(), provider.GetRequiredService<SqlDialect>()));
+
+        // Reads the same tables as the database actually has them, so the model can be checked against reality.
+        services.TryAddSingleton<Data.Evolution.IDatabaseSnapshotSource>(provider =>
+            new Relational.Evolution.RelationalDatabaseSnapshotSource(
+                provider.GetRequiredService<RelationalModel>(), provider.GetRequiredService<SqlDialect>(),
+                provider.GetRequiredService<DbDataSource>()));
 
         services.TryAddSingleton(_ =>
         {

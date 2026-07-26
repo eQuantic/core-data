@@ -123,13 +123,39 @@ public sealed class ConvertFieldOperation(Type entityType, LambdaExpression fiel
 }
 
 /// <summary>Renames a field across existing documents.</summary>
-public sealed class RenameFieldOperation(Type entityType, LambdaExpression field, string newName) : MigrationOperation(entityType)
+public sealed class RenameFieldOperation : MigrationOperation
 {
-    /// <summary>The field selector.</summary>
-    public LambdaExpression Field { get; } = field;
+    /// <summary>Initializes the operation, taking the field's current name from the model.</summary>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="field">The field selector, resolved against the model as it stands.</param>
+    /// <param name="newName">The new field name.</param>
+    public RenameFieldOperation(Type entityType, LambdaExpression field, string newName) : base(entityType)
+    {
+        Field = field;
+        NewName = newName;
+    }
+
+    /// <summary>Initializes the operation with both names stated outright.</summary>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="currentName">The name the field is stored under today.</param>
+    /// <param name="newName">The new field name.</param>
+    public RenameFieldOperation(Type entityType, string currentName, string newName) : base(entityType)
+    {
+        CurrentName = currentName;
+        NewName = newName;
+    }
+
+    /// <summary>The field selector, when the source is resolved from the model. <c>null</c> when it was stated.</summary>
+    public LambdaExpression? Field { get; }
+
+    /// <summary>
+    ///     The name the field is stored under today, when stated outright. <c>null</c> when it comes from
+    ///     <see cref="Field" /> instead.
+    /// </summary>
+    public string? CurrentName { get; }
 
     /// <summary>The new field name.</summary>
-    public string NewName { get; } = newName;
+    public string NewName { get; }
 }
 
 /// <summary>A single assignment applied by an <see cref="UpdateOperation" />.</summary>

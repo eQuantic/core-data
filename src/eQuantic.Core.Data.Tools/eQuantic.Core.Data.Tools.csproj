@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Description>The eqdata command-line tool for eQuantic.Core.Data: generates database migrations by comparing the model against a committed snapshot, and checks a live database for drift away from it.</Description>
+        <AssemblyTitle>eQuantic.Core.Data.Tools</AssemblyTitle>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+        <OutputType>Exe</OutputType>
+        <RollForward>Major</RollForward>
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>eqdata</ToolCommandName>
+        <AssemblyName>eQuantic.Core.Data.Tools</AssemblyName>
+        <PackageId>eQuantic.Core.Data.Tools</PackageId>
+        <PackageTags>eQuantic;Core;Data;Migrations;Tool;dotnet-tool;Snapshot;Drift</PackageTags>
+        <PackageReleaseNotes>Command-line migration generation and drift checking for eQuantic.Core.Data</PackageReleaseNotes>
+        <PackageProjectUrl>https://github.com/eQuantic/core-data</PackageProjectUrl>
+        <PackageOutputPath>../../artifacts/</PackageOutputPath>
+        <RepositoryUrl>https://github.com/eQuantic/core-data</RepositoryUrl>
+        <RepositoryType>Git</RepositoryType>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <PackageIcon>Icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../eQuantic.Core.Data/Icon.png" Pack="true" PackagePath="Icon.png" />
+        <None Include="../../LICENSE" Pack="true" PackagePath="" />
+        <None Include="../../README.md" Pack="true" PackagePath="" />
+    </ItemGroup>
+
+</Project>

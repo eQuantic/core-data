@@ -23,6 +23,19 @@ public class MySqlDialect : SqlDialect
     public override string GeneratedKeyDdl => "AUTO_INCREMENT";
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     <c>column_type</c> rather than <c>data_type</c>: it carries the display width and the fractional-second
+    ///     precision that this dialect writes into its DDL — <c>tinyint(1)</c>, <c>datetime(6)</c> — which
+    ///     <c>data_type</c> drops, and dropping them would make every boolean and every timestamp read as drift.
+    /// </remarks>
+    public override string? IntrospectColumnsSql =>
+        """
+        SELECT table_name, column_name, column_type, is_nullable = 'YES'
+        FROM information_schema.columns
+        WHERE table_schema = database()
+        """;
+
+    /// <inheritdoc />
     public override string TupleComparison(IReadOnlyList<string> columns, ComparisonOperator op, IReadOnlyList<string> parameters) =>
         $"({string.Join(", ", columns)}) {op switch
         {

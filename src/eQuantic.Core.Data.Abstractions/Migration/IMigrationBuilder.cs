@@ -82,9 +82,22 @@ public interface ICollectionMigration<TEntity> where TEntity : class
 
     /// <summary>Renames a field across existing documents.</summary>
     /// <typeparam name="TField">The field type.</typeparam>
-    /// <param name="field">The field selector.</param>
+    /// <param name="field">The field selector, whose current name is read from the model.</param>
     /// <param name="newName">The new field name.</param>
     ICollectionMigration<TEntity> RenameField<TField>(Expression<Func<TEntity, TField>> field, string newName);
+
+    /// <summary>
+    ///     Renames a field, naming both sides outright.
+    ///     <para>
+    ///         Use this when the model has already moved on — which is always the case for a generated migration.
+    ///         The selector overload asks the model what the field is called today, and once the mapping has
+    ///         changed that answer is the <em>new</em> name, so the rename would resolve to a no-op while the old
+    ///         name stays in the store. Stating both sides describes the transition instead of the destination.
+    ///     </para>
+    /// </summary>
+    /// <param name="currentName">The name the field is stored under today.</param>
+    /// <param name="newName">The new field name.</param>
+    ICollectionMigration<TEntity> RenameField(string currentName, string newName);
 
     /// <summary>Applies assignments to the documents matching a predicate (a data migration).</summary>
     /// <param name="predicate">The predicate selecting the documents.</param>

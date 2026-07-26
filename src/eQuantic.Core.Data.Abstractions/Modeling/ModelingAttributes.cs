@@ -50,6 +50,41 @@ public sealed class StoredAsAttribute(string name) : Attribute
 public sealed class UnmappedAttribute : Attribute;
 
 /// <summary>
+///     The member's previous stored name, so a rename reads as a rename. A model comparison sees only that one
+///     name is gone and another has appeared; without this it cannot tell a rename from a member dropped and
+///     another added — and on a document store that difference is whether the data survives. Declaring the old
+///     name makes the intent explicit and lets the change be generated as a rename, keeping the values.
+///     <para>Name several when a member has been renamed more than once; the comparison accepts any of them.</para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+public sealed class PreviousNameAttribute(string name) : Attribute
+{
+    /// <summary>The stored name this member used to have.</summary>
+    public string Name { get; } = name;
+}
+
+/// <summary>
+///     The value existing records take when this member is added to a model that is already in production.
+///     <para>
+///         On a relational store the column arrives with it as its default; on a document store it is written
+///         into the documents that predate the member. That second case is the one that bites: a document
+///         without the element does not fail to load, it loads as <c>default(T)</c> — an enum becomes its first
+///         value, a date becomes <c>0001-01-01</c> — so the data is quietly wrong rather than loudly missing.
+///     </para>
+///     <para>
+///         The value belongs to the domain, not to the schema, which is why the engine will not invent one: a
+///         member added without it produces a change that refuses to run until you say what the existing records
+///         should hold.
+///     </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class DefaultValueAttribute(object value) : Attribute
+{
+    /// <summary>The value existing records take.</summary>
+    public object Value { get; } = value;
+}
+
+/// <summary>
 ///     Declares the member part of the <b>partition key</b> — the access-pattern declaration: Cassandra's
 ///     partition key and Cosmos DB's partition key path (compose with <see cref="Order" /> — Cosmos builds a
 ///     hierarchical, multi-hash key from up to three members). Relational stores and MongoDB have no partition

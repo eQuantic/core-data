@@ -95,8 +95,9 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
                 case RenameFieldOperation rename:
                 {
                     var configuration = _model.For(rename.EntityType);
+                    var from = rename.CurrentName ?? configuration.ColumnFor(rename.Field!.GetMemberName());
                     await ExecuteAsync(new SimpleStatement(
-                        $"ALTER TABLE {configuration.TableName} RENAME {configuration.ColumnFor(rename.Field.GetMemberName())} TO {rename.NewName}")).ConfigureAwait(false);
+                        $"ALTER TABLE {configuration.TableName} RENAME {from} TO {rename.NewName}")).ConfigureAwait(false);
                     break;
                 }
 

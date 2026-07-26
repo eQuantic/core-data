@@ -37,6 +37,19 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     /// <summary>The decimal scale (meaningful when <see cref="Precision" /> is set).</summary>
     public int Scale { get; init; }
 
+    /// <summary>
+    ///     The stored names this column used to have, from <c>[PreviousName]</c> / <c>PreviousName(...)</c>. A
+    ///     model comparison uses them to recognise a rename instead of reading it as a drop and an add.
+    /// </summary>
+    public IReadOnlyList<string> PreviousNames { get; init; } = [];
+
+    /// <summary>
+    ///     The value existing records take when this column is added to a model already in production, from
+    ///     <c>[DefaultValue]</c> / <c>Default(...)</c>. <c>null</c> means none was declared, and a comparison that
+    ///     needs one says so rather than inventing it.
+    /// </summary>
+    public object? DefaultValue { get; init; }
+
     /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
     public object? Read(object entity)
     {
@@ -278,6 +291,8 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, Modeling.SearchMode> _searchMembers = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(string Member, bool Descending)> _clusteringMembers = [];
     private readonly Dictionary<string, (int Length, int Precision, int Scale)> _facets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<string>> _previousNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, object?> _defaults = new(StringComparer.OrdinalIgnoreCase);
     private List<string>? _keyMembers;
     private string? _table;
     private string? _keyMember;
@@ -326,6 +341,17 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Modeling.FacetAttribute>() is { } facet)
             {
                 _facets[property.Name] = (facet.Length, facet.Precision, facet.Scale);
+            }
+
+            var renames = property.GetCustomAttributes<Modeling.PreviousNameAttribute>().ToList();
+            if (renames.Count > 0)
+            {
+                _previousNames[property.Name] = renames.Select(previous => previous.Name).ToList();
+            }
+
+            if (property.GetCustomAttribute<Modeling.DefaultValueAttribute>() is { } fallback)
+            {
+                _defaults[property.Name] = fallback.Value;
             }
         }
 
@@ -413,6 +439,40 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     public RelationalEntityBuilder<TEntity> Column<TMember>(Expression<Func<TEntity, TMember>> selector, string columnName)
     {
         _columnOverrides[selector.GetMemberName()] = columnName;
+        return this;
+    }
+
+    /// <summary>
+    ///     Records a stored name this member used to have, so a rename reads as a rename rather than as one
+    ///     column dropped and another added — which is the difference between keeping the data and losing it.
+    ///     Call it more than once for a member renamed more than once.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="previousName">The stored name it used to have.</param>
+    public RelationalEntityBuilder<TEntity> PreviousName<TMember>(Expression<Func<TEntity, TMember>> selector, string previousName)
+    {
+        var member = selector.GetMemberName();
+        if (!_previousNames.TryGetValue(member, out var names))
+        {
+            _previousNames[member] = names = [];
+        }
+
+        names.Add(previousName);
+        return this;
+    }
+
+    /// <summary>
+    ///     The value existing records take when this member is added to a model already in production. Without
+    ///     it, adding a member produces a change that refuses to run: the value is a domain decision and the
+    ///     engine will not guess it — see <c>[DefaultValue]</c> for what that costs on a document store.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="value">The value existing records take.</param>
+    public RelationalEntityBuilder<TEntity> Default<TMember>(Expression<Func<TEntity, TMember>> selector, TMember value)
+    {
+        _defaults[selector.GetMemberName()] = value;
         return this;
     }
 
@@ -527,6 +587,8 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                     Length = facet.Length,
                     Precision = facet.Precision,
                     Scale = facet.Scale,
+                    PreviousNames = _previousNames.TryGetValue(property.Name, out var renamed) ? renamed : [],
+                    DefaultValue = _defaults.TryGetValue(property.Name, out var fallback) ? fallback : null,
                 };
             })
             .ToList();

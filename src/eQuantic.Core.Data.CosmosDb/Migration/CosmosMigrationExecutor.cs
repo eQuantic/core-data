@@ -180,7 +180,7 @@ public sealed class CosmosMigrationExecutor : IMigrationExecutor
     {
         var configuration = _model.For(operation.EntityType);
         var container = _database.GetContainer(configuration.ContainerName);
-        var field = FieldElement(operation.Field);
+        var field = operation.CurrentName ?? FieldElement(operation.Field!);
         var partitionField = FlatPartitionField(configuration);
 
         var query = new QueryDefinition(

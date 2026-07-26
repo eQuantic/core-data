@@ -30,6 +30,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\eQuantic.Core.Data.Abstractions\eQuantic.Core.Data.Abstractions.csproj" />
     <ProjectReference Include="..\eQuantic.Core.DataModel\eQuantic.Core.DataModel.csproj" />
     <PackageReference Include="eQuantic.Core.Domain" Version="4.0.0" />
     <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />

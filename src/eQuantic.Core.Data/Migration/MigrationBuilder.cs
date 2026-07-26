@@ -94,6 +94,12 @@ public sealed class MigrationBuilder : IMigrationBuilder
             return this;
         }
 
+        public ICollectionMigration<TEntity> RenameField(string currentName, string newName)
+        {
+            ops.Add(new RenameFieldOperation(typeof(TEntity), currentName, newName));
+            return this;
+        }
+
         public ICollectionMigration<TEntity> Update(Expression<Func<TEntity, bool>> predicate, Action<IUpdateBuilder<TEntity>> update)
         {
             var builder = new UpdateBuilder<TEntity>();

@@ -212,7 +212,7 @@ public sealed class MongoMigrationExecutor : IMigrationExecutor
     private async Task RenameFieldAsync(RenameFieldOperation operation, CancellationToken cancellationToken)
     {
         var collection = Collection(operation.EntityType);
-        var field = MongoFieldNames.Resolve(operation.EntityType, operation.Field);
+        var field = operation.CurrentName ?? MongoFieldNames.Resolve(operation.EntityType, operation.Field!);
         var update = Builders<BsonDocument>.Update.Rename(field, operation.NewName);
         await collection.UpdateManyAsync(FilterDefinition<BsonDocument>.Empty, update, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
