@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.9.0](https://github.com/eQuantic/core-data/compare/v6.8.0...v6.9.0) (2026-07-27)
+
+### Features
+
+* **evolution:** the drift comparison moves to the contracts ([f3be7c3](https://github.com/eQuantic/core-data/commit/f3be7c326abe0329613c66b7d32119b875f7cc46))
+
 ## [6.8.0](https://github.com/eQuantic/core-data/compare/v6.7.0...v6.8.0) (2026-07-26)
 
 ### Features
