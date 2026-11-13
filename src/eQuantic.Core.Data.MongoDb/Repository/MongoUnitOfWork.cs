@@ -5,6 +5,7 @@ using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoDB.Driver.Linq;
@@ -235,11 +236,68 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         Buffer<TEntity>().Add(new DeleteOneModel<TEntity>(IdFilter(item)));
     }
 
+    /// <summary>
+    ///     Stages an update of the named members only (and of the concurrency token and the update's lifecycle stamps the
+    ///     model declares): one <c>$set</c> of those elements, filtered on the version read when the entity carries a
+    ///     token. Every other element keeps what the document holds.
+    /// </summary>
+    internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
+    {
+        var classMap = BsonClassMap.LookupClassMap(typeof(TEntity));
+        var token = MongoModeling.ConcurrencyMember(typeof(TEntity));
+        var generated = MongoModeling.StoreGenerated(typeof(TEntity));
+        foreach (var member in members)
+        {
+            if (classMap.AllMemberMaps.FirstOrDefault(map => map.MemberName == member) is null)
+            {
+                throw new NotSupportedException($"'{typeof(TEntity).Name}' has no stored member '{member}' to modify.");
+            }
+
+            if (classMap.IdMemberMap?.MemberName == member)
+            {
+                throw new NotSupportedException($"'{member}' is '{typeof(TEntity).Name}''s _id, which identifies the document and is never modified.");
+            }
+
+            if (generated.Any(generatedMember => generatedMember.Property.Name == member))
+            {
+                throw new NotSupportedException($"'{member}' is store-generated: the store assigns it, and an update never writes it.");
+            }
+
+            if (token?.Name == member)
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is the concurrency token, which the engine bumps on every update; name the members you changed.");
+            }
+        }
+
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        var set = new BsonDocument();
+        foreach (var member in members.Concat(EntityLifecycle.UpdateStamps(typeof(TEntity), Conventions, ServiceProvider)
+                     .Select(stamp => stamp.Name)
+                     .Where(name => classMap.AllMemberMaps.Any(map => map.MemberName == name))).Distinct())
+        {
+            var property = typeof(TEntity).GetProperty(member)!;
+            set[MongoFieldNames.Resolve(typeof(TEntity), property)] = MongoFieldNames.Serialize(typeof(TEntity), property, property.GetValue(item));
+        }
+
+        var filter = IdFilter(item);
+        if (token is not null)
+        {
+            var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
+            token.SetValue(item, Convert.ChangeType(current + 1, Nullable.GetUnderlyingType(token.PropertyType) ?? token.PropertyType));
+            set[MongoFieldNames.Resolve(typeof(TEntity), token)] = current + 1;
+            filter = Builders<TEntity>.Filter.And(filter,
+                Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(MongoFieldNames.Resolve(typeof(TEntity), token)), current));
+        }
+
+        Buffer<TEntity>().Add(new UpdateOneModel<TEntity>(filter, new BsonDocument("$set", set)), conditional: token is not null);
+    }
+
     private static bool HasToken<TEntity>() where TEntity : class =>
         MongoModeling.ConcurrencyMember(typeof(TEntity)) is not null;
 
     /// <summary>Sets a token entity's version to 1 when unset — the first persisted version.</summary>
-    private static void StampInitialVersion<TEntity>(TEntity item) where TEntity : class
+    internal static void StampInitialVersion<TEntity>(TEntity item) where TEntity : class
     {
         if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
             && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
@@ -324,7 +382,10 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         long affected = 0;
         foreach (var pending in _pending.Values)
         {
-            affected += await pending.FlushAsync(_session, cancellationToken).ConfigureAwait(false);
+            // A taken key fails the commit as a DuplicateKeyException; the collections flushed before it stay written
+            // (a MongoDB commit is one ordered bulk write per collection, atomic only inside an explicit transaction).
+            affected += await MongoDuplicateKeys.TranslatingAsync(() => pending.FlushAsync(_session, cancellationToken))
+                .ConfigureAwait(false);
         }
 
         _pending.Clear();
@@ -350,11 +411,23 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
             return;
         }
 
-        var inserts = _generatedInserts
+        var pending = _generatedInserts.ToList();
+        _generatedInserts.Clear();
+        await AssignStoreGeneratedAsync(pending, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Gives these inserts the values the store assigns their store-generated members.</summary>
+    internal async Task AssignStoreGeneratedAsync(IReadOnlyList<(object Entity, Type EntityType)> generatedInserts,
+        CancellationToken cancellationToken)
+    {
+        var inserts = generatedInserts
             .SelectMany(insert => MongoModeling.StoreGenerated(insert.EntityType)
                 .Select(member => (insert.Entity, insert.EntityType, Member: member)))
             .ToList();
-        _generatedInserts.Clear();
+        if (inserts.Count == 0)
+        {
+            return;
+        }
 
         if (inserts.Any(insert => insert.Member.Value == Modeling.StoreValue.Clock))
         {

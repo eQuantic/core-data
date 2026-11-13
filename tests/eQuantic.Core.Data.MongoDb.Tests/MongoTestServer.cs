@@ -130,6 +130,9 @@ public sealed class MongoTestDatabase : IDisposable
 
     public T Resolve<T>() where T : notnull => _scope.ServiceProvider.GetRequiredService<T>();
 
+    /// <summary>A scope of its own — its own unit of work — over the same database.</summary>
+    public IServiceScope NewScope() => _provider.CreateScope();
+
     public void Dispose()
     {
         _scope.Dispose();
