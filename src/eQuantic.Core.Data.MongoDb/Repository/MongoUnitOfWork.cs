@@ -25,6 +25,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     protected readonly IMongoDatabase Database;
 
     private readonly Dictionary<Type, IPendingCollectionWrites> _pending = new();
+    private readonly List<(object Entity, Type EntityType)> _generatedInserts = [];
     private IClientSessionHandle? _session;
     private bool _disposed;
 
@@ -182,6 +183,11 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     {
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         StampInitialVersion(item);
+        if (MongoModeling.StoreGenerated(typeof(TEntity)).Count > 0)
+        {
+            _generatedInserts.Add((item, typeof(TEntity)));
+        }
+
         Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
     }
 
@@ -247,11 +253,11 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     ///     The replace model for an entity: a token entity filters on the version it was read at and carries the
     ///     bump, so a concurrent writer's document never gets silently overwritten.
     /// </summary>
-    private ReplaceOneModel<TEntity> VersionedReplace<TEntity>(TEntity item, bool upsert) where TEntity : class
+    private WriteModel<TEntity> VersionedReplace<TEntity>(TEntity item, bool upsert) where TEntity : class
     {
         if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is not { } token)
         {
-            return new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = upsert };
+            return Replace(IdFilter(item), item, upsert);
         }
 
         var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
@@ -260,7 +266,21 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
         var filter = Builders<TEntity>.Filter.And(IdFilter(item),
             Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(token.Name), current));
-        return new ReplaceOneModel<TEntity>(filter, item) { IsUpsert = false };
+        return Replace(filter, item, upsert: false);
+    }
+
+    /// <summary>
+    ///     A replace of the document, which keeps the stored value of every store-generated member: an update never
+    ///     writes what the store assigned (a pipeline update that takes those elements from the stored document).
+    /// </summary>
+    private static WriteModel<TEntity> Replace<TEntity>(FilterDefinition<TEntity> filter, TEntity item, bool upsert)
+        where TEntity : class
+    {
+        var generated = MongoModeling.StoreGenerated(typeof(TEntity));
+        return generated.Count == 0
+            ? new ReplaceOneModel<TEntity>(filter, item) { IsUpsert = upsert }
+            : new UpdateOneModel<TEntity>(filter,
+                new KeepStoreGeneratedReplace<TEntity>(item, generated.Select(member => member.ElementName).ToList())) { IsUpsert = upsert };
     }
 
     private PendingCollectionWrites<TEntity> Buffer<TEntity>() where TEntity : class
@@ -297,6 +317,10 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         activity?.SetTag("db.system", "mongodb");
         activity?.SetTag("equantic.writes", _pending.Values.Sum(pending => pending.Count));
 
+        // The store's values go onto the entities before the writes serialize them: the inserts carry them, and
+        // the commit hands them back on the entities.
+        await AssignStoreGeneratedAsync(cancellationToken).ConfigureAwait(false);
+
         long affected = 0;
         foreach (var pending in _pending.Values)
         {
@@ -314,8 +338,53 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     public Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
     public Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
 
+    /// <summary>
+    ///     Gives every staged insert the values the store assigns its store-generated members: the next numbers of
+    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, in the open transaction) and the
+    ///     server's clock (read once, the same instant for every insert of the commit).
+    /// </summary>
+    private async Task AssignStoreGeneratedAsync(CancellationToken cancellationToken)
+    {
+        if (_generatedInserts.Count == 0)
+        {
+            return;
+        }
+
+        var inserts = _generatedInserts
+            .SelectMany(insert => MongoModeling.StoreGenerated(insert.EntityType)
+                .Select(member => (insert.Entity, insert.EntityType, Member: member)))
+            .ToList();
+        _generatedInserts.Clear();
+
+        if (inserts.Any(insert => insert.Member.Value == Modeling.StoreValue.Clock))
+        {
+            var now = await MongoSequences.ServerClockAsync(Database, cancellationToken).ConfigureAwait(false);
+            foreach (var insert in inserts.Where(insert => insert.Member.Value == Modeling.StoreValue.Clock))
+            {
+                insert.Member.Assign(insert.Entity, now);
+            }
+        }
+
+        foreach (var counter in inserts
+                     .Where(insert => insert.Member.Value == Modeling.StoreValue.Sequence)
+                     .GroupBy(insert => MongoSequences.CounterId(MongoModeling.CollectionName(insert.EntityType), insert.Member.ElementName)))
+        {
+            var count = counter.Count();
+            var last = await MongoSequences.AdvanceAsync(Database, _session, counter.Key, count, cancellationToken).ConfigureAwait(false);
+            var next = last - count + 1;
+            foreach (var insert in counter)
+            {
+                insert.Member.Assign(insert.Entity, next++);
+            }
+        }
+    }
+
     /// <summary>Discards every staged (uncommitted) write.</summary>
-    public void RollbackChanges() => _pending.Clear();
+    public void RollbackChanges()
+    {
+        _pending.Clear();
+        _generatedInserts.Clear();
+    }
 
     public virtual SaveOptions GetSaveOptions() => new();
 

@@ -508,6 +508,12 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             return offset.UtcDateTime;
         }
 
+        // An enum stored as its labels, or a JSON member, comes back as its text.
+        if (value is string && (type.IsEnum || Modeling.JsonMembers.Is(type)))
+        {
+            return CassandraValues.FromStored(type, value);
+        }
+
         return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 

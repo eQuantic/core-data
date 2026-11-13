@@ -164,14 +164,14 @@ internal static class CassandraCqlRenderer
                 requiresFiltering = true;
             }
 
-            values.Add(filter.Value);
+            values.Add(Stored(configuration, column, filter.Value));
             return $"{column} = ?";
         }
 
         // A range on the partition key is expressed through token(); ranges on clustering keys are native.
         if (isPartition)
         {
-            values.Add(filter.Value);
+            values.Add(Stored(configuration, column, filter.Value));
             return $"token({column}) {Operator(filter.Operator)} token(?)";
         }
 
@@ -180,7 +180,7 @@ internal static class CassandraCqlRenderer
             requiresFiltering = true;
         }
 
-        values.Add(filter.Value);
+        values.Add(Stored(configuration, column, filter.Value));
         return $"{column} {Operator(filter.Operator)} ?";
     }
 
@@ -197,7 +197,7 @@ internal static class CassandraCqlRenderer
             requiresFiltering = true;
         }
 
-        values.AddRange(filter.Values);
+        values.AddRange(filter.Values.Select(value => Stored(configuration, column, value)));
         return $"{column} IN ({string.Join(", ", filter.Values.Select(_ => "?"))})";
     }
 
@@ -222,9 +222,13 @@ internal static class CassandraCqlRenderer
             requiresFiltering = true;
         }
 
-        values.AddRange(filter.Values);
+        values.AddRange(filter.Values.Select((value, index) => Stored(configuration, columns[index], value)));
         return $"({string.Join(", ", columns)}) {Operator(filter.Operator)} ({string.Join(", ", filter.Values.Select(_ => "?"))})";
     }
+
+    /// <summary>A filter value in the form its column stores (an enum's label or number, a JSON member's text).</summary>
+    private static object? Stored(CassandraEntityConfiguration configuration, string column, object? value) =>
+        CassandraValues.ToStored(configuration.Column(column), value);
 
     private static string Operator(ComparisonOperator op) => op switch
     {

@@ -24,7 +24,10 @@ public sealed class CosmosEntitySerializer : CosmosLinqSerializer
 
     /// <summary>
     ///     Builds the provider's serializer options: web defaults, the modeling-annotation contract (renames and
-    ///     exclusions), and the model's value converters when a model is given.
+    ///     exclusions), the model's value converters when a model is given, and the labels of every enum stored as
+    ///     its labels (annotated <c>[EnumType]</c>, or declared with the model's <c>Enum&lt;TEnum&gt;()</c>). JSON
+    ///     members (<c>JsonDocument</c>, <c>JsonElement</c>, <c>JsonNode</c>) are embedded in the document as the JSON
+    ///     they hold, and a null one stays null.
     /// </summary>
     /// <param name="model">The Cosmos model whose <c>Converts</c> registrations apply, or <c>null</c>.</param>
     public static JsonSerializerOptions BuildOptions(CosmosModel? model = null)
@@ -42,6 +45,10 @@ public sealed class CosmosEntitySerializer : CosmosLinqSerializer
             }
         }
 
+        // After the model's own conversions (fluent wins): enums declared stored as their labels write and read
+        // them, here and in the LINQ translation's constants alike.
+        options.Converters.Add(new CosmosEnumLabelConverterFactory(model?.LabelEnums ?? []));
+        options.Converters.Add(new CosmosJsonDocumentConverter());
         return options;
     }
 

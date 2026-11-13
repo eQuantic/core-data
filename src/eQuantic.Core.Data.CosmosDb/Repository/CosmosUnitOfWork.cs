@@ -23,6 +23,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     protected readonly CosmosModel Model;
 
     private readonly List<CosmosPendingWrite> _pending = [];
+    private readonly List<(object Entity, CosmosEntityConfiguration Configuration, PartitionKey PartitionKey)> _generatedInserts = [];
     private bool _inTransaction;
     private bool _disposed;
 
@@ -71,6 +72,11 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
+        if (configuration.StoreGenerated.Count > 0)
+        {
+            _generatedInserts.Add((item, configuration, partitionKey));
+        }
+
         _pending.Add(new CosmosPendingWrite(
             configuration.ContainerName,
             partitionKey,
@@ -83,6 +89,17 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
+
+        // A replace writes the whole document, so an entity with store-generated members first takes them from the
+        // stored document and replaces it guarded by the _etag it read: an update never writes what the store
+        // assigned.
+        if (configuration.StoreGenerated.Count > 0)
+        {
+            var keeping = new CosmosKeepGeneratedUpsert<TEntity>(this, configuration, item, partitionKey);
+            _pending.Add(new CosmosPendingWrite(configuration.ContainerName, partitionKey, keeping.ExecuteAsync, keeping.AddToBatch,
+                keeping.PrepareAsync));
+            return;
+        }
 
         // An entity carrying its concurrency token stages a conditional replace: a concurrent change makes the
         // commit fail with a PreconditionFailed CosmosException instead of silently winning.
@@ -147,6 +164,9 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         activity?.SetTag("db.system", "cosmosdb");
         activity?.SetTag("equantic.writes", writes.Count);
 
+        // The store's values go onto the entities before the writes serialize them.
+        await AssignStoreGeneratedAsync(cancellationToken).ConfigureAwait(false);
+
         await Task.WhenAll(writes.Select(write =>
             write.Execute(Database.GetContainer(write.ContainerName), cancellationToken))).ConfigureAwait(false);
 
@@ -161,7 +181,77 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     public Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
 
     /// <summary>Discards every staged (uncommitted) write.</summary>
-    public void RollbackChanges() => _pending.Clear();
+    public void RollbackChanges()
+    {
+        _pending.Clear();
+        _generatedInserts.Clear();
+    }
+
+    private readonly object _clockGate = new();
+    private Task<DateTime>? _clock;
+
+    /// <summary>
+    ///     Gives every staged insert the values the store assigns its store-generated members: the next numbers of
+    ///     each counter (one atomic increment per counter for the whole commit) and the server's clock (read once,
+    ///     the same instant for every insert of the commit).
+    /// </summary>
+    private async Task AssignStoreGeneratedAsync(CancellationToken cancellationToken)
+    {
+        lock (_clockGate)
+        {
+            _clock = null;
+        }
+
+        if (_generatedInserts.Count == 0)
+        {
+            return;
+        }
+
+        var inserts = _generatedInserts.ToList();
+        _generatedInserts.Clear();
+        await AssignStoreGeneratedAsync(inserts, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Assigns the store's values to inserts (or to an update that found no document, and so inserts).</summary>
+    internal async Task AssignStoreGeneratedAsync(
+        IReadOnlyList<(object Entity, CosmosEntityConfiguration Configuration, PartitionKey PartitionKey)> inserts,
+        CancellationToken cancellationToken)
+    {
+        var members = inserts
+            .SelectMany(insert => insert.Configuration.StoreGenerated.Select(member => (insert.Entity, insert.Configuration, Member: member)))
+            .ToList();
+
+        if (members.FirstOrDefault(insert => insert.Member.Value == Data.Modeling.StoreValue.Clock) is { Member: not null } first)
+        {
+            // One read of the server's clock per commit, shared by every insert of it (concurrent writes included).
+            Task<DateTime> clock;
+            lock (_clockGate)
+            {
+                var partitionKey = inserts.First(insert => ReferenceEquals(insert.Entity, first.Entity)).PartitionKey;
+                clock = _clock ??= CosmosSequences.ServerClockAsync(Database.GetContainer(first.Configuration.ContainerName),
+                    partitionKey, CancellationToken.None);
+            }
+
+            var now = await clock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var insert in members.Where(insert => insert.Member.Value == Data.Modeling.StoreValue.Clock))
+            {
+                insert.Member.Assign(insert.Entity, now);
+            }
+        }
+
+        foreach (var counter in members
+                     .Where(insert => insert.Member.Value == Data.Modeling.StoreValue.Sequence)
+                     .GroupBy(insert => CosmosSequences.CounterId(insert.Configuration.ContainerName, insert.Member.StoredName)))
+        {
+            var count = counter.Count();
+            var last = await CosmosSequences.AdvanceAsync(Database, counter.Key, count, cancellationToken).ConfigureAwait(false);
+            var next = last - count + 1;
+            foreach (var insert in counter)
+            {
+                insert.Member.Assign(insert.Entity, next++);
+            }
+        }
+    }
 
     public virtual SaveOptions GetSaveOptions() => new();
 
@@ -202,7 +292,16 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
                 activity?.SetTag("db.system", "cosmosdb");
                 activity?.SetTag("equantic.writes", writes.Count);
 
-                var batch = Database.GetContainer(writes[0].ContainerName).CreateTransactionalBatch(writes[0].PartitionKey);
+                // What the store assigns is read before the batch is built: the counters and the clock for the
+                // inserts, the stored document (and its _etag) for a replace that keeps them.
+                await AssignStoreGeneratedAsync(cancellationToken).ConfigureAwait(false);
+                var container = Database.GetContainer(writes[0].ContainerName);
+                foreach (var write in writes.Where(write => write.Prepare is not null))
+                {
+                    await write.Prepare!(container, cancellationToken).ConfigureAwait(false);
+                }
+
+                var batch = container.CreateTransactionalBatch(writes[0].PartitionKey);
                 foreach (var write in writes)
                 {
                     write.AddToBatch(batch);
@@ -225,6 +324,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     public Task RollbackTransactionAsync(CancellationToken cancellationToken = default)
     {
         _pending.Clear();
+        _generatedInserts.Clear();
         _inTransaction = false;
         return Task.CompletedTask;
     }
@@ -297,8 +397,96 @@ public abstract class CosmosUnitOfWork<TDatabase>(IServiceProvider serviceProvid
 /// <param name="PartitionKey">The partition key of the affected item.</param>
 /// <param name="Execute">Runs the write as a standalone point operation (bulk).</param>
 /// <param name="AddToBatch">Adds the write to a single-partition transactional batch.</param>
+/// <param name="Prepare">Reads what the write needs before it joins a batch (the stored document it keeps values of), or <c>null</c>.</param>
 internal sealed record CosmosPendingWrite(
     string ContainerName,
     PartitionKey PartitionKey,
     Func<Container, CancellationToken, Task> Execute,
-    Action<TransactionalBatch> AddToBatch);
+    Action<TransactionalBatch> AddToBatch,
+    Func<Container, CancellationToken, Task>? Prepare = null);
+
+/// <summary>
+///     A replace of an entity with store-generated members that keeps the stored values of those members: it reads
+///     the stored document, copies them onto the entity, and replaces it guarded by the <c>_etag</c> it read (the
+///     entity's own token when it carries one). A concurrent writer between the read and the replace makes the
+///     replace fail, and it reads again — unless the entity carries a token, whose conflict is the caller's to see.
+///     When no document is stored, the write is an insert: the store assigns the members, as on any insert.
+/// </summary>
+/// <typeparam name="TEntity">The entity type.</typeparam>
+internal sealed class CosmosKeepGeneratedUpsert<TEntity>(CosmosUnitOfWork unitOfWork, CosmosEntityConfiguration configuration,
+    TEntity item, PartitionKey partitionKey) where TEntity : class
+{
+    private const int Attempts = 10;
+    private readonly string _id = configuration.GetId(item);
+    private readonly string? _token = configuration.GetETag(item);
+    private string? _storedETag;
+    private bool _missing;
+
+    /// <summary>Reads the stored document and takes its store-generated values (or the store's new ones when there is none).</summary>
+    public async Task PrepareAsync(Container container, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var stored = await container.ReadItemAsync<TEntity>(_id, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _storedETag = stored.ETag;
+            _missing = false;
+            foreach (var member in configuration.StoreGenerated)
+            {
+                member.Property.SetValue(item, member.Property.GetValue(stored.Resource));
+            }
+        }
+        catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound && _token is null)
+        {
+            _storedETag = null;
+            _missing = true;
+            await unitOfWork.AssignStoreGeneratedAsync([(item, configuration, partitionKey)], cancellationToken).ConfigureAwait(false);
+        }
+        catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // The entity carries a token for a document that is gone: the replace below answers the conflict.
+            _storedETag = _token;
+            _missing = false;
+        }
+    }
+
+    /// <summary>Runs the write on its own (bulk), reading again after losing a race with another writer.</summary>
+    public async Task ExecuteAsync(Container container, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            await PrepareAsync(container, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_missing)
+                {
+                    await container.CreateItemAsync(item, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await container.ReplaceItemAsync(item, _id, partitionKey,
+                        new ItemRequestOptions { IfMatchEtag = _token ?? _storedETag }, cancellationToken).ConfigureAwait(false);
+                }
+
+                return;
+            }
+            catch (CosmosException exception) when (_token is null && attempt < Attempts
+                                                    && exception.StatusCode is System.Net.HttpStatusCode.PreconditionFailed
+                                                        or System.Net.HttpStatusCode.Conflict)
+            {
+                // Another writer changed (or created) the document between the read and the write: read it again.
+            }
+        }
+    }
+
+    /// <summary>Adds the prepared write to a transactional batch.</summary>
+    public void AddToBatch(TransactionalBatch batch)
+    {
+        if (_missing)
+        {
+            batch.CreateItem(item);
+            return;
+        }
+
+        batch.ReplaceItem(_id, item, new TransactionalBatchItemRequestOptions { IfMatchEtag = _token ?? _storedETag });
+    }
+}

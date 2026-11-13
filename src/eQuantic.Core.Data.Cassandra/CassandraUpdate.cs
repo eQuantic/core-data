@@ -29,8 +29,9 @@ internal static class CassandraUpdate
                     throw new NotSupportedException(
                         $"A counter column cannot be set ('{set.Name}'); counters only move by increments (x => new ... {{ {set.Name} = x.{set.Name} + n }}).");
                 case SetAssignment set:
+                    // The assigned value binds as its stored form: an enum's label (or number), a JSON member's text.
                     assignments.Add($"{column} = ?");
-                    values.Add(set.Value);
+                    values.Add(CassandraValues.ToStored(configuration.Column(column), set.Value));
                     break;
                 case IncrementAssignment increment when configuration.IsCounter(column):
                     assignments.Add($"{column} = {column} + ?");

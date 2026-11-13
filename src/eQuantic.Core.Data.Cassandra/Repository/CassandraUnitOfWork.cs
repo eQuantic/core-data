@@ -20,7 +20,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     protected readonly ISession Session;
     protected readonly CassandraModel Model;
 
-    private readonly List<(string Cql, object?[] Values, bool Conditional)> _pending = [];
+    private readonly List<PendingStatement> _pending = [];
     private bool _inTransaction;
     private bool _disposed;
 
@@ -75,6 +75,73 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     // -------------------------------------------------------------- write staging
 
+    /// <summary>
+    ///     Stages an insert (<c>Add</c>): an upsert, which for an entity with store-generated columns is the insert of a
+    ///     new row with what the store assigns (a sequence's next number, <c>toTimestamp(now())</c>), read back by the
+    ///     row's key when the commit runs.
+    /// </summary>
+    internal void StageInsert<TEntity>(TEntity item) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+
+        // A token entity's write is decided by its version (a new row at the default): the upsert decides it.
+        if (configuration.StoreGenerated.Count == 0 || configuration.ConcurrencyColumn is not null)
+        {
+            StageUpsert(item);
+            return;
+        }
+
+        GuardCounters<TEntity>(configuration);
+        EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        _pending.Add(new PendingStatement(() => CassandraMapper.BuildInsert(configuration, item), false)
+        {
+            Generating = item,
+            Configuration = configuration,
+        });
+    }
+
+    /// <summary>
+    ///     Inserts the item only if no row with its primary key exists (<c>INSERT … IF NOT EXISTS</c>), at once, with
+    ///     what the store assigns its store-generated columns, read back when the insert applied.
+    /// </summary>
+    internal async Task<bool> InsertIfNotExistsAsync<TEntity>(TEntity item) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+        GuardCounters<TEntity>(configuration);
+
+        var statement = new PendingStatement(() =>
+        {
+            var (cql, values) = CassandraMapper.BuildInsert(configuration, item);
+            return (cql + " IF NOT EXISTS", values);
+        }, true)
+        {
+            Generating = configuration.StoreGenerated.Count > 0 ? item : null,
+            Configuration = configuration,
+        };
+
+        await AssignSequencesAsync([statement]).ConfigureAwait(false);
+        var (insert, parameters) = statement.Build();
+        var rows = await CassandraStatements.ExecuteAsync(Session, insert, parameters, null, CommandLogger, SensitiveLogging).ConfigureAwait(false);
+        var applied = rows.First().GetValue<bool>("[applied]");
+        if (applied)
+        {
+            await ReadBackAsync([statement], null).ConfigureAwait(false);
+        }
+
+        return applied;
+    }
+
+    private static void GuardCounters<TEntity>(CassandraEntityConfiguration configuration)
+    {
+        if (configuration.CounterColumns.Count > 0)
+        {
+            throw new NotSupportedException(
+                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through " +
+                "UpdateMany increments (x => new ... { N = x.N + n }).");
+        }
+    }
+
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
     {
         var configuration = Configuration<TEntity>();
@@ -92,13 +159,29 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         if (configuration.ConcurrencyColumn is not null)
         {
             GuardConditionalInTransaction<TEntity>();
+
+            // A version at its default is a new row: with store-generated columns it is an insert the store fills.
+            var inserts = configuration.StoreGenerated.Count > 0
+                          && Convert.ToInt64(typeof(TEntity).GetProperty(configuration.MemberFor(configuration.ConcurrencyColumn),
+                              System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)
+                              ?.GetValue(item) ?? 0L) == 0;
+            if (inserts)
+            {
+                _pending.Add(new PendingStatement(() => CassandraMapper.BuildConditionalUpsert(configuration, item), true)
+                {
+                    Generating = item,
+                    Configuration = configuration,
+                });
+                return;
+            }
+
             var conditional = CassandraMapper.BuildConditionalUpsert(configuration, item);
-            _pending.Add((conditional.Cql, conditional.Values, true));
+            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, true));
             return;
         }
 
         var statement = CassandraMapper.BuildUpsert(configuration, item);
-        _pending.Add((statement.Cql, statement.Values, false));
+        _pending.Add(new PendingStatement(statement.Cql, statement.Values, false));
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
@@ -115,12 +198,12 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         {
             GuardConditionalInTransaction<TEntity>();
             var conditional = CassandraMapper.BuildConditionalDelete(configuration, item);
-            _pending.Add((conditional.Cql, conditional.Values, conditional.Cql.Contains(" IF ", StringComparison.Ordinal)));
+            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, conditional.Cql.Contains(" IF ", StringComparison.Ordinal)));
             return;
         }
 
         var statement = CassandraMapper.BuildDelete(configuration, item);
-        _pending.Add((statement.Cql, statement.Values, false));
+        _pending.Add(new PendingStatement(statement.Cql, statement.Values, false));
     }
 
     /// <summary>
@@ -175,12 +258,15 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         activity?.SetTag("db.system", "cassandra");
         activity?.SetTag("equantic.writes", statements.Count);
 
+        // The sequences hand out their numbers before any statement is built: the inserts carry them.
+        await AssignSequencesAsync(statements).ConfigureAwait(false);
+
         // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write; a TTL
         // applies to this flush's inserts only (deletes carry none). A conditional (LWT) write answers whether it
         // applied — an unapplied one means another writer won since the entity was read.
         var results = await Task.WhenAll(statements.Select(async statement =>
         {
-            var (cql, values) = WithTtl((statement.Cql, statement.Values), ttlSeconds);
+            var (cql, values) = WithTtl(statement.Build(), ttlSeconds);
             var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
             return statement.Conditional && rows.FirstOrDefault() is { } row && !row.GetValue<bool>("[applied]") ? 0 : 1;
         })).ConfigureAwait(false);
@@ -191,7 +277,46 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
             throw new ConcurrencyConflictException(statements.Count, applied);
         }
 
+        await ReadBackAsync(statements, consistency).ConfigureAwait(false);
         return statements.Count;
+    }
+
+    /// <summary>
+    ///     Gives every staged insert the numbers its sequences hand out: one compare-and-set per sequence for the whole
+    ///     commit, which reserves as many numbers as the commit inserts. It runs outside any batch (a lightweight
+    ///     transaction cannot join a multi-partition batch): a batch that then fails leaves a gap, never a repeat.
+    /// </summary>
+    private async Task AssignSequencesAsync(IReadOnlyList<PendingStatement> statements)
+    {
+        foreach (var sequence in statements
+                     .Where(statement => statement.Generating is not null)
+                     .SelectMany(statement => statement.Configuration!.StoreGenerated
+                         .Where(generated => generated.Value == Data.Modeling.StoreValue.Sequence)
+                         .Select(generated => (statement.Generating!, statement.Configuration!, Generated: generated)))
+                     .GroupBy(insert => CassandraSequences.SequenceName(insert.Item2.TableName, insert.Generated.Column)))
+        {
+            var count = sequence.Count();
+            var last = await CassandraSequences.AdvanceAsync(Session, sequence.Key, count, CommandLogger, SensitiveLogging).ConfigureAwait(false);
+            var next = last - count + 1;
+            foreach (var (entity, _, generated) in sequence)
+            {
+                var property = entity.GetType().GetProperty(generated.Member,
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)!;
+                property.SetValue(entity, Convert.ChangeType(next++,
+                    Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+    }
+
+    /// <summary>Reads each inserted row's store-generated values back by its key, onto its entity.</summary>
+    private async Task ReadBackAsync(IReadOnlyList<PendingStatement> statements, ConsistencyLevel? consistency)
+    {
+        await Task.WhenAll(statements.Where(statement => statement.Generating is not null).Select(async statement =>
+        {
+            var (cql, values) = CassandraMapper.BuildReadBack(statement.Configuration!, statement.Generating!);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
+            CassandraMapper.AssignReadBack(statement.Configuration!, statement.Generating!, rows.FirstOrDefault());
+        })).ConfigureAwait(false);
     }
 
     private static (string Cql, object?[] Values) WithTtl((string Cql, object?[] Values) statement, int? ttlSeconds) =>
@@ -236,13 +361,17 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
                 activity?.SetTag("db.system", "cassandra");
                 activity?.SetTag("equantic.writes", writes.Count);
 
+                await AssignSequencesAsync(writes).ConfigureAwait(false);
+
                 var batch = new BatchStatement().SetBatchType(BatchType.Logged);
-                foreach (var (cql, values, _) in writes)
+                foreach (var write in writes)
                 {
+                    var (cql, values) = write.Build();
                     batch.Add(await CassandraStatements.BindAsync(Session, cql, values).ConfigureAwait(false));
                 }
 
                 await Session.ExecuteAsync(batch).ConfigureAwait(false);
+                await ReadBackAsync(writes, null).ConfigureAwait(false);
             }
         }
         finally
@@ -312,6 +441,36 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     }
 
     protected virtual void Dispose(bool disposing) => _disposed = _disposed || disposing;
+}
+
+/// <summary>
+///     A staged CQL write. Most are built when staged; an insert with store-generated columns is built at commit, once
+///     its sequences have handed out their numbers, and its row is read back afterwards.
+/// </summary>
+internal sealed class PendingStatement
+{
+    public PendingStatement(string cql, object?[] values, bool conditional)
+        : this(() => (cql, values), conditional)
+    {
+    }
+
+    public PendingStatement(Func<(string Cql, object?[] Values)> build, bool conditional)
+    {
+        Build = build;
+        Conditional = conditional;
+    }
+
+    /// <summary>Builds the statement (at commit for an insert the store fills).</summary>
+    public Func<(string Cql, object?[] Values)> Build { get; }
+
+    /// <summary>Whether it is a lightweight transaction that answers <c>[applied]</c>.</summary>
+    public bool Conditional { get; }
+
+    /// <summary>The entity whose row the store fills, when the statement inserts one with store-generated columns.</summary>
+    public object? Generating { get; init; }
+
+    /// <summary>That entity's mapping.</summary>
+    public CassandraEntityConfiguration? Configuration { get; init; }
 }
 
 /// <summary>The strongly-typed unit of work a consumer derives for its keyspace.</summary>

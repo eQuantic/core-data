@@ -19,6 +19,40 @@ translation asks the same contract**:
   SDK serializes filter constants by type, so only a type-level converter keeps
   `x.Status == Status.Open` comparing the stored representation.
 
+## Enums as labels, JSON members, store-generated members
+
+- **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, stores each member as
+  its `[StoredAs]` label (or its name) as a JSON string. The labels are a type-level converter of
+  the provider's serializer, which the SDK's LINQ translation asks for every constant, so filters
+  compare labels — `(int)x.State == 1`, the compiler's own shape, included — and so do patches.
+  An enum declared neither way keeps its number.
+- **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded in the document as
+  the JSON they hold (object, array or scalar), come back equal, and `null` stays `null`.
+- **Sequence** — an atomic server-side counter: one item per `<container>.<property>` in the
+  `_sequences` container (partitioned by `/id`, created on first use), advanced by a `Patch`
+  `Increment`, which answers the new value. One increment per counter covers a whole commit. It
+  runs outside a `TransactionalBatch` (bound to one partition): a failed batch leaves a gap, never
+  a repeat. On an account with provisioned throughput, the container takes its own throughput
+  unless the database shares it.
+- **Clock** — the server's clock, `SELECT VALUE GetCurrentDateTime()` scoped to one partition,
+  read once per commit and given to every insert of it.
+- **Updates keep them** — a replace writes the whole document, so `Modify` first reads the stored
+  document, copies its store-generated values onto the entity and replaces it with `If-Match` on
+  the `_etag` it read (reading again if another writer got in between; an entity carrying its own
+  token keeps its own conflict). A `Modify` that finds no document inserts, and the store assigns
+  the values. A set-based update patches only what it names.
+
+```csharp
+model.Enum<Channel>()
+     .Entity<Receipt>(entity => entity
+         .PartitionKey(x => x.Category)
+         .Generated(x => x.Number)                          // Sequence
+         .Generated(x => x.IssuedAt, StoreValue.Clock));    // Clock
+```
+
+The id and the partition key cannot be store-generated: a point write needs both before the store
+answers. `Explain()` names the labels and the store-generated members.
+
 ## Partitioning
 
 ```csharp

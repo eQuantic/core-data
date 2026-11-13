@@ -46,6 +46,12 @@ public abstract class CosmosEntityConfiguration
     /// <summary>Whether the mapping declares a concurrency token (the document's <c>_etag</c>).</summary>
     public bool HasConcurrencyToken { get; protected init; }
 
+    /// <summary>
+    ///     The members the store assigns on insert (<c>[StoreGenerated]</c>, or <c>Generated(...)</c>): a number of an
+    ///     atomic counter or the server's clock, on the entity when the commit returns, and kept by every update.
+    /// </summary>
+    public IReadOnlyList<CosmosGeneratedMember> StoreGenerated { get; protected init; } = [];
+
     /// <summary>Initializes the configuration.</summary>
     protected CosmosEntityConfiguration(Type entityType, string containerName, string partitionKeyPath)
     {
@@ -91,7 +97,8 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
     internal CosmosEntityConfiguration(string containerName, IReadOnlyList<string> partitionKeyPaths,
         Func<TEntity, PartitionKey> partitionKey, Func<TEntity, string> id, int? ttlSeconds,
         Func<TEntity, string?>? etag = null, string? idDescription = null,
-        IReadOnlyList<(string Path, bool Descending)>? clusteringPaths = null)
+        IReadOnlyList<(string Path, bool Descending)>? clusteringPaths = null,
+        IReadOnlyList<CosmosGeneratedMember>? storeGenerated = null)
         : base(typeof(TEntity), containerName, partitionKeyPaths)
     {
         _partitionKey = partitionKey;
@@ -100,6 +107,7 @@ public sealed class CosmosEntityConfiguration<TEntity> : CosmosEntityConfigurati
         DefaultTimeToLiveSeconds = ttlSeconds;
         HasConcurrencyToken = etag is not null;
         ClusteringPaths = clusteringPaths ?? [];
+        StoreGenerated = storeGenerated ?? [];
         if (idDescription is not null)
         {
             IdDescription = idDescription;
@@ -125,6 +133,12 @@ public sealed class CosmosModel
 {
     private readonly Dictionary<Type, CosmosEntityConfiguration> _configurations = new();
     private readonly List<System.Text.Json.Serialization.JsonConverter> _converters = [];
+    private readonly HashSet<Type> _labelEnums = [];
+
+    /// <summary>The enums the model declared stored as their labels (<c>Enum&lt;TEnum&gt;()</c>).</summary>
+    public IReadOnlyCollection<Type> LabelEnums => _labelEnums;
+
+    internal void AddLabelEnum(Type enumType) => _labelEnums.Add(enumType);
 
     /// <summary>The registered configurations.</summary>
     public IReadOnlyDictionary<Type, CosmosEntityConfiguration> Configurations => _configurations;
@@ -146,12 +160,28 @@ public sealed class CosmosModel
 
     /// <summary>
     ///     Describes every mapping decision the model made — container, partition key path, document id source,
-    ///     TTL and concurrency — the way <c>Explain()</c> describes a query. Read this instead of guessing what
-    ///     the mapping ended up being.
+    ///     TTL, concurrency, enums stored as their labels and store-generated members — the way <c>Explain()</c>
+    ///     describes a query. Read this instead of guessing what the mapping ended up being.
     /// </summary>
     public string Explain()
     {
         var report = new System.Text.StringBuilder();
+
+        // The enums stored as labels: those the model declared, and the annotated ones its entities hold.
+        var labelEnums = _labelEnums
+            .Concat(_configurations.Keys
+                .SelectMany(type => type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                .Select(property => Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType)
+                .Where(type => type.IsEnum && Data.Modeling.EnumTypeAttribute.For(type) is not null))
+            .Distinct()
+            .OrderBy(type => type.Name);
+        foreach (var enumType in labelEnums)
+        {
+            report.AppendLine($"{enumType.Name} -> stored as labels, a JSON string (" +
+                              string.Join(", ", Data.Modeling.EnumLabels.Of(enumType).Select(label =>
+                                  label.Key == label.Value ? label.Key : $"{label.Key} '{label.Value}'")) + ")");
+        }
+
         foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
         {
             report.AppendLine($"{configuration.EntityType.Name} -> container \"{configuration.ContainerName}\"");
@@ -177,6 +207,14 @@ public sealed class CosmosModel
             {
                 report.AppendLine("  concurrency token: _etag (writes replace conditionally with If-Match)");
             }
+
+            foreach (var generated in configuration.StoreGenerated)
+            {
+                report.AppendLine(generated.Value == Data.Modeling.StoreValue.Sequence
+                    ? $"  store-generated: {generated.Property.Name} \"{generated.StoredName}\" (sequence: Patch Increment on " +
+                      $"\"{CosmosSequences.ContainerName}\" item \"{CosmosSequences.CounterId(configuration.ContainerName, generated.StoredName)}\")"
+                    : $"  store-generated: {generated.Property.Name} \"{generated.StoredName}\" (clock: GetCurrentDateTime(), read once per commit)");
+            }
         }
 
         return report.ToString();
@@ -197,6 +235,20 @@ public sealed class CosmosModelBuilder
         var builder = new CosmosEntityBuilder<TEntity>();
         configure(builder);
         _model.Add(builder.Build());
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares <typeparamref name="TEnum" /> stored as its labels, as <see cref="Data.Modeling.EnumTypeAttribute" />
+    ///     does on the enum: each member is written, read, filtered and patched as its <c>[StoredAs]</c> label (or its
+    ///     own name), a JSON string. The provider's serializer carries the labels, and the SDK's LINQ translation asks
+    ///     it for every constant, so a filter compares labels too. An enum declared neither way keeps its number.
+    /// </summary>
+    /// <typeparam name="TEnum">The enum.</typeparam>
+    /// <returns>The same builder for chaining.</returns>
+    public CosmosModelBuilder Enum<TEnum>() where TEnum : struct, System.Enum
+    {
+        _model.AddLabelEnum(typeof(TEnum));
         return this;
     }
 
@@ -248,6 +300,9 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     private Func<TEntity, string?>? _etag;
     private int? _ttlSeconds;
     private string? _idDescription;
+    private string? _idMember;
+    private readonly List<string> _partitionMembers = [];
+    private readonly Dictionary<string, Data.Modeling.StoreValue> _generated = new(StringComparer.Ordinal);
 
     internal CosmosEntityBuilder()
     {
@@ -275,6 +330,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
             var partitionProperty = property;
             _partitionKeyPaths.Add("/" + CosmosNaming.StoredName(property));
             _partitionValues.Add(entity => partitionProperty.GetValue(entity));
+            _partitionMembers.Add(property.Name);
         }
 
         foreach (var property in properties
@@ -295,6 +351,13 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
                 _id = entity => keyProperty.GetValue(entity)?.ToString()
                                 ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has a null id.");
                 _idDescription = $"{property.Name} ([EntityKey])";
+                _idMember = property.Name;
+            }
+
+            if (property.GetCustomAttributes(typeof(Data.Modeling.StoreGeneratedAttribute), inherit: true)
+                is [Data.Modeling.StoreGeneratedAttribute generated, ..])
+            {
+                _generated[property.Name] = generated.Value;
             }
 
             if (property.GetCustomAttributes(typeof(Data.Modeling.ConcurrencyTokenAttribute), inherit: true).Length > 0
@@ -326,6 +389,7 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
         var read = selector.Compile();
         _id = entity => read(entity)?.ToString() ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has a null id.");
         _idDescription = selector.GetMemberPath();
+        _idMember = selector.GetMemberPath();
         return this;
     }
 
@@ -345,8 +409,11 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
             // Fluent overrides the annotation seeding wholesale (conventions < annotations < fluent).
             _partitionKeyPaths.Clear();
             _partitionValues.Clear();
+            _partitionMembers.Clear();
             _fluentPartitionKey = true;
         }
+
+        _partitionMembers.Add(selector.GetMemberPath());
 
         _partitionKeyPaths.Add(path ?? "/" + string.Join("/", CosmosNaming.StoredPath(selector)));
         var read = selector.Compile();
@@ -364,6 +431,24 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
     public CosmosEntityBuilder<TEntity> ClusteringKey<TMember>(Expression<Func<TEntity, TMember>> selector, bool descending = false)
     {
         _clusteringPaths.Add(("/" + string.Join("/", CosmosNaming.StoredPath(selector)), descending));
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a member whose value the store assigns on insert, as <see cref="Data.Modeling.StoreGeneratedAttribute" />
+    ///     does: the next number of an atomic counter for an integral member (a <c>Patch</c> <c>Increment</c> on an
+    ///     item of the <c>_sequences</c> container, created on first use), the server's clock for a date
+    ///     (<c>GetCurrentDateTime()</c>, read once per commit and given to every insert of it), or the kind given. The
+    ///     value is on the entity when the commit returns, and an update keeps the stored value: the replace takes it
+    ///     from the stored document, guarded by its <c>_etag</c>.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="value">What the store assigns; inferred from the member's type by default.</param>
+    public CosmosEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
+        Data.Modeling.StoreValue value = Data.Modeling.StoreValue.Inferred)
+    {
+        _generated[selector.GetMemberName()] = value;
         return this;
     }
 
@@ -420,7 +505,39 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
 
         return new CosmosEntityConfiguration<TEntity>(
             _container ?? typeof(TEntity).Name, _partitionKeyPaths.ToList(), partitionKey, _id ?? DefaultId(), _ttlSeconds,
-            _etag, _idDescription, _clusteringPaths.ToList());
+            _etag, _idDescription, _clusteringPaths.ToList(), StoreGeneratedMembers());
+    }
+
+    /// <summary>
+    ///     The store-generated members, resolved and checked: a kind the member's type can take, and neither the
+    ///     document's id nor a partition key level (a point write needs both before the store has answered).
+    /// </summary>
+    private List<CosmosGeneratedMember> StoreGeneratedMembers()
+    {
+        var members = new List<CosmosGeneratedMember>(_generated.Count);
+        foreach (var (member, value) in _generated)
+        {
+            var property = typeof(TEntity).GetProperty(member, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                           ?? throw new InvalidOperationException($"Entity '{typeof(TEntity).Name}' has no member '{member}' to declare store-generated.");
+            var resolved = Data.Modeling.StoreGeneratedAttribute.Resolve(value, property.PropertyType, $"{typeof(TEntity).Name}.{member}");
+
+            if (member == (_idMember ?? "Id") || _partitionMembers.Contains(member))
+            {
+                throw new InvalidOperationException(
+                    $"'{typeof(TEntity).Name}.{member}' is the document's id or a partition key level, and cannot also be " +
+                    "declared store-generated: a point write needs both before the store has answered.");
+            }
+
+            if (!property.CanWrite || property.GetCustomAttributes(typeof(Data.Modeling.UnmappedAttribute), inherit: true).Length > 0)
+            {
+                throw new InvalidOperationException(
+                    $"'{typeof(TEntity).Name}.{member}' is declared store-generated, and the mapping does not store it or cannot set it.");
+            }
+
+            members.Add(new CosmosGeneratedMember(property, CosmosNaming.StoredName(property), resolved));
+        }
+
+        return members;
     }
 
     private static void AddToBuilder(PartitionKeyBuilder builder, object? value)

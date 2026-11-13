@@ -55,6 +55,39 @@ acknowledging a full-table fetch takes two signatures, deliberately.
   validates the all-counters rule at build.
 - Per-commit knobs: `Commit(o => o.WithConsistency(ConsistencyLevel.Quorum).WithTtl(…))`.
 
+## Enums as labels, JSON members, store-generated members
+
+- **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, gives the member a
+  `text` column holding its `[StoredAs]` label (or its name). Writes, reads, filters (the
+  compiler's `(int)x.State == 1` included) and set-based updates bind the label. Any other enum is
+  stored as its number, in the CQL type of its underlying integral type.
+- **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are `text` columns holding their
+  JSON; they come back equal, and `null` stays `null`.
+- **Sequence** — Cassandra counters cannot be read atomically after an increment, so a sequence is a
+  row per `<table>.<column>` in `equantic_sequences` (created on first use), advanced by a
+  lightweight-transaction compare-and-set (`UPDATE … SET value = ? … IF value = ?`): only one writer
+  can win a given value, so no number is handed out twice. One compare-and-set reserves every
+  number a commit needs. It runs before a `LOGGED BATCH` (an LWT cannot join one): a failed batch
+  leaves a gap, never a repeat.
+- **Clock** — `toTimestamp(now())` in the `INSERT`, evaluated by the coordinator, then read back
+  by the row's key at the commit's consistency. With several replicas, commit at a level whose reads
+  see its writes (`QUORUM`); a read-back that does not see the insert fails loudly.
+- **Updates never set them** — a `Modify` is an `INSERT` that leaves the store-generated columns
+  out (Cassandra keeps the columns an insert does not name), a versioned update leaves them out of
+  its `SET`, and a set-based update sets only what it names. `Add` and `AddIfNotExistsAsync`
+  insert with the store's values.
+
+```csharp
+model.Entity<Receipt>(entity => entity
+         .PartitionKey(x => x.Id)
+         .Generated(x => x.Number)                          // Sequence
+         .Generated(x => x.IssuedAt, StoreValue.Clock))     // Clock
+     .Enum<Channel>();                                     // order does not matter
+```
+
+Primary-key, counter and concurrency columns cannot be store-generated. `Explain()` names the
+labels, the JSON columns and the store-generated columns.
+
 ## Reads that respect the ring
 
 - `ORDER BY` only on clustering keys — anything else throws with the reason (model the read order).

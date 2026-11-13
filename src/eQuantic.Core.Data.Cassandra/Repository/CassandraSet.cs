@@ -51,17 +51,18 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<TEntity?> FindAsync<TKey>(TKey key, CancellationToken cancellationToken = default)
     {
         var rows = await CassandraStatements.ExecuteAsync(_session,
-            $"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1", [key], null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            $"SELECT * FROM {_configuration.TableName} WHERE {_configuration.KeyColumn} = ? LIMIT 1",
+            [CassandraValues.ToStored(_configuration.Column(_configuration.KeyColumn), key)], null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
         var row = rows.FirstOrDefault();
         return row is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, row);
     }
 
     // ---------------------------------------------------------------- entity writes (staged → commit)
-    public void Insert(TEntity item) => _unitOfWork.StageUpsert(item);
+    public void Insert(TEntity item) => _unitOfWork.StageInsert(item);
 
     public Task InsertAsync(TEntity item, CancellationToken cancellationToken = default)
     {
-        _unitOfWork.StageUpsert(item);
+        _unitOfWork.StageInsert(item);
         return Task.CompletedTask;
     }
 

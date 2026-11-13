@@ -13,14 +13,68 @@ internal static class CassandraMapper
 {
     private static readonly ConcurrentDictionary<(Type, string), PropertyInfo?> Properties = new();
 
-    /// <summary>Builds an upsert (<c>INSERT</c>) for the full row.</summary>
+    /// <summary>
+    ///     Builds an upsert (<c>INSERT</c>) for the row, leaving out the store-generated columns: an <c>INSERT</c> only
+    ///     writes the columns it names, so a row that exists keeps the values the store assigned.
+    /// </summary>
     public static (string Cql, object?[] Values) BuildUpsert(CassandraEntityConfiguration configuration, object entity)
     {
-        var columns = configuration.Columns;
+        var columns = configuration.Columns.Where(column => !configuration.IsStoreGenerated(column.Name)).ToList();
         var names = string.Join(", ", columns.Select(column => column.Name));
         var placeholders = string.Join(", ", columns.Select(_ => "?"));
-        var values = columns.Select(column => Read(entity, column.Member)).ToArray();
+        var values = columns.Select(column => Stored(entity, column)).ToArray();
         return ($"INSERT INTO {configuration.TableName} ({names}) VALUES ({placeholders})", values);
+    }
+
+    /// <summary>
+    ///     Builds the <c>INSERT</c> of a new row with what the store assigns: the clock columns take
+    ///     <c>toTimestamp(now())</c>, evaluated by the coordinator, and the sequence columns the numbers their
+    ///     sequences handed out (already on the entity). Without store-generated columns it is <see cref="BuildUpsert" />.
+    /// </summary>
+    public static (string Cql, object?[] Values) BuildInsert(CassandraEntityConfiguration configuration, object entity)
+    {
+        var names = string.Join(", ", configuration.Columns.Select(column => column.Name));
+        var placeholders = string.Join(", ", configuration.Columns.Select(column =>
+            configuration.StoreGenerated.Any(generated => generated.Value == Data.Modeling.StoreValue.Clock
+                                                          && CassandraEntityConfiguration.Same(generated.Column, column.Name))
+                ? "toTimestamp(now())"
+                : "?"));
+        var values = configuration.Columns
+            .Where(column => !configuration.StoreGenerated.Any(generated => generated.Value == Data.Modeling.StoreValue.Clock
+                                                                            && CassandraEntityConfiguration.Same(generated.Column, column.Name)))
+            .Select(column => Stored(entity, column))
+            .ToArray();
+        return ($"INSERT INTO {configuration.TableName} ({names}) VALUES ({placeholders})", values);
+    }
+
+    /// <summary>Builds the read of a row's store-generated columns by its primary key.</summary>
+    public static (string Cql, object?[] Values) BuildReadBack(CassandraEntityConfiguration configuration, object entity)
+    {
+        var keys = PrimaryKey(configuration);
+        var columns = string.Join(", ", configuration.StoreGenerated.Select(generated => generated.Column));
+        var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
+        var values = keys.Select(key => Stored(entity, configuration.Column(key))).ToArray();
+        return ($"SELECT {columns} FROM {configuration.TableName} WHERE {where}", values);
+    }
+
+    /// <summary>Sets a read-back row's store-generated values on the entity; a value the read did not see fails loudly.</summary>
+    public static void AssignReadBack(CassandraEntityConfiguration configuration, object entity, Row? row)
+    {
+        foreach (var generated in configuration.StoreGenerated)
+        {
+            var column = configuration.Column(generated.Column)!;
+            var property = Property(entity.GetType(), generated.Member)!;
+            var name = generated.Column.ToLowerInvariant();
+            if (row is null || row.IsNull(name))
+            {
+                throw new InvalidOperationException(
+                    $"The store-generated '{entity.GetType().Name}.{generated.Member}' could not be read back by the row's key: " +
+                    "the read did not see the insert. Commit at a consistency whose reads see its writes (QUORUM) when " +
+                    "the keyspace keeps several replicas.");
+            }
+
+            property.SetValue(entity, Value(row, column, property.PropertyType, name));
+        }
     }
 
     /// <summary>Builds a <c>DELETE</c> targeting the row's full primary key.</summary>
@@ -28,7 +82,7 @@ internal static class CassandraMapper
     {
         var keys = PrimaryKey(configuration);
         var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
-        var values = keys.Select(key => Read(entity, configuration.MemberFor(key))).ToArray();
+        var values = keys.Select(key => Stored(entity, configuration.Column(key))).ToArray();
         return ($"DELETE FROM {configuration.TableName} WHERE {where}", values);
     }
 
@@ -50,7 +104,7 @@ internal static class CassandraMapper
         if (current == 0)
         {
             property.SetValue(entity, Convert.ChangeType(1L, Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType));
-            var (insert, values) = BuildUpsert(configuration, entity);
+            var (insert, values) = BuildInsert(configuration, entity);
             return (insert + " IF NOT EXISTS", values);
         }
 
@@ -61,12 +115,14 @@ internal static class CassandraMapper
         var sets = configuration.Columns
             .Where(column => !keys.Any(key => CassandraEntityConfiguration.Same(key, column.Name)))
             .ToList();
+        // An update never sets a store-generated column: the row keeps what the store assigned.
+        sets = sets.Where(column => !configuration.IsStoreGenerated(column.Name)).ToList();
         var assignments = string.Join(", ", sets.Select(column => $"{column.Name} = ?"));
         var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
         object?[] parameters =
         [
-            .. sets.Select(column => Read(entity, column.Member)),
-            .. keys.Select(key => Read(entity, configuration.MemberFor(key))),
+            .. sets.Select(column => Stored(entity, column)),
+            .. keys.Select(key => Stored(entity, configuration.Column(key))),
             current,
         ];
         return ($"UPDATE {configuration.TableName} SET {assignments} WHERE {where} IF {token} = ?", parameters);
@@ -110,11 +166,19 @@ internal static class CassandraMapper
                 continue;
             }
 
-            property.SetValue(entity, row.GetValue(property.PropertyType, name));
+            property.SetValue(entity, Value(row, column, property.PropertyType, name));
         }
 
         return entity;
     }
+
+    /// <summary>Reads a column in its stored form and gives it back as the member's value.</summary>
+    private static object? Value(Row row, CassandraColumn column, Type memberType, string name) =>
+        CassandraValues.FromStored(memberType, row.GetValue(CassandraValues.StoredType(column, memberType), name));
+
+    /// <summary>Reads a member from the entity in the form its column stores.</summary>
+    private static object? Stored(object entity, CassandraColumn? column) =>
+        column is null ? null : CassandraValues.ToStored(column, Read(entity, column.Member));
 
     /// <summary>The primary key columns (partition key then clustering keys), in order.</summary>
     public static IReadOnlyList<string> PrimaryKey(CassandraEntityConfiguration configuration) =>

@@ -108,7 +108,16 @@ public sealed class CosmosTestServer
             .Container(ContainerName)
             .PartitionKey(x => x.Category))
         .Entity<GeoEvent>(entity => entity
-            .Container("geo_events"));
+            .Container("geo_events"))
+        .Enum<Channel>()
+        .Entity<RunRecord>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category))
+        .Entity<Receipt>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category)
+            .Generated(x => x.Number)
+            .Generated(x => x.IssuedAt, eQuantic.Core.Data.Modeling.StoreValue.Clock));
 
     [OneTimeTearDown]
     public async Task StopAsync()

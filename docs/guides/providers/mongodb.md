@@ -30,6 +30,38 @@ LINQ provider reads for every translation. Consequences worth internalizing:
   enum stored as `"premium"` matches `x.Grade == Grade.Premium`.
 - `[EntityKey]` maps the member to `_id`; point lookups (`GetAsync`) resolve through the class map.
 
+## Enums as labels, JSON members, store-generated members
+
+The shared vocabulary (`[EnumType]`, JSON members, `[StoreGenerated]`) means here what it means on
+every other provider, through MongoDB's own mechanisms:
+
+- **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, stores each member as
+  its `[StoredAs]` label (or its name) as a BSON string. It is the member's serializer, so the
+  LINQ pipeline, the filter of a set-based write and its `$set` all compare and write labels —
+  `x.State == State.InProgress` (which the compiler turns into `(int)x.State == 1`) included. An
+  enum declared neither way keeps its number. The driver's serializers are global and fixed on
+  first use: declare `Enum<TEnum>()` before the first read or write (a late declaration refuses).
+- **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded as the BSON value
+  their JSON is: an object as a document, an array as an array, a scalar as the scalar. They come
+  back equal, and `null` stays `null`.
+- **Sequence** — an atomic counter: one document per `<collection>.<element>` in `_sequences`,
+  advanced by `findOneAndUpdate` with `$inc` (upserted on first use), one `$inc` per counter for a
+  whole commit, inside the open transaction. No number is ever handed out twice.
+- **Clock** — the server's clock (`hello`'s `localTime`), read once per commit and given to every
+  insert of it, the way PostgreSQL's `now()` is the transaction's time.
+- **Updates keep them** — a staged replace becomes one pipeline update (`$replaceWith` over
+  `$mergeObjects` of the entity and the stored elements), so it never writes a store-generated
+  element (MongoDB 4.2 or later). A set-based update writes only what it names.
+
+```csharp
+model.Enum<Channel>()
+     .Entity<Receipt>(entity => entity
+         .Generated(x => x.Number)                          // Sequence: inferred from an integral member
+         .Generated(x => x.IssuedAt, StoreValue.Clock));    // Clock
+```
+
+`Explain()` names the labels, the embedded JSON and the store-generated members.
+
 ## Set-based updates, natively
 
 ```csharp

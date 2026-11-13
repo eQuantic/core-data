@@ -40,29 +40,21 @@ public class CassandraRepository<TEntity, TKey> :
     /// <returns><c>true</c> when the row was inserted; <c>false</c> when it already existed (nothing changed).</returns>
     public async Task<bool> AddIfNotExistsAsync(TEntity item, CancellationToken cancellationToken = default)
     {
-        var configuration = UnitOfWork.Configuration<TEntity>();
-        if (configuration.CounterColumns.Count > 0)
-        {
-            throw new NotSupportedException(
-                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through UpdateMany increments.");
-        }
-
-        var (cql, values) = CassandraMapper.BuildUpsert(configuration, item);
-        var rows = await CassandraStatements.ExecuteAsync(Session, cql + " IF NOT EXISTS", values, null, UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
-        return rows.First().GetValue<bool>("[applied]");
+        cancellationToken.ThrowIfCancellationRequested();
+        return await UnitOfWork.InsertIfNotExistsAsync(item).ConfigureAwait(false);
     }
 
     // ---------------------------------------------------------------- staged entity writes (flushed on commit)
 
     /// <inheritdoc />
-    public void Add(TEntity item) => UnitOfWork.StageUpsert(item);
+    public void Add(TEntity item) => UnitOfWork.StageInsert(item);
 
     /// <inheritdoc />
     public void AddRange(IEnumerable<TEntity> items)
     {
         foreach (var item in items)
         {
-            UnitOfWork.StageUpsert(item);
+            UnitOfWork.StageInsert(item);
         }
     }
 
@@ -81,7 +73,7 @@ public class CassandraRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task AddAsync(TEntity item, CancellationToken cancellationToken = default)
     {
-        UnitOfWork.StageUpsert(item);
+        UnitOfWork.StageInsert(item);
         return Task.CompletedTask;
     }
 
