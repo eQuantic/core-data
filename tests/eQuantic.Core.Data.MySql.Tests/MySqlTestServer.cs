@@ -114,7 +114,7 @@ public sealed class Receipt : IEntity<long>
 
 internal static class TestSchema
 {
-    public static void Configure(RelationalModelBuilder builder) => builder
+    public static void Configure(RelationalModelBuilder builder) => WriteOutcomeSchema.Configure(builder)
         .Entity<SaleOrder>(entity => entity.Table("sale_orders"))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
         .Enum<Channel>()
@@ -259,6 +259,9 @@ public sealed class MySqlTestDatabase : IDisposable
     }
 
     public T Resolve<T>() where T : notnull => _scope.ServiceProvider.GetRequiredService<T>();
+
+    /// <summary>A scope of its own — its own unit of work — over the same database.</summary>
+    public IServiceScope NewScope() => _provider.CreateScope();
 
     public void Dispose()
     {

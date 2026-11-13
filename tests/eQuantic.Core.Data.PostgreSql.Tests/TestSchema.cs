@@ -308,7 +308,7 @@ public sealed class Receipt : IEntity<long>
 /// <summary>The relational mapping shared by the integration tests.</summary>
 internal static class TestSchema
 {
-    public static void Configure(RelationalModelBuilder builder) => builder
+    public static void Configure(RelationalModelBuilder builder) => WriteOutcomeSchema.Configure(builder)
         .Entity<SaleOrder>(entity => entity
             .Table("sale_orders")
             .Collection(x => x.Invoices, invoice => invoice.OrderCode))

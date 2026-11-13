@@ -108,6 +108,20 @@ internal static class RelationalSql
         return (string.Join(" AND ", clauses), parameters);
     }
 
+    /// <summary>
+    ///     Renders the filters strictly into a statement whose other parts already bound values: the predicate's values
+    ///     are appended to <paramref name="parameters" />, numbered after them.
+    /// </summary>
+    public static string Where<TEntity>(SqlDialect dialect, RelationalEntityConfiguration configuration,
+        Expression<Func<TEntity, bool>>? filter, Expression<Func<TEntity, bool>>? globalFilter, List<object?> parameters)
+        where TEntity : class
+    {
+        var clauses = Filters(null, filter, globalFilter)
+            .Select(predicate => SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(predicate), parameters))
+            .ToList();
+        return clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
+    }
+
     private static bool TryInterpret(ExpressionNode body, out QueryFilter filter)
     {
         try

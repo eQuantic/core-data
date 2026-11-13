@@ -165,7 +165,11 @@ public class MySqlDialect : SqlDialect
         string quotedTable, IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows,
         CancellationToken cancellationToken)
     {
-        var bulk = new MySqlBulkCopy((MySqlConnection)connection, (MySqlTransaction?)transaction)
+        // LOAD DATA LOCAL turns a duplicate key into a warning and skips the row (the server cannot stop a file it is
+        // being sent), so the load runs in a transaction — the caller's, or one of its own — and a duplicate-key
+        // warning rolls it back and fails it, as a taken key fails every other write.
+        var local = transaction is null ? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
+        var bulk = new MySqlBulkCopy((MySqlConnection)connection, (MySqlTransaction?)(transaction ?? local))
         {
             DestinationTableName = quotedTable,
         };
@@ -188,10 +192,44 @@ public class MySqlDialect : SqlDialect
         try
         {
             var result = await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
+            if (result.Warnings.FirstOrDefault(warning => warning.ErrorCode == MySqlErrorCode.DuplicateKeyEntry) is { } duplicate)
+            {
+                // A warning, not an exception: the server's own words are the message.
+                throw new eQuantic.Core.Data.Repository.DuplicateKeyException(
+                    $"The store refused the bulk load: {duplicate.Message}.", KeyName(duplicate.Message), null);
+            }
+
+            if (local is not null)
+            {
+                await local.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return result.RowsInserted;
+        }
+        catch (MySqlException exception)
+        {
+            // The loader counted fewer rows inserted than it sent: the server says why, and a taken key is the reason
+            // every other write reports as a DuplicateKeyException.
+            var duplicate = await DuplicateWarningAsync(connection, transaction ?? local, cancellationToken).ConfigureAwait(false);
+            if (local is not null)
+            {
+                await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (duplicate is not null)
+            {
+                throw new eQuantic.Core.Data.Repository.DuplicateKeyException(KeyName(duplicate), exception);
+            }
+
+            throw;
         }
         catch (NotSupportedException exception)
         {
+            if (local is not null)
+            {
+                await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
             // MySQL's bulk loader rides LOAD DATA LOCAL INFILE, which both sides must opt into — the client
             // in its connection string and the server in its configuration. That is a deployment decision with
             // security weight (the server can ask the client for local files), so the engine surfaces it
@@ -201,5 +239,88 @@ public class MySqlDialect : SqlDialect
                 "'AllowLoadLocalInfile=true' to the connection string and set 'local_infile=1' on the server. " +
                 "Without it, stage the entities and Commit() — the flush already batches them.", exception);
         }
+        catch when (local is not null)
+        {
+            await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            if (local is not null)
+            {
+                await local.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
+
+    /// <summary>The message of the duplicate-key warning the last statement left, or <c>null</c>.</summary>
+    private static async Task<string?> DuplicateWarningAsync(DbConnection connection, DbTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SHOW WARNINGS";
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (Convert.ToInt32(reader.GetValue(1)) == (int)MySqlErrorCode.DuplicateKeyEntry)
+                {
+                    return reader.GetString(2);
+                }
+            }
+        }
+        catch (MySqlException)
+        {
+            // The connection cannot say: the original failure stands.
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Error 1062 (<c>ER_DUP_ENTRY</c>); the key's name is read from the message.</remarks>
+    public override eQuantic.Core.Data.Repository.DuplicateKeyException? DuplicateKey(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is MySqlException { ErrorCode: MySqlErrorCode.DuplicateKeyEntry } duplicate)
+            {
+                return new eQuantic.Core.Data.Repository.DuplicateKeyException(KeyName(duplicate.Message), exception);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     The key in <c>Duplicate entry '…' for key 'name'</c>: MySQL 8 prefixes it with the table
+    ///     (<c>users.ix_users_email</c>), MariaDB does not; the name is the index's own either way.
+    /// </summary>
+    private static string? KeyName(string message)
+    {
+        const string marker = "for key '";
+        var start = message.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        start += marker.Length;
+        var end = message.LastIndexOf('\'');
+        if (end <= start)
+        {
+            return null;
+        }
+
+        var name = message[start..end];
+        var dot = name.IndexOf('.');
+        return dot >= 0 ? name[(dot + 1)..] : name;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Errors 1213 (a deadlock: InnoDB rolled the transaction back) and 1205 (a lock wait that timed out).</remarks>
+    public override bool IsDeadlock(Exception exception) =>
+        exception is MySqlException { ErrorCode: MySqlErrorCode.LockDeadlock or MySqlErrorCode.LockWaitTimeout };
 }

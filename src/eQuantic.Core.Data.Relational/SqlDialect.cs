@@ -227,6 +227,82 @@ public abstract class SqlDialect
             $"{GetType().Name} has no native bulk-load path; stage the entities and Commit() — the flush already " +
             "batches them into one round trip.");
 
+    // -------------------------------------------------------------- write outcomes
+
+    /// <summary>
+    ///     The <see cref="Data.Repository.DuplicateKeyException" /> for a driver exception that says a key or a unique key
+    ///     is taken, carrying the constraint or index the store named and the driver's exception as its inner one;
+    ///     <c>null</c> for any other failure. Each dialect reads its own driver's code.
+    /// </summary>
+    /// <param name="exception">The driver's exception.</param>
+    public virtual Data.Repository.DuplicateKeyException? DuplicateKey(Exception exception) => null;
+
+    /// <summary>
+    ///     Whether the exception is a deadlock (or a lock wait the store gave up on), after which the store rolled the
+    ///     transaction back and the same work can run again. The locking-read upsert retries on it.
+    /// </summary>
+    /// <param name="exception">The driver's exception.</param>
+    public virtual bool IsDeadlock(Exception exception) => false;
+
+    /// <summary>The most parameters one statement may bind (the engine splits batches below it).</summary>
+    public virtual int MaxParameters => 30000;
+
+    /// <summary>The most rows one <c>INSERT … VALUES</c> may carry.</summary>
+    public virtual int MaxRowsPerInsert => 1000;
+
+    /// <summary>
+    ///     Whether an upsert is one statement (<see cref="UpsertSql" />): <c>INSERT … ON CONFLICT</c> on PostgreSQL,
+    ///     <c>MERGE</c> on SQL Server. Without one, the engine reads the target under a lock in a transaction and
+    ///     then inserts or updates it, retrying when it loses a race — what MySQL and MariaDB need, since their
+    ///     <c>ON DUPLICATE KEY UPDATE</c> fires on any unique key and cannot be told which one is the target.
+    /// </summary>
+    public virtual bool UpsertsInOneStatement => false;
+
+    /// <summary>How the update of an upsert (<see cref="UpsertSql" />) refers to the existing row's columns.</summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    public virtual string UpsertExistingRow(string quotedTable) => quotedTable;
+
+    /// <summary>
+    ///     The statement that inserts a row or, when a row matches it on the target columns, updates that row, and
+    ///     returns the row as stored — for a dialect that <see cref="UpsertsInOneStatement" />.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="insertColumns">The quoted columns the insert writes.</param>
+    /// <param name="insertValues">Their bound values' markers.</param>
+    /// <param name="targetColumns">The quoted columns identifying the target row.</param>
+    /// <param name="targetValues">Their bound values' markers.</param>
+    /// <param name="conflictFilter">The rendered predicate restricting the target, or <c>null</c>.</param>
+    /// <param name="assignments">The update's <c>column = value</c> fragments (never empty).</param>
+    /// <param name="returning">The quoted columns to return.</param>
+    public virtual string UpsertSql(string quotedTable, IReadOnlyList<string> insertColumns, IReadOnlyList<string> insertValues,
+        IReadOnlyList<string> targetColumns, IReadOnlyList<string> targetValues, string? conflictFilter,
+        IReadOnlyList<string> assignments, IReadOnlyList<string> returning) =>
+        throw new NotSupportedException($"{GetType().Name} upserts with a locking read, not one statement.");
+
+    /// <summary>
+    ///     The statement that inserts the rows and leaves out the ones whose key or unique key is taken, answering the
+    ///     number inserted as a scalar; <c>null</c> when the dialect inserts row by row, discarding only duplicate-key
+    ///     errors.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columns">The quoted column list.</param>
+    /// <param name="rows">Each row's bound value list.</param>
+    public virtual string? InsertSkippingDuplicatesSql(string quotedTable, string columns, IReadOnlyList<string> rows) => null;
+
+    /// <summary>
+    ///     The <c>UPDATE</c> that returns the rows it wrote (<c>RETURNING</c>, <c>OUTPUT INSERTED</c>); <c>null</c>
+    ///     when the dialect has none for an update, and the engine locks the matching rows, updates them and reads them
+    ///     back in one transaction.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="set">The rendered <c>SET</c> list.</param>
+    /// <param name="where">The rendered predicate.</param>
+    /// <param name="returning">The quoted columns to return.</param>
+    public virtual string? UpdateReturningSql(string quotedTable, string set, string where, IReadOnlyList<string> returning) => null;
+
+    /// <summary>The clause appended to a <c>SELECT</c> that locks the rows it reads until the transaction ends.</summary>
+    public virtual string ForUpdateClause => " FOR UPDATE";
+
     /// <summary>The DDL adding a column to an existing table (added nullable, matching create-table semantics).</summary>
     /// <param name="quotedTable">The quoted table.</param>
     /// <param name="quotedColumn">The quoted column.</param>

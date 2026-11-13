@@ -30,6 +30,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
     private readonly RelationalResilienceOptions? _resilience;
     private DbConnection? _connection;
     private DbTransaction? _transaction;
+    private DbTransaction? _localTransaction;
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
     private DataConventions? _conventions;
@@ -167,7 +168,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
         var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Transaction = _transaction;
+        command.Transaction = _transaction ?? _localTransaction;
         for (var index = 0; index < parameters.Count; index++)
         {
             var parameter = command.CreateParameter();
@@ -191,6 +192,68 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             ?.CreateLogger($"eQuantic.Core.Data.{Dialect.System}.Command")
             ?? NullLogger.Instance;
 
+    // -------------------------------------------------------------- immediate writes: atomicity and outcomes
+
+    /// <summary>Whether an explicit transaction is open: an immediate write joins it.</summary>
+    internal bool InExplicitTransaction => _transaction is not null;
+
+    /// <summary>
+    ///     Runs an immediate write that takes several statements as one atomic unit: inside the open explicit
+    ///     transaction when there is one, in a transaction of its own otherwise (committed when the work returns,
+    ///     rolled back when it throws). Commands created meanwhile join it.
+    /// </summary>
+    internal async Task<T> AtomicallyAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken)
+    {
+        if (_transaction is not null || _localTransaction is not null)
+        {
+            return await work().ConfigureAwait(false);
+        }
+
+        var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
+        _localTransaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var result = await work().ConfigureAwait(false);
+            await _localTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+        catch
+        {
+            try
+            {
+                await _localTransaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The store already rolled it back (a deadlock victim's transaction is gone); the original
+                // failure is the one worth reporting.
+            }
+
+            throw;
+        }
+        finally
+        {
+            await _localTransaction.DisposeAsync().ConfigureAwait(false);
+            _localTransaction = null;
+        }
+    }
+
+    /// <summary>
+    ///     Runs a write and turns the store's "key taken" refusal into <see cref="DuplicateKeyException" /> (the
+    ///     driver's exception inside); any other failure passes through untouched.
+    /// </summary>
+    internal async Task<T> TranslatingAsync<T>(Func<Task<T>> work)
+    {
+        try
+        {
+            return await work().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not DuplicateKeyException && Dialect.DuplicateKey(exception) is { } duplicate)
+        {
+            throw duplicate;
+        }
+    }
+
     // -------------------------------------------------------------- write staging
 
     internal void StageInsert<TEntity>(TEntity item) where TEntity : class
@@ -203,6 +266,51 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
     {
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         _pending.Add(new PendingWrite(Configuration<TEntity>(), PendingWriteKind.Update, item));
+    }
+
+    /// <summary>
+    ///     Stages an update of the named members only (and of the concurrency token and the update's lifecycle stamps
+    ///     the model declares): every other stored column keeps what it holds.
+    /// </summary>
+    internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var member in members)
+        {
+            var column = configuration.ColumnFor(member)
+                         ?? throw new NotSupportedException($"'{typeof(TEntity).Name}' has no mapped member '{member}' to modify.");
+            if (configuration.Keys.Contains(column))
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is part of '{typeof(TEntity).Name}''s key, which identifies the row and is never modified.");
+            }
+
+            if (column.IsStoreGenerated)
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is store-generated: the store assigns it, and an update never writes it.");
+            }
+
+            if (column == configuration.ConcurrencyToken)
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is the concurrency token, which the engine bumps on every update; name the members you changed.");
+            }
+
+            columns.Add(column.Name);
+        }
+
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        foreach (var stamp in EntityLifecycle.UpdateStamps(typeof(TEntity), Conventions, ServiceProvider))
+        {
+            if (configuration.ColumnFor(stamp.Name) is { } stampColumn)
+            {
+                columns.Add(stampColumn.Name);
+            }
+        }
+
+        _pending.Add(new PendingWrite(configuration, PendingWriteKind.Update, item) { Members = columns });
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class =>
@@ -236,7 +344,9 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         try
         {
             // Behind the RetryCommits opt-in, a transient failure re-runs the whole flush (its transaction rolled back).
-            var flushed = await RetryAsync(write: true, _ => FlushAsync(writes, cancellationToken), cancellationToken).ConfigureAwait(false);
+            // A taken key rolls the flush back like any other failure, and reaches the caller as DuplicateKeyException.
+            var flushed = await TranslatingAsync(() =>
+                RetryAsync(write: true, _ => FlushAsync(writes, cancellationToken), cancellationToken)).ConfigureAwait(false);
 
             DataMetrics.Commits.Add(1, new KeyValuePair<string, object?>("db.system", Dialect.System));
             DataMetrics.Writes.Add(flushed, new KeyValuePair<string, object?>("db.system", Dialect.System));
@@ -407,8 +517,8 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var connection = await ConnectionAsync(cancellationToken).ConfigureAwait(false);
-        var loaded = await Dialect.BulkInsertAsync(connection, _transaction, Dialect.Quote(configuration.TableName),
-            columns, rows, cancellationToken).ConfigureAwait(false);
+        var loaded = await TranslatingAsync(() => Dialect.BulkInsertAsync(connection, _transaction,
+            Dialect.Quote(configuration.TableName), columns, rows, cancellationToken)).ConfigureAwait(false);
 
         DataMetrics.Writes.Add(loaded, new KeyValuePair<string, object?>("db.system", Dialect.System));
         if (CommandLogger.IsEnabled(LogLevel.Information))
@@ -608,21 +718,25 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             case PendingWriteKind.Update:
             {
                 // The token it read goes into the WHERE; the bumped value goes into the SET (written back on success).
-                // A store-generated column keeps the value the store assigned: an update never writes it.
+                // A store-generated column keeps the value the store assigned: an update never writes it. A
+                // member-scoped update writes the members it names and nothing else.
                 var columns = configuration.Columns
                     .Where(column => !configuration.Keys.Contains(column) && column != token && !column.IsStoreGenerated)
+                    .Where(column => write.Members is null || write.Members.Contains(column.Name))
                     .ToList();
-                var set = string.Join(", ", columns.Select(column =>
-                    $"{Dialect.Quote(column.Name)} = {Bind(column.Read(write.Entity))}"));
+                var assignments = columns.Select(column =>
+                    $"{Dialect.Quote(column.Name)} = {Bind(column.Read(write.Entity))}").ToList();
                 var where = string.Empty;
                 if (token is not null)
                 {
                     var current = token.Property.GetValue(write.Entity);
                     var next = NextVersion(current, token.Property.PropertyType);
                     bumped.Add((write, next));
-                    set += $", {Dialect.Quote(token.Name)} = {Bind(next)}";
+                    assignments.Add($"{Dialect.Quote(token.Name)} = {Bind(next)}");
                     where = $" AND {Dialect.Quote(token.Name)} = {Bind(current)}";
                 }
+
+                var set = string.Join(", ", assignments);
 
                 command.CommandText =
                     $"UPDATE {Dialect.Quote(configuration.TableName)} SET {set} " +
@@ -663,7 +777,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             $"{Dialect.Quote(key.Name)} = {bind(key.Property.GetValue(entity))}"));
 
     /// <summary>The next token value: integers increment, Guids renew.</summary>
-    private static object NextVersion(object? current, Type type)
+    internal static object NextVersion(object? current, Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;
         if (underlying == typeof(int))
@@ -737,7 +851,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         Delete,
     }
 
-    private sealed record PendingWrite(RelationalEntityConfiguration Configuration, PendingWriteKind Kind, object Entity);
+    private sealed record PendingWrite(RelationalEntityConfiguration Configuration, PendingWriteKind Kind, object Entity)
+    {
+        /// <summary>The columns a member-scoped update writes, or <c>null</c> for every column.</summary>
+        public IReadOnlySet<string>? Members { get; init; }
+    }
 }
 
 /// <summary>The strongly-typed unit of work a consumer derives for its database.</summary>

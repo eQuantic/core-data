@@ -84,6 +84,94 @@ public class SqlServerDialect : SqlDialect
 
     /// <inheritdoc />
     /// <remarks>
+    ///     Errors 2627 (a primary key or unique constraint) and 2601 (a unique index); the name is read from the
+    ///     message, the only place SQL Server gives it.
+    /// </remarks>
+    public override eQuantic.Core.Data.Repository.DuplicateKeyException? DuplicateKey(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is Microsoft.Data.SqlClient.SqlException sql
+                && sql.Errors.Cast<Microsoft.Data.SqlClient.SqlError>().FirstOrDefault(error => error.Number is 2627 or 2601) is { } error)
+            {
+                return new eQuantic.Core.Data.Repository.DuplicateKeyException(ConstraintName(error.Number, error.Message), exception);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    ///     The name in <c>Violation of UNIQUE KEY constraint 'name'.</c> (2627) or <c>… with unique index 'name'.</c> (2601).
+    /// </summary>
+    private static string? ConstraintName(int number, string message)
+    {
+        var marker = number == 2601 ? "unique index '" : "constraint '";
+        var start = message.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        start += marker.Length;
+        var end = message.IndexOf('\'', start);
+        return end > start ? message[start..end] : null;
+    }
+
+    /// <inheritdoc />
+    public override bool IsDeadlock(Exception exception) =>
+        exception is Microsoft.Data.SqlClient.SqlException sql && sql.Errors.Cast<Microsoft.Data.SqlClient.SqlError>().Any(error => error.Number is 1205 or 1222);
+
+    /// <inheritdoc />
+    /// <remarks>SQL Server binds at most 2100 parameters per request.</remarks>
+    public override int MaxParameters => 2000;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED</c>: <c>HOLDLOCK</c> keeps the range the target falls in locked
+    ///     from the match to the insert, so two merges of one target cannot both insert it — without it <c>MERGE</c> is
+    ///     not race-free. The source names its columns apart from the table's, so the conflict filter's columns are the
+    ///     target's.
+    /// </remarks>
+    public override bool UpsertsInOneStatement => true;
+
+    /// <inheritdoc />
+    public override string UpsertExistingRow(string quotedTable) => "[target]";
+
+    /// <inheritdoc />
+    public override string UpsertSql(string quotedTable, IReadOnlyList<string> insertColumns, IReadOnlyList<string> insertValues,
+        IReadOnlyList<string> targetColumns, IReadOnlyList<string> targetValues, string? conflictFilter,
+        IReadOnlyList<string> assignments, IReadOnlyList<string> returning)
+    {
+        var sources = targetColumns.Select((_, index) => $"[__eq_on{index}]").ToList();
+        var on = string.Join(" AND ", targetColumns.Select((column, index) => $"[target].{column} = [source].{sources[index]}"));
+        return $"MERGE INTO {quotedTable} WITH (HOLDLOCK) AS [target] " +
+               $"USING (VALUES ({string.Join(", ", targetValues)})) AS [source] ({string.Join(", ", sources)}) " +
+               $"ON {on}" + (conflictFilter is null ? string.Empty : $" AND {conflictFilter}") +
+               $" WHEN MATCHED THEN UPDATE SET {string.Join(", ", assignments)}" +
+               $" WHEN NOT MATCHED THEN INSERT ({string.Join(", ", insertColumns)}) VALUES ({string.Join(", ", insertValues)})" +
+               $" OUTPUT {string.Join(", ", returning.Select(column => "INSERTED." + column))};";
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     One insert per row, each in <c>TRY…CATCH</c> that swallows only errors 2627 and 2601: a duplicate key
+    ///     ends its own statement and leaves the transaction committable, so the batch carries on and counts the rows
+    ///     it inserted. Any other error is thrown again.
+    /// </remarks>
+    public override string? InsertSkippingDuplicatesSql(string quotedTable, string columns, IReadOnlyList<string> rows) =>
+        "DECLARE @inserted int = 0; " +
+        string.Concat(rows.Select(row =>
+            $"BEGIN TRY INSERT INTO {quotedTable} ({columns}) VALUES {row}; SET @inserted += 1; END TRY " +
+            "BEGIN CATCH IF ERROR_NUMBER() NOT IN (2601, 2627) THROW; END CATCH; ")) +
+        "SELECT @inserted;";
+
+    /// <inheritdoc />
+    public override string? UpdateReturningSql(string quotedTable, string set, string where, IReadOnlyList<string> returning) =>
+        $"UPDATE {quotedTable} SET {set} OUTPUT {string.Join(", ", returning.Select(column => "INSERTED." + column))} WHERE {where}";
+
+    /// <inheritdoc />
+    /// <remarks>
     ///     SQL Server has no <c>RENAME</c> statement; it calls <c>sp_rename</c>, whose second argument is the new
     ///     name alone — schema-qualifying or bracketing it renames the table to something containing brackets.
     /// </remarks>

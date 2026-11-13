@@ -160,6 +160,58 @@ public static class EntityLifecycle
                 conventions.Clock.GetUtcNow().UtcDateTime)
             : null;
 
+    /// <summary>
+    ///     Every stamp an update writes, as set-based assignments: <c>UpdatedAt</c> when the entity tracks updates, and
+    ///     <c>UpdatedById</c> when the current user is configured and the entity has the member. The update path of an
+    ///     upsert, and a member-scoped <c>Modify</c>, write these and nothing else of the lifecycle.
+    /// </summary>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="conventions">The active conventions.</param>
+    /// <param name="services">The scope's service provider (handed to the current-user accessor).</param>
+    public static System.Collections.Generic.IReadOnlyList<Query.SetAssignment> UpdateStamps(Type entityType,
+        DataConventions conventions, IServiceProvider services)
+    {
+        var stamps = new System.Collections.Generic.List<Query.SetAssignment>();
+        if (UpdateStamp(entityType, conventions) is { } updatedAt)
+        {
+            stamps.Add(updatedAt);
+        }
+
+        if (UserValueFor(entityType, "UpdatedById", conventions, services) is ({ } property, var value))
+        {
+            stamps.Add(new Query.SetAssignment(property, value));
+        }
+
+        return stamps;
+    }
+
+    /// <summary>
+    ///     The members only an insert writes — <c>CreatedAt</c> (and <c>CreatedById</c>) — which an update never
+    ///     touches, so a row keeps the stamps of the insert that made it.
+    /// </summary>
+    /// <param name="entityType">The entity type.</param>
+    /// <param name="conventions">The active conventions.</param>
+    public static System.Collections.Generic.IReadOnlyList<string> CreationMembers(Type entityType, DataConventions conventions)
+    {
+        var members = new System.Collections.Generic.List<string>();
+        if (!conventions.LifecycleStamps)
+        {
+            return members;
+        }
+
+        if (typeof(IEntityTimeMark).IsAssignableFrom(entityType))
+        {
+            members.Add(nameof(IEntityTimeMark.CreatedAt));
+        }
+
+        if (entityType.GetProperty("CreatedById", BindingFlags.Public | BindingFlags.Instance) is not null)
+        {
+            members.Add("CreatedById");
+        }
+
+        return members;
+    }
+
     /// <summary>Combines two predicates with <c>AndAlso</c> (either may be <c>null</c>).</summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="first">The first predicate, or <c>null</c>.</param>

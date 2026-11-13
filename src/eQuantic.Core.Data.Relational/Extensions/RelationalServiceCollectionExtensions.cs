@@ -4,6 +4,7 @@ using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Relational.Migration;
 using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Write;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -31,6 +32,9 @@ public static class RelationalServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<,>), typeof(RelationalRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncRepository<,>), typeof(RelationalRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncQueryableRepository<,>), typeof(RelationalRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IUpsertRepository<,>), typeof(RelationalRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IReturningUpdateRepository<,>), typeof(RelationalRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IPartialModifyRepository<,>), typeof(RelationalRepository<,>), lifetime));
 
         return services;
     }
@@ -105,6 +109,9 @@ public static class RelationalServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<TEntity, TKey>), Factory, lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncRepository<TEntity, TKey>), Factory, lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncQueryableRepository<TEntity, TKey>), Factory, lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IUpsertRepository<TEntity, TKey>), Factory, lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IReturningUpdateRepository<TEntity, TKey>), Factory, lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(IPartialModifyRepository<TEntity, TKey>), Factory, lifetime));
 
         return services;
     }

@@ -69,6 +69,56 @@ public sealed class PostgreSqlDialect : SqlDialect
             : $"INSERT INTO {quotedTable} ({columns}) VALUES ({values}) RETURNING {string.Join(", ", returning)}";
 
     /// <inheritdoc />
+    /// <remarks>SQLSTATE <c>23505</c> (<c>unique_violation</c>), which names the constraint or index.</remarks>
+    public override eQuantic.Core.Data.Repository.DuplicateKeyException? DuplicateKey(Exception exception) =>
+        Find(exception) is { SqlState: PostgresErrorCodes.UniqueViolation } violation
+            ? new eQuantic.Core.Data.Repository.DuplicateKeyException(violation.ConstraintName, exception)
+            : null;
+
+    /// <inheritdoc />
+    public override bool IsDeadlock(Exception exception) =>
+        Find(exception)?.SqlState is PostgresErrorCodes.DeadlockDetected or PostgresErrorCodes.SerializationFailure;
+
+    private static PostgresException? Find(Exception? exception)
+    {
+        for (; exception is not null; exception = exception.InnerException)
+        {
+            if (exception is PostgresException postgres)
+            {
+                return postgres;
+            }
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING</c>: one statement, which PostgreSQL
+    ///     runs without a race against any other upsert of the target, provided a unique index or constraint matches
+    ///     it (the predicate infers a partial unique index; PostgreSQL refuses a target nothing holds unique).
+    /// </remarks>
+    public override bool UpsertsInOneStatement => true;
+
+    /// <inheritdoc />
+    public override string UpsertSql(string quotedTable, IReadOnlyList<string> insertColumns, IReadOnlyList<string> insertValues,
+        IReadOnlyList<string> targetColumns, IReadOnlyList<string> targetValues, string? conflictFilter,
+        IReadOnlyList<string> assignments, IReadOnlyList<string> returning) =>
+        $"INSERT INTO {quotedTable} ({string.Join(", ", insertColumns)}) VALUES ({string.Join(", ", insertValues)}) " +
+        $"ON CONFLICT ({string.Join(", ", targetColumns)})" + (conflictFilter is null ? string.Empty : $" WHERE {conflictFilter}") +
+        $" DO UPDATE SET {string.Join(", ", assignments)} RETURNING {string.Join(", ", returning)}";
+
+    /// <inheritdoc />
+    /// <remarks><c>ON CONFLICT DO NOTHING</c> with no target leaves out a row that would take any unique key.</remarks>
+    public override string? InsertSkippingDuplicatesSql(string quotedTable, string columns, IReadOnlyList<string> rows) =>
+        $"WITH inserted AS (INSERT INTO {quotedTable} ({columns}) VALUES {string.Join(", ", rows)} " +
+        "ON CONFLICT DO NOTHING RETURNING 1) SELECT count(*) FROM inserted";
+
+    /// <inheritdoc />
+    public override string? UpdateReturningSql(string quotedTable, string set, string where, IReadOnlyList<string> returning) =>
+        $"UPDATE {quotedTable} SET {set} WHERE {where} RETURNING {string.Join(", ", returning)}";
+
+    /// <inheritdoc />
     /// <remarks>
     ///     <c>format_type</c> quotes a type name that needs it (<c>"RunStatus"</c>) and leaves one that does not
     ///     (<c>run_status</c>), while the DDL always quotes it; the quotes are not part of the type.
