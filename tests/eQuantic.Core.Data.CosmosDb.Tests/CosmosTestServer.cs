@@ -22,6 +22,8 @@ public sealed class CosmosTestServer
 {
     public const string DatabaseName = "tests";
     public const string ContainerName = "products";
+    public const string SecretsContainer = "secrets";
+    public const string UsersContainer = "users";
 
     // The well-known emulator account key (identical across the classic and vNext emulators).
     private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
@@ -72,6 +74,16 @@ public sealed class CosmosTestServer
                 (await _client.CreateDatabaseIfNotExistsAsync(DatabaseName)).Database);
             await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/category")));
 
+            // The write-outcome tests' containers hold their targets unique: a unique key per partition.
+            await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(SecretsContainer, "/category")
+            {
+                UniqueKeyPolicy = new UniqueKeyPolicy { UniqueKeys = { new UniqueKey { Paths = { "/workspaceId", "/name" } } } },
+            }));
+            await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(UsersContainer, "/category")
+            {
+                UniqueKeyPolicy = new UniqueKeyPolicy { UniqueKeys = { new UniqueKey { Paths = { "/email" } } } },
+            }));
+
             var services = new ServiceCollection();
             services.AddSingleton(_client);
 
@@ -117,7 +129,13 @@ public sealed class CosmosTestServer
             .Container(ContainerName)
             .PartitionKey(x => x.Category)
             .Generated(x => x.Number)
-            .Generated(x => x.IssuedAt, eQuantic.Core.Data.Modeling.StoreValue.Clock));
+            .Generated(x => x.IssuedAt, eQuantic.Core.Data.Modeling.StoreValue.Clock))
+        .Entity<Secret>(entity => entity.Container(SecretsContainer).PartitionKey(x => x.Category))
+        .Entity<UserAccount>(entity => entity.Container(UsersContainer).PartitionKey(x => x.Category))
+        .Entity<Label>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
 
     [OneTimeTearDown]
     public async Task StopAsync()

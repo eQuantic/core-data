@@ -37,6 +37,9 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
     internal CosmosEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
 
+    /// <summary>The model the client's serializer was built from (its renames and conversions).</summary>
+    internal CosmosModel EntityModel => Model;
+
     internal Container GetContainer<TEntity>() => Database.GetContainer(Configuration<TEntity>().ContainerName);
 
     private QueryFilters? _queryFilters;
@@ -122,6 +125,54 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
             batch => batch.UpsertItem(item)));
     }
 
+    /// <summary>
+    ///     Stages an update of the named members only (and of the update's lifecycle stamps): one patch of their paths,
+    ///     guarded by the entity's <c>_etag</c> when it carries a token. Every other path keeps what the item holds.
+    /// </summary>
+    internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+        var properties = members.Select(member => typeof(TEntity).GetProperty(member)
+                                                  ?? throw new NotSupportedException($"'{typeof(TEntity).Name}' has no member '{member}' to modify."))
+            .ToList();
+        foreach (var property in properties)
+        {
+            if (configuration.StoreGenerated.Any(generated => generated.Property.Name == property.Name))
+            {
+                throw new NotSupportedException($"'{property.Name}' is store-generated: the store assigns it, and an update never writes it.");
+            }
+
+            if (CosmosNaming.StoredName(property) == "id")
+            {
+                throw new NotSupportedException($"'{property.Name}' is the item's id, which identifies it and is never modified.");
+            }
+        }
+
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        var stamps = EntityLifecycle.UpdateStamps(typeof(TEntity), Conventions, ServiceProvider)
+            .Select(stamp => stamp.Member)
+            .OfType<System.Reflection.PropertyInfo>();
+        var operations = properties.Concat(stamps).DistinctBy(property => property.Name)
+            .Select(property => PatchOperation.Set("/" + CosmosNaming.StoredName(property), property.GetValue(item)))
+            .ToList();
+        if (operations.Count > 10)
+        {
+            throw new NotSupportedException(
+                $"Cosmos DB patches at most 10 paths in one operation, and this modify names {operations.Count} (the update's " +
+                "lifecycle stamps included); name fewer members, or Modify(entity) to replace the item.");
+        }
+
+        var id = configuration.GetId(item);
+        var partitionKey = configuration.GetPartitionKey(item);
+        var etag = configuration.GetETag(item);
+        _pending.Add(new CosmosPendingWrite(
+            configuration.ContainerName,
+            partitionKey,
+            (container, cancellationToken) => container.PatchItemAsync<TEntity>(id, partitionKey, operations,
+                new PatchItemRequestOptions { IfMatchEtag = etag }, cancellationToken),
+            batch => batch.PatchItem(id, operations, new TransactionalBatchPatchItemRequestOptions { IfMatchEtag = etag })));
+    }
+
     internal void StageDelete<TEntity>(TEntity item, string id) where TEntity : class
     {
         // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
@@ -167,8 +218,16 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         // The store's values go onto the entities before the writes serialize them.
         await AssignStoreGeneratedAsync(cancellationToken).ConfigureAwait(false);
 
-        await Task.WhenAll(writes.Select(write =>
-            write.Execute(Database.GetContainer(write.ContainerName), cancellationToken))).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(writes.Select(write =>
+                write.Execute(Database.GetContainer(write.ContainerName), cancellationToken))).ConfigureAwait(false);
+        }
+        catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            // A create whose id (or unique key) is taken. Each write of the commit is its own: the others stand.
+            throw new DuplicateKeyException(null, exception);
+        }
 
         return writes.Count;
     }
@@ -308,6 +367,15 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
                 }
 
                 using var response = await batch.ExecuteAsync(cancellationToken).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.Conflict
+                    || response.Any(operation => operation.StatusCode == System.Net.HttpStatusCode.Conflict))
+                {
+                    // The batch is atomic: a taken id (or unique key) left nothing of it written.
+                    throw new DuplicateKeyException(
+                        "The store refused the transaction: a key or a unique key it holds is already taken, and nothing of it was written.",
+                        null, new InvalidOperationException($"The Cosmos transactional batch failed with status {response.StatusCode}."));
+                }
+
                 if (!response.IsSuccessStatusCode)
                 {
                     throw new InvalidOperationException($"The Cosmos transactional batch failed with status {response.StatusCode}.");
