@@ -13,6 +13,7 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
 | Composite keys / facets / converters / includes | full relational engine surface |
 | GROUP BY / HAVING / UNION | fully native |
 | Paging | `OFFSET … FETCH`; keyset continuation over the key |
+| Upserts | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` (race-free; a filtered unique index is the conflict filter); `InsertManyAsync(…, skipDuplicates: true)` is a `TRY…CATCH` per row; `UpdateAndGetAsync` is `UPDATE … OUTPUT INSERTED`; errors 2627/2601 are `DuplicateKeyException` — see [Upserts and write outcomes](../writing/upserts.md) |
 
 ## Dialect specifics
 

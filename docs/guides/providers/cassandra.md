@@ -54,6 +54,17 @@ acknowledging a full-table fetch takes two signatures, deliberately.
   (`UpdateMany(filter, x => new Tally { Hits = x.Hits + n })`), never inserts, and the model
   validates the all-counters rule at build.
 - Per-commit knobs: `Commit(o => o.WithConsistency(ConsistencyLevel.Quorum).WithTtl(…))`.
+- **Conditions are lightweight transactions.** A set-based write whose filter names members outside
+  the primary key reads the rows the key finds and writes each `IF` those members still hold — a
+  compare-and-set, counting the writes applied (the partition key has to be in the filter; a counter
+  table takes no conditions). An increment of a plain column is written the same way, under
+  `IF column = value read`. `UpsertAsync` is `INSERT … IF NOT EXISTS` then `UPDATE … IF`, on the
+  **primary key only** — Cassandra holds nothing else unique, and an upsert on other members is
+  refused. `InsertManyAsync` is `INSERT … IF NOT EXISTS` per row: its not-applied inserts are this
+  provider's `DuplicateKeyException`s, since a plain insert overwrites by definition. A lightweight
+  transaction that times out under contention is settled with a serial read; one that wrote a value
+  computed from the row reaches you as a `TimeoutException`. See
+  [Upserts and write outcomes](../writing/upserts.md).
 
 ## Enums as labels, JSON members, store-generated members
 

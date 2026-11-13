@@ -58,6 +58,35 @@ The engine owns the token: `0`/unset means never persisted (first write stamps `
 successful write bumps it and writes the bump back onto the entity, so the instance you hold stays
 current after `CommitAsync`. Never set the token yourself.
 
+## Compare-and-set without a token
+
+A token guards a row you read and then write back. When the decision is a single condition — "claim
+this job if it is still queued", "take the next number" — a set-based write is the compare-and-set
+itself, with no read beforehand and no token:
+
+```csharp
+var claimed = await repo.UpdateManyAsync(
+    x => x.Id == id && x.Status == "queued",
+    x => new Job { Status = "running", Owner = me });
+if (claimed == 0) { /* someone else claimed it */ }
+
+var next = (await ((IReturningUpdateRepository<ItemType, Guid>)repo).UpdateAndGetAsync(
+    x => x.Id == typeId, x => new ItemType { NextSequence = x.NextSequence + 1 })).Single().NextSequence;
+```
+
+Every engine writes each row only while it still matches the filter and counts the rows it matched —
+an `UPDATE … WHERE` on SQL, a filtered `updateMany` on MongoDB, a patch under a filter predicate on
+Cosmos DB, a lightweight transaction's `IF` on Cassandra. See
+[Commits and transactions](transactions.md#what-a-set-based-write-counts-and-when-it-applies).
+
+## A taken key is not a conflict
+
+`ConcurrencyConflictException` says *another writer changed this row*. A write the store refuses
+because a key or a unique key is already taken is a different failure, and every engine reports it as
+`DuplicateKeyException` (with the constraint or index name where the store gives one) — at commit, in
+a bulk load, a set-based update, an upsert or `InsertManyAsync`. Upserts exist so that "insert or
+update" never has to be a catch block — see [Upserts and write outcomes](upserts.md).
+
 ## Retry pattern
 
 ```csharp

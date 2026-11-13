@@ -52,6 +52,8 @@
       href: writing/transactions.md
     - name: Optimistic concurrency
       href: writing/concurrency.md
+    - name: Upserts and write outcomes
+      href: writing/upserts.md
     - name: Lifecycle — stamps and soft delete
       href: writing/lifecycle.md
     - name: Time to live

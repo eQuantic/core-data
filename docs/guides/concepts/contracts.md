@@ -18,9 +18,14 @@ application code compiled against the contracts does not know (or care) which st
 | `IStreamingReadRepository<TEntity>` | `GetStreamAsync` — `IAsyncEnumerable<TEntity>`, one page in memory at a time |
 | `IExplainableRepository<TEntity>` | `Explain(options)` — the query plan, before you run it |
 | `IUnionQueryRunner` | `UnionAsync` — typed UNION / UNION ALL across entities |
+| `IUpsertRepository<TEntity, TKey>` | `UpsertAsync` (on the key or a unique key) and `InsertManyAsync(…, skipDuplicates)` — see [Upserts](../writing/upserts.md) |
+| `IReturningUpdateRepository<TEntity, TKey>` | `UpdateAndGetAsync` — a set-based update that returns the rows it wrote |
+| `IPartialModifyRepository<TEntity, TKey>` | `Modify`/`ModifyAsync(entity, members)` — a staged update of the named members only |
 
 A repository instance implements all of these that its provider supports; cast to the capability
-you need (`(IAggregateReadRepository<Product>)repo`) or resolve the specific interface from DI.
+you need (`(IAggregateReadRepository<Product>)repo`). The write capabilities, keyed like the
+repositories by entity and key, also resolve from DI (`IUpsertRepository<Secret, Guid>`), through the
+open-generic registration and the per-entity NativeAOT one alike.
 
 **You rarely write a repository class.** The DI extensions register open generics, so
 `IAsyncRepository<Product, Guid>` resolves for any entity in the model. Subclass the provider's

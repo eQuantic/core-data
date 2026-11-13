@@ -17,6 +17,7 @@ the shared relational engine exercises all of it.
 | Includes | reference/collection with follow-up `IN` queries, dotted nested paths |
 | GROUP BY / HAVING / UNION | fully native |
 | Resilience | opt-in transient retry — see [Resilience](../operations/resilience.md) |
+| Upserts | `INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING`; `InsertManyAsync(…, skipDuplicates: true)` is `ON CONFLICT DO NOTHING`; `UpdateAndGetAsync` is `UPDATE … RETURNING`; a taken key (SQLSTATE `23505`) is `DuplicateKeyException` naming the constraint — see [Upserts and write outcomes](../writing/upserts.md) |
 
 ## jsonb members
 

@@ -76,7 +76,15 @@ model.Entity<Order>(entity => entity
 - `[ConcurrencyToken]` on a `string` member (carrying `_etag`) turns `Modify`/`Merge` into
   conditional replaces (`If-Match`) — see [Concurrency](../writing/concurrency.md).
 - `UpdateManyAsync` renders **patch operations** (`Set`, `Increment`, array append/remove) — the
-  provider queries the affected ids and patches per item, the closest native form Cosmos offers.
+  provider queries the affected ids and patches per item **under the filter**
+  (`PatchItemRequestOptions.FilterPredicate`), so an item that stopped matching is left alone and the
+  count is the patches applied: a compare-and-set. `DeleteManyAsync` deletes each item under the
+  `_etag` of a read that still finds it matching. (Before, the patch and the delete applied
+  unconditionally to whatever the query had found.)
+- `UpsertAsync` reads the target and replaces (or patches) it under the `_etag` it read, or creates
+  it; the id and a container's **unique key** hold a target unique within a partition, and only then
+  is a concurrent upsert race-free. A 409 on a create is `DuplicateKeyException` (Cosmos DB names no
+  key). See [Upserts and write outcomes](../writing/upserts.md).
 - `BeginTransactionAsync` gives a `TransactionalBatch` — single partition, enforced with guidance.
 
 ## What is honestly rejected

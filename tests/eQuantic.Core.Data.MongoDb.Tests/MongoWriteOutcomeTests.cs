@@ -342,6 +342,32 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_fails_because_MongoDB_aborts_it()
+    {
+        var stored = new Secret { WorkspaceId = "w", Name = "taken", Value = "stored" };
+        using (var seed = NewScope())
+        {
+            await Repo<Secret>(seed).AddAsync(stored);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var refusal = Assert.ThrowsAsync<DuplicateKeyException>(() => Resolve<IUpsertRepository<Secret, string>>(scope).InsertManyAsync(
+        [
+            new Secret { WorkspaceId = "w", Name = "fresh", Value = "new" },
+            new Secret { WorkspaceId = "w", Name = "taken", Value = "new" },
+        ], skipDuplicates: true));
+        Assert.That(refusal!.Message, Does.Contain("aborted"));
+        await unitOfWork.RollbackTransactionAsync();
+
+        using var check = NewScope();
+        Assert.That((await Repo<Secret>(check).GetFilteredAsync(x => x.WorkspaceId == "w")).Select(x => x.Name),
+            Is.EqualTo(new[] { "taken" }), "the aborted transaction wrote nothing");
+    }
+
+    [Test]
     public async Task A_unique_index_other_than_the_key_is_named_on_every_write_path()
     {
         var owner = new UserAccount { Email = "owner@example.test", Name = "owner" };

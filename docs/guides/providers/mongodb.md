@@ -79,6 +79,22 @@ await repo.UpdateManyAsync(
 The update factory renders as one native `UpdateMany` — no documents load, no round-trips per
 entity.
 
+`UpdateManyAsync` returns the documents the filter **matched** (it used to return the ones modified,
+so a compare-and-set that wrote the same value read as a lost race), and goes through the set like
+every other provider's: a soft-delete entity's `DeleteManyAsync` stamps `DeletedAt`, and an update
+stamps `UpdatedAt`.
+
+## Upserts and write outcomes
+
+`UpsertAsync` is `findOneAndUpdate` of the target and, when nothing matches, an upsert of
+`$setOnInsert` (the update runs again when that finds the target after all). With a unique index on
+the target, ten concurrent upserts leave one document; without one, MongoDB itself can insert twice.
+`InsertManyAsync(…, skipDuplicates: true)` is an unordered `insertMany` discarding only E11000 — except
+inside a transaction, which MongoDB aborts on any write error, so there a duplicate fails the call.
+`UpdateAndGetAsync` runs `findOneAndUpdate` per matching document. E11000 — from a write, a bulk write
+or a command — is `DuplicateKeyException` naming the index. See
+[Upserts and write outcomes](../writing/upserts.md).
+
 ## Embedded vs referenced
 
 MongoDB's idiom is embedding, and the engine respects it: embedded objects and collections

@@ -235,8 +235,9 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
             }
             catch (Exception exception) when (MongoDuplicateKeys.From(exception) is { } duplicate)
             {
-                if (attempt >= UpsertAttempts)
+                if (attempt >= UpsertAttempts || session is { IsInTransaction: true })
                 {
+                    // Inside a transaction MongoDB has already aborted it on the error: there is nothing to retry in.
                     throw duplicate;
                 }
 
@@ -378,6 +379,16 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
                                                          && exception.WriteErrors.All(MongoDuplicateKeys.IsDuplicate)
                                                          && exception.WriteConcernError is null)
         {
+            if (session is { IsInTransaction: true })
+            {
+                // MongoDB aborts a transaction on any write error, a duplicate key included: nothing of it will commit,
+                // so the duplicates cannot be skipped inside one.
+                throw new DuplicateKeyException(
+                    "The store refused the write: a key or a unique key it holds is already taken, and MongoDB aborted the " +
+                    "open transaction on it (it aborts on any write error), so duplicates cannot be skipped inside a transaction.",
+                    MongoDuplicateKeys.From(exception)?.ConstraintName, exception);
+            }
+
             return entities.Count - exception.WriteErrors.Count;
         }
         catch (Exception exception) when (MongoDuplicateKeys.From(exception) is { } duplicate)
