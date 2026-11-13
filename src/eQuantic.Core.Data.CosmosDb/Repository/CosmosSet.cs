@@ -131,7 +131,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     ///     Cosmos DB has no update by query: the matching items are read, and each is patched <b>under the filter</b>
     ///     (<c>PatchItemRequestOptions.FilterPredicate</c>), so the server applies the patch only while the item still
     ///     matches — a filter on the key and other members is a compare-and-set. The count is the patches applied,
-    ///     whether or not they changed the values.
+    ///     whether or not they changed the values. An update of more than ten paths patches each item several times in
+    ///     one transactional batch, the first patch under the filter: the item takes all of it or none.
     /// </remarks>
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default) =>
@@ -150,15 +151,14 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     {
         var patch = WithUpdateStamps(CosmosPatch.Build(updateExpression), updateExpression);
         var scoped = Scoped(filter);
-        var options = new PatchItemRequestOptions { FilterPredicate = "FROM root WHERE " + WhereClause(scoped) };
+        var condition = "FROM root WHERE " + WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
         var patched = await Task.WhenAll(matches.Select(async item =>
         {
             try
             {
-                var response = await _container.PatchItemAsync<TEntity>(_configuration.GetId(item), _configuration.GetPartitionKey(item),
-                    patch, options, cancellationToken).ConfigureAwait(false);
-                return response.Resource;
+                return await CosmosPatch.ApplyAsync<TEntity>(_container, _configuration.GetId(item), _configuration.GetPartitionKey(item),
+                    patch, condition, ifMatchEtag: null, cancellationToken).ConfigureAwait(false);
             }
             catch (CosmosException exception) when (exception.StatusCode is System.Net.HttpStatusCode.PreconditionFailed
                                                         or System.Net.HttpStatusCode.NotFound)
@@ -174,7 +174,10 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         return patched.Where(item => item is not null).Select(item => item!).ToList();
     }
 
-    /// <summary>The patch, with the update's lifecycle stamps unless it assigns them; Cosmos DB patches ten paths at most.</summary>
+    /// <summary>
+    ///     The patch, with the update's lifecycle stamps unless it assigns them. Any number of paths: beyond the ten
+    ///     Cosmos DB takes in one patch, <see cref="CosmosPatch.ApplyAsync{TEntity}" /> splits it within one batch.
+    /// </summary>
     private IReadOnlyList<PatchOperation> WithUpdateStamps(IReadOnlyList<PatchOperation> patch,
         Expression<Func<TEntity, TEntity>>? updateExpression)
     {
@@ -190,17 +193,12 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
             }
         }
 
-        return operations.Count <= MaxPatchOperations
-            ? operations
-            : throw new NotSupportedException(
-                $"Cosmos DB patches at most {MaxPatchOperations} paths in one operation, and this update needs {operations.Count} " +
-                "(the update's lifecycle stamps included); assign fewer members.");
+        return operations;
     }
 
     // ---------------------------------------------------------------- upserts (immediate)
 
     private const int ConditionalAttempts = 25;
-    private const int MaxPatchOperations = 10;
 
     /// <summary>
     ///     Inserts the entity, or updates the item matching it on the target members, guarded by the item's <c>_etag</c>,
@@ -235,9 +233,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
                     var id = _configuration.GetId(stored.Resource);
                     if (patch is not null)
                     {
-                        var patched = await _container.PatchItemAsync<TEntity>(id, partitionKey, patch,
-                            new PatchItemRequestOptions { IfMatchEtag = stored.ETag }, cancellationToken).ConfigureAwait(false);
-                        return patched.Resource;
+                        return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, filterPredicate: null,
+                            stored.ETag, cancellationToken).ConfigureAwait(false);
                     }
 
                     var replaced = await _container.ReplaceItemAsync(Replacement(entity, stored.Resource, takeKey), id, partitionKey,

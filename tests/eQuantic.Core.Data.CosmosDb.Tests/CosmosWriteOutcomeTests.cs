@@ -96,6 +96,50 @@ public sealed class Page : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>
+///     A record with more members than Cosmos DB patches in one operation: an update of all twelve, with the status, goes
+///     as several patches of the item in one transactional batch. Its <c>_etag</c> is its concurrency token.
+/// </summary>
+public sealed class WideRecord : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Category { get; set; } = "";
+
+    public string Status { get; set; } = "";
+
+    [System.Text.Json.Serialization.JsonPropertyName("_etag")]
+    public string? ETag { get; set; }
+
+    public string F01 { get; set; } = "";
+    public string F02 { get; set; } = "";
+    public string F03 { get; set; } = "";
+    public string F04 { get; set; } = "";
+    public string F05 { get; set; } = "";
+    public string F06 { get; set; } = "";
+    public string F07 { get; set; } = "";
+    public string F08 { get; set; } = "";
+    public string F09 { get; set; } = "";
+    public string F10 { get; set; } = "";
+    public string F11 { get; set; } = "";
+    public int F12 { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+
+    /// <summary>The twelve members, in order, to compare at once.</summary>
+    public object[] Members() => [F01, F02, F03, F04, F05, F06, F07, F08, F09, F10, F11, F12];
+
+    /// <summary>Sets the twelve members to values derived from one tag.</summary>
+    public WideRecord Fill(string tag, int number)
+    {
+        F01 = tag + "1"; F02 = tag + "2"; F03 = tag + "3"; F04 = tag + "4"; F05 = tag + "5"; F06 = tag + "6";
+        F07 = tag + "7"; F08 = tag + "8"; F09 = tag + "9"; F10 = tag + "10"; F11 = tag + "11"; F12 = number;
+        return this;
+    }
+}
+
 /// <summary>An account whose e-mail is the container's unique key.</summary>
 public sealed class UserAccount : IEntity<string>
 {
@@ -470,5 +514,184 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
         Assert.That(stored.Title, Is.EqualTo("final"));
         Assert.That(stored.Locked, Is.True);
         Assert.That(stored.Body, Is.EqualTo("text"));
+    }
+    // ---------------------------------------------------------------- more paths than one patch takes
+
+    private static readonly System.Linq.Expressions.Expression<Func<WideRecord, object?>> TwelveMembers = x => new
+    {
+        x.F01, x.F02, x.F03, x.F04, x.F05, x.F06, x.F07, x.F08, x.F09, x.F10, x.F11, x.F12,
+    };
+
+    private async Task<WideRecord> SeedWideAsync(string status = "queued")
+    {
+        var record = new WideRecord { Category = Partition, Status = status }.Fill("seed", 0);
+        using var seed = NewScope();
+        await RepoOf<WideRecord>(seed).AddAsync(record);
+        await Commit(seed);
+        return record;
+    }
+
+    private static async Task<WideRecord> ReadWideAsync(string id)
+    {
+        using var check = NewScope();
+        return (await RepoOf<WideRecord>(check).GetAsync(id))!;
+    }
+
+    [Test]
+    public async Task A_member_scoped_modify_of_twelve_members_writes_them_all()
+    {
+        var record = await SeedWideAsync();
+        using var scope = NewScope();
+        var read = (await RepoOf<WideRecord>(scope).GetAsync(record.Id))!;
+        read.Fill("new", 12);
+        read.Status = "not named";
+        await Resolve<IPartialModifyRepository<WideRecord, string>>(scope).ModifyAsync(read, TwelveMembers);
+        await Commit(scope);
+
+        var stored = await ReadWideAsync(record.Id);
+        Assert.That(stored.Members(), Is.EqualTo(new WideRecord().Fill("new", 12).Members()));
+        Assert.That(stored.Status, Is.EqualTo("queued"), "a member the modify does not name keeps what the item holds");
+    }
+
+    [Test]
+    public async Task A_member_scoped_modify_of_twelve_members_under_a_stale_token_writes_none()
+    {
+        var record = await SeedWideAsync();
+        using var stale = NewScope();
+        var read = (await RepoOf<WideRecord>(stale).GetAsync(record.Id))!;
+
+        using (var other = NewScope())
+        {
+            var current = (await RepoOf<WideRecord>(other).GetAsync(record.Id))!;
+            current.F01 = "other";
+            await Resolve<IPartialModifyRepository<WideRecord, string>>(other).ModifyAsync(current, x => x.F01);
+            await Commit(other);
+        }
+
+        read.Fill("late", 12);
+        await Resolve<IPartialModifyRepository<WideRecord, string>>(stale).ModifyAsync(read, TwelveMembers);
+        var exception = Assert.ThrowsAsync<CosmosException>(() => Commit(stale));
+        Assert.That(exception!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.PreconditionFailed));
+
+        var stored = await ReadWideAsync(record.Id);
+        Assert.That(stored.F01, Is.EqualTo("other"));
+        Assert.That(stored.Members().Skip(1), Is.EqualTo(new WideRecord().Fill("seed", 0).Members().Skip(1)),
+            "the patches of one item apply together or not at all");
+    }
+
+    [Test]
+    public async Task A_member_scoped_modify_of_twelve_members_joins_the_transaction()
+    {
+        var record = await SeedWideAsync();
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        var read = (await RepoOf<WideRecord>(scope).GetAsync(record.Id))!;
+        var job = new Job { Category = Partition, Status = "queued" };
+
+        await unitOfWork.BeginTransactionAsync();
+        read.Fill("tx", 7);
+        await Resolve<IPartialModifyRepository<WideRecord, string>>(scope).ModifyAsync(read, TwelveMembers);
+        await RepoOf<Job>(scope).AddAsync(job);
+        await unitOfWork.CommitAsync();
+        Assert.That((await ReadWideAsync(record.Id)).F01, Is.EqualTo("seed1"), "nothing is written before the transaction commits");
+        await unitOfWork.CommitTransactionAsync();
+
+        Assert.That((await ReadWideAsync(record.Id)).Members(), Is.EqualTo(new WideRecord().Fill("tx", 7).Members()));
+        using var check = NewScope();
+        Assert.That(await RepoOf<Job>(check).GetAsync(job.Id), Is.Not.Null);
+    }
+
+    [Test]
+    public async Task A_set_based_update_of_twelve_members_writes_them_all_under_the_filter()
+    {
+        var record = await SeedWideAsync();
+        using var scope = NewScope();
+        var repo = RepoOf<WideRecord>(scope);
+
+        Assert.That(await repo.UpdateManyAsync(x => x.Id == record.Id && x.Status == "queued", x => new WideRecord
+        {
+            Status = "running", F01 = "u1", F02 = "u2", F03 = "u3", F04 = "u4", F05 = "u5", F06 = "u6",
+            F07 = "u7", F08 = "u8", F09 = "u9", F10 = "u10", F11 = "u11", F12 = 12,
+        }), Is.EqualTo(1L));
+        var stored = await ReadWideAsync(record.Id);
+        Assert.That(stored.Status, Is.EqualTo("running"));
+        Assert.That(stored.Members(), Is.EqualTo(new WideRecord().Fill("u", 12).Members()));
+
+        Assert.That(await repo.UpdateManyAsync(x => x.Id == record.Id && x.Status == "queued", x => new WideRecord
+        {
+            Status = "again", F01 = "v1", F02 = "v2", F03 = "v3", F04 = "v4", F05 = "v5", F06 = "v6",
+            F07 = "v7", F08 = "v8", F09 = "v9", F10 = "v10", F11 = "v11", F12 = 13,
+        }), Is.EqualTo(0L), "the item no longer matches");
+        Assert.That((await ReadWideAsync(record.Id)).Members(), Is.EqualTo(new WideRecord().Fill("u", 12).Members()));
+    }
+
+    [Test]
+    public async Task A_patch_of_twelve_paths_whose_condition_fails_writes_none_of_them()
+    {
+        var record = await SeedWideAsync();
+        var container = Resolve<Database>(NewScope()).GetContainer(CosmosTestServer.ContainerName);
+        var operations = Enumerable.Range(1, 11).Select(index => PatchOperation.Set($"/f{index:00}", "x"))
+            .Append(PatchOperation.Set("/f12", 99)).Append(PatchOperation.Set("/status", "taken")).ToList();
+
+        // The item matched when it was read; by the time of the patch it does not: the first patch's condition fails.
+        var exception = Assert.ThrowsAsync<CosmosException>(() => CosmosPatch.ApplyAsync<WideRecord>(container, record.Id,
+            new PartitionKey(Partition), operations, "FROM root WHERE root.status = 'running'", null, CancellationToken.None));
+        Assert.That(exception!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.PreconditionFailed));
+        var stored = await ReadWideAsync(record.Id);
+        Assert.That(stored.Status, Is.EqualTo("queued"));
+        Assert.That(stored.Members(), Is.EqualTo(new WideRecord().Fill("seed", 0).Members()), "the batch failed together");
+    }
+
+    [Test]
+    public async Task Two_concurrent_set_based_updates_of_twelve_members_leave_one_whole()
+    {
+        var record = await SeedWideAsync();
+        var workers = new[] { "a", "b" };
+        var scopes = workers.Select(_ => NewScope()).ToList();
+        long[] counts;
+        try
+        {
+            counts = await Task.WhenAll(workers.Select((worker, index) => Task.Run(() =>
+                RepoOf<WideRecord>(scopes[index]).UpdateManyAsync(x => x.Id == record.Id && x.Status == "queued", x => new WideRecord
+                {
+                    Status = worker, F01 = worker + "1", F02 = worker + "2", F03 = worker + "3", F04 = worker + "4",
+                    F05 = worker + "5", F06 = worker + "6", F07 = worker + "7", F08 = worker + "8", F09 = worker + "9",
+                    F10 = worker + "10", F11 = worker + "11", F12 = index,
+                }))));
+        }
+        finally
+        {
+            scopes.ForEach(scope => scope.Dispose());
+        }
+
+        Assert.That(counts.OrderBy(count => count), Is.EqualTo(new[] { 0L, 1L }));
+        var winner = Array.IndexOf(counts, 1L);
+        var stored = await ReadWideAsync(record.Id);
+        Assert.That(stored.Status, Is.EqualTo(workers[winner]));
+        Assert.That(stored.Members(), Is.EqualTo(new WideRecord().Fill(workers[winner], winner).Members()), "no member of the loser");
+    }
+
+    [Test]
+    public async Task UpdateAndGet_of_twelve_members_returns_the_item_as_written()
+    {
+        var record = await SeedWideAsync();
+        using var scope = NewScope();
+        var returning = Resolve<IReturningUpdateRepository<WideRecord, string>>(scope);
+
+        var written = await returning.UpdateAndGetAsync(x => x.Id == record.Id && x.Status == "queued", x => new WideRecord
+        {
+            Status = "done", F01 = "r1", F02 = "r2", F03 = "r3", F04 = "r4", F05 = "r5", F06 = "r6",
+            F07 = "r7", F08 = "r8", F09 = "r9", F10 = "r10", F11 = "r11", F12 = x.F12 + 5,
+        });
+        Assert.That(written, Has.Count.EqualTo(1));
+        Assert.That(written[0].Status, Is.EqualTo("done"));
+        Assert.That(written[0].Members(), Is.EqualTo(new WideRecord().Fill("r", 5).Members()), "the last patch answers the whole item");
+        Assert.That((await ReadWideAsync(record.Id)).Members(), Is.EqualTo(new WideRecord().Fill("r", 5).Members()));
+
+        Assert.That(await returning.UpdateAndGetAsync(x => x.Id == record.Id && x.Status == "queued", x => new WideRecord
+        {
+            Status = "x", F01 = "s1", F02 = "s2", F03 = "s3", F04 = "s4", F05 = "s5", F06 = "s6",
+            F07 = "s7", F08 = "s8", F09 = "s9", F10 = "s10", F11 = "s11", F12 = 0,
+        }), Is.Empty, "the condition no longer holds");
     }
 }

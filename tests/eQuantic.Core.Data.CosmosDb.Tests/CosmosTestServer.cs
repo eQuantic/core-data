@@ -135,7 +135,8 @@ public sealed class CosmosTestServer
         .Entity<Label>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
-        .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
+        .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<WideRecord>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category).ConcurrencyToken(x => x.ETag));
 
     [OneTimeTearDown]
     public async Task StopAsync()

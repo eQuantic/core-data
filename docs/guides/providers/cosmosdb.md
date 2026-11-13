@@ -80,7 +80,10 @@ model.Entity<Order>(entity => entity
   (`PatchItemRequestOptions.FilterPredicate`), so an item that stopped matching is left alone and the
   count is the patches applied: a compare-and-set. `DeleteManyAsync` deletes each item under the
   `_etag` of a read that still finds it matching. (Before, the patch and the delete applied
-  unconditionally to whatever the query had found.)
+  unconditionally to whatever the query had found.) Any number of paths: beyond the ten Cosmos DB
+  takes in one patch, the item is patched several times in one transactional batch, the first patch
+  under the filter, so it takes the whole update or none of it — the same holds for a member-scoped
+  `ModifyAsync` (under the `_etag`), whose patches join an explicit transaction's batch.
 - `UpsertAsync` reads the target and replaces (or patches) it under the `_etag` it read, or creates
   it; the id and a container's **unique key** hold a target unique within a partition, and only then
   is a concurrent upsert race-free. A 409 on a create is `DuplicateKeyException` (Cosmos DB names no

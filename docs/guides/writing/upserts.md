@@ -142,7 +142,7 @@ filter — and every row it updated comes back as stored after it, store-generat
 | SQL Server | `UPDATE … OUTPUT INSERTED` | yes |
 | MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update) | yes |
 | MongoDB | the matching ids, then `findOneAndUpdate` per document (filtered on its id *and* the filter), returning it after the update | per document; the set is one unit only inside an explicit transaction |
-| Cosmos DB | a patch per matching item under the filter (`FilterPredicate`), which answers with the item | per item |
+| Cosmos DB | a patch per matching item under the filter (`FilterPredicate`), which answers with the item; an update of more than ten paths patches the item several times in one transactional batch, the first patch under the filter | per item |
 | Cassandra | a lightweight transaction per row: `UPDATE … IF EXISTS` (or `IF` the filter's other members), and `IF column = value read` for a value computed from the row; the row returned is the row read with the update's values | per row |
 
 ## Updating only the members you changed
@@ -164,5 +164,5 @@ change. Naming the key, a store-generated member or the token is refused.
 |---|---|
 | Relational | `UPDATE … SET named columns WHERE key [AND version = @old]`, in the commit's transaction |
 | MongoDB | `updateOne` with a `$set` of the named elements (filtered on the version read, with a token) |
-| Cosmos DB | a patch of the named paths (under `If-Match` with a token) — at most ten paths, Cosmos DB's limit |
+| Cosmos DB | a patch of the named paths (under `If-Match` with a token); beyond the ten paths Cosmos DB takes in one patch, several patches of the item in one transactional batch, the first under `If-Match`, applied whole or not at all |
 | Cassandra | `UPDATE … SET named columns WHERE key` (`IF version = ?` with a token); Cassandra's `UPDATE` is an upsert, so a row deleted meanwhile is written again, with those columns only |

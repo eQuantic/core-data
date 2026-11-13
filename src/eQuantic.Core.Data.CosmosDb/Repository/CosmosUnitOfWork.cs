@@ -128,8 +128,11 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
     }
 
     /// <summary>
-    ///     Stages an update of the named members only (and of the update's lifecycle stamps): one patch of their paths,
+    ///     Stages an update of the named members only (and of the update's lifecycle stamps): a patch of their paths,
     ///     guarded by the entity's <c>_etag</c> when it carries a token. Every other path keeps what the item holds.
+    ///     Beyond the ten paths Cosmos DB takes in one patch, the paths go as several patches of the item in one
+    ///     transactional batch, the first guarded by the <c>_etag</c>, applied whole or not at all; inside an explicit
+    ///     transaction they join its batch.
     /// </summary>
     internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
     {
@@ -157,12 +160,6 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         var operations = properties.Concat(stamps).DistinctBy(property => property.Name)
             .Select(property => PatchOperation.Set("/" + CosmosNaming.StoredName(property), property.GetValue(item)))
             .ToList();
-        if (operations.Count > 10)
-        {
-            throw new NotSupportedException(
-                $"Cosmos DB patches at most 10 paths in one operation, and this modify names {operations.Count} (the update's " +
-                "lifecycle stamps included); name fewer members, or Modify(entity) to replace the item.");
-        }
 
         var id = configuration.GetId(item);
         var partitionKey = configuration.GetPartitionKey(item);
@@ -170,9 +167,9 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         _pending.Add(new CosmosPendingWrite(
             configuration.ContainerName,
             partitionKey,
-            (container, cancellationToken) => container.PatchItemAsync<TEntity>(id, partitionKey, operations,
-                new PatchItemRequestOptions { IfMatchEtag = etag }, cancellationToken),
-            batch => batch.PatchItem(id, operations, new TransactionalBatchPatchItemRequestOptions { IfMatchEtag = etag })));
+            (container, cancellationToken) => CosmosPatch.ApplyAsync<TEntity>(container, id, partitionKey, operations,
+                filterPredicate: null, etag, cancellationToken),
+            batch => CosmosPatch.AddTo(batch, id, operations, filterPredicate: null, etag)));
     }
 
     internal void StageDelete<TEntity>(TEntity item, string id) where TEntity : class

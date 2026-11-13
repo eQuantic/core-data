@@ -92,6 +92,13 @@ var claimed = await repo.UpdateManyAsync(
 | Relational | by one `UPDATE … WHERE` / `DELETE … WHERE`, which the store re-evaluates on a row another transaction changed | the rows matched (MySQL and MariaDB: the data source always reports found rows, `UseAffectedRows=false`) |
 | MongoDB | by one `updateMany`/`deleteMany`; a write conflict makes the server evaluate the filter again | `MatchedCount` |
 | Cosmos DB | per matching item: a patch under the filter (`PatchItemRequestOptions.FilterPredicate`), a delete under the `_etag` of a read that still matched | the patches and deletes applied |
+
+Cosmos DB takes at most ten paths in one patch. An update that needs more (the update's lifecycle
+stamps count) patches each item several times in **one transactional batch** of its partition: the
+first patch carries the filter (or the `_etag`), the batch's isolation keeps other writers out until
+the last patch has applied, and a condition that fails leaves the item untouched. A member-scoped
+`ModifyAsync` of more than ten members is staged the same way, and inside an explicit transaction its
+patches join the transaction's batch.
 | Cassandra | a filter on the primary key alone: one `UPDATE`/`DELETE` (Cassandra's `UPDATE` is an upsert, so a row deleted in between is written again); a filter on other members too: a **lightweight transaction** per row, the other members its `IF` | the rows found / the transactions applied |
 
 On Cassandra a conditional write needs the partition key in its filter (the rows are read by their
