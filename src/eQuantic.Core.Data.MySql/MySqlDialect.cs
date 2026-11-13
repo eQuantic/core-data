@@ -79,7 +79,12 @@ public class MySqlDialect : SqlDialect
 
         if (underlying.IsEnum)
         {
-            return "int";
+            return NativeEnumOf(underlying) is { } native ? EnumSqlType(native) : "int";
+        }
+
+        if (IsDocumentColumn(underlying))
+        {
+            return "json";
         }
 
         return underlying switch
@@ -104,9 +109,48 @@ public class MySqlDialect : SqlDialect
     /// <inheritdoc />
     public override object? BindValue(object? value) => value switch
     {
-        Enum enumValue => Convert.ToInt32(enumValue),
-        _ => value,
+        Enum enumValue when NativeEnumOf(enumValue.GetType()) is null => Convert.ToInt32(enumValue),
+        _ => base.BindValue(value),
     };
+
+    /// <inheritdoc />
+    /// <remarks>An <c>ENUM(...)</c> column: the store itself holds it to the labels.</remarks>
+    public override string EnumSqlType(RelationalNativeEnum declaration) =>
+        "ENUM(" + string.Join(", ", declaration.Labels.Values.Select(TextLiteral)) + ")";
+
+    /// <inheritdoc />
+    public override bool EnumTypeRestrictsLabels => true;
+
+    /// <inheritdoc />
+    public override string TextLiteral(string text) => "'" + text.Replace("\\", "\\\\").Replace("'", "''") + "'";
+
+    /// <inheritdoc />
+    public override string ClockSql(Type type) => "(UTC_TIMESTAMP(6))";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     MySQL numbers a column with <c>AUTO_INCREMENT</c>, which it allows on one indexed column per table: a key
+    ///     MySQL generates is refused already (it cannot be read back), so this column can always be that one.
+    /// </remarks>
+    public override string SequenceDdl(string table, RelationalColumn column) => "AUTO_INCREMENT UNIQUE";
+
+    /// <inheritdoc />
+    /// <remarks>MySQL has no <c>RETURNING</c>: the row is read back by its key, in the same batch.</remarks>
+    public override bool ReadsBackInsertedValues => true;
+
+    /// <inheritdoc />
+    public override bool ReadsBackByKey => true;
+
+    /// <inheritdoc />
+    public override string InsertSql(string quotedTable, string columns, string values, IReadOnlyList<string> returning,
+        string? keyPredicate = null) =>
+        returning.Count == 0
+            ? $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})"
+            : keyPredicate is null
+                // Only a generated key comes without a predicate, and MySQL cannot read one back.
+                ? InsertSql(quotedTable, columns, values, returning[0])
+                : $"INSERT INTO {quotedTable} ({columns}) VALUES ({values}); " +
+                  $"SELECT {string.Join(", ", returning)} FROM {quotedTable} WHERE {keyPredicate}";
 
     /// <inheritdoc />
     public override bool SupportsBulkInsert => true;
@@ -133,7 +177,7 @@ public class MySqlDialect : SqlDialect
         var table = new System.Data.DataTable();
         foreach (var column in columns)
         {
-            table.Columns.Add(column.Name, Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType);
+            table.Columns.Add(column.Name, BoundType(column));
         }
 
         foreach (var row in rows)

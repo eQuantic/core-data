@@ -61,6 +61,8 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                 case EnsureCollectionOperation ensure:
                 {
                     var configuration = _model.For(ensure.EntityType);
+                    await EnsureEnumTypesAsync(connection, configuration.Columns, cancellationToken).ConfigureAwait(false);
+                    await EnsurePrerequisitesAsync(connection, configuration, configuration.Columns, cancellationToken).ConfigureAwait(false);
                     await ExecuteAsync(connection, CreateTable(configuration), [], cancellationToken).ConfigureAwait(false);
 
                     // The model's declared search indexes are part of the table's schema where the dialect can
@@ -118,9 +120,11 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                 {
                     var configuration = _model.For(add.EntityType);
                     var column = Column(configuration, add.Field.GetMemberName());
+                    await EnsureEnumTypesAsync(connection, [column], cancellationToken).ConfigureAwait(false);
+                    await EnsurePrerequisitesAsync(connection, configuration, [column], cancellationToken).ConfigureAwait(false);
                     await ExecuteAsync(connection,
                         _dialect.AddColumnSql(_dialect.Quote(configuration.TableName), _dialect.Quote(column.Name),
-                            _dialect.SqlType(column.StoredType)), [], cancellationToken).ConfigureAwait(false);
+                            _dialect.SqlType(column.StoredType) + Constraints(configuration, column)), [], cancellationToken).ConfigureAwait(false);
                     break;
                 }
 
@@ -193,7 +197,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                 declaration += " PRIMARY KEY";
             }
 
-            return declaration;
+            return declaration + (column.IsStoreGenerated ? _dialect.StoreGeneratedDdl(configuration.TableName, column) : string.Empty);
         });
 
         // A composite key declares at the table level; a simple one stays inline on its column.
@@ -203,7 +207,58 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             body += $", PRIMARY KEY ({string.Join(", ", configuration.Keys.Select(key => _dialect.Quote(key.Name)))})";
         }
 
+        // The CHECKs go after every column, at the table level: SQL Server refuses a column-level CHECK that
+        // comes before a column whose default is NEXT VALUE FOR, and the table level means the same everywhere.
+        foreach (var check in configuration.Columns
+                     .Select(column => _dialect.CheckConstraintSql(_dialect.Quote(column.Name), column)).OfType<string>())
+        {
+            body += ", " + check;
+        }
+
         return _dialect.CreateTableSql(_dialect.Quote(configuration.TableName), body);
+    }
+
+    /// <summary>What follows a column's type: how the store fills it when it is store-generated, and its CHECK.</summary>
+    private string Constraints(RelationalEntityConfiguration configuration, RelationalColumn column) =>
+        (column.IsStoreGenerated ? _dialect.StoreGeneratedDdl(configuration.TableName, column) : string.Empty)
+        + (_dialect.CheckConstraintSql(_dialect.Quote(column.Name), column) is { } check ? " " + check : string.Empty);
+
+    /// <summary>Creates what the store-generated columns need before their table (a sequence object).</summary>
+    private async Task EnsurePrerequisitesAsync(DbConnection connection, RelationalEntityConfiguration configuration,
+        IEnumerable<RelationalColumn> columns, CancellationToken cancellationToken)
+    {
+        foreach (var column in columns.Where(column => column.IsStoreGenerated))
+        {
+            foreach (var sql in _dialect.StoreGeneratedPrerequisiteSql(configuration.TableName, column))
+            {
+                await ExecuteAsync(connection, sql, [], cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Creates the native enum types <paramref name="columns" /> use, before the DDL that uses them, and has
+    ///     the driver read the types again so the rows written next can carry them.
+    /// </summary>
+    private async Task EnsureEnumTypesAsync(DbConnection connection, IEnumerable<RelationalColumn> columns,
+        CancellationToken cancellationToken)
+    {
+        var created = false;
+        foreach (var native in columns.Where(column => column.Converter is null)
+                     .Select(column => RelationalNativeEnum.EnumOf(column.StoredType)).OfType<Type>().Distinct()
+                     .Select(_dialect.NativeEnumOf).OfType<RelationalNativeEnum>())
+        {
+            if (_dialect.CreateEnumTypeSql(native) is { } sql)
+            {
+                await ExecuteAsync(connection, sql, [], cancellationToken).ConfigureAwait(false);
+                created = true;
+            }
+        }
+
+        if (created)
+        {
+            await _dialect.ReloadTypesAsync(connection, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private string CreateIndex(EnsureIndexOperation operation)

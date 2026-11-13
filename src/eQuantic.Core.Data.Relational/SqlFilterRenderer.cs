@@ -109,7 +109,27 @@ internal static class SqlFilterRenderer
                            ?? throw new NotSupportedException($"'{configuration.EntityType.Name}' has no mapped member '{member}'.")).Name);
 
         // A converted member's filter values bind as their stored form — the domain type never reaches the driver.
-        object? Stored(string member, object? value) => configuration.ColumnFor(member)?.Store(value) ?? value;
+        object? Stored(string member, object? value)
+        {
+            if (configuration.ColumnFor(member) is not { } column)
+            {
+                return value;
+            }
+
+            if (column.Converter is not null)
+            {
+                return column.Store(value);
+            }
+
+            // C# compiles a comparison with an enum member into one of numbers ((int)x.State == 1), so the value
+            // arrives as the number. A native enum column compares only with its own type: the value goes back
+            // to being the enum, which the driver sends as its label.
+            var type = Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType;
+            return value is not null and not Enum && type.IsEnum
+                                                   && dialect.NativeEnums.Any(native => native.EnumType == type)
+                ? Enum.ToObject(type, value)
+                : value;
+        }
 
         string Bind(object? value)
         {

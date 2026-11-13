@@ -301,7 +301,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
                     {
                         if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                         {
-                            AssignGeneratedKey(write, reader.GetValue(0));
+                            AssignReadBack(write, reader);
                         }
 
                         await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
@@ -387,10 +387,11 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             return 0;
         }
 
-        // A generated key has no value to send and none comes back, so the column is simply not part of the load.
-        var columns = configuration.KeyIsGenerated
-            ? configuration.Columns.Where(column => column != configuration.Key).ToList()
-            : configuration.Columns.ToList();
+        // A generated key or a store-generated column has no value to send and none comes back, so it is simply
+        // not part of the load: the store assigns it.
+        var columns = configuration.Columns
+            .Where(column => !(configuration.KeyIsGenerated && column == configuration.Key) && !column.IsStoreGenerated)
+            .ToList();
 
         var rows = new List<object?[]>(materialized.Count);
         foreach (var entity in materialized)
@@ -587,21 +588,30 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         {
             case PendingWriteKind.Insert:
             {
-                var columns = configuration.KeyIsGenerated
-                    ? configuration.Columns.Where(column => column != key).ToList()
-                    : configuration.Columns.ToList();
+                // What the store assigns is not sent: it is read back, the generated key first.
+                var columns = configuration.Columns
+                    .Where(column => !(configuration.KeyIsGenerated && column == key) && !column.IsStoreGenerated)
+                    .ToList();
+                var readBack = ReadBack(configuration);
                 var names = string.Join(", ", columns.Select(column => Dialect.Quote(column.Name)));
                 var values = string.Join(", ", columns.Select(column => Bind(column.Read(write.Entity))));
+                // A dialect without RETURNING reads the row back by its key, in the same batch.
+                var keyPredicate = readBack.Count > 0 && Dialect.ReadsBackByKey && !configuration.KeyIsGenerated
+                    ? string.Join(" AND ", configuration.Keys.Select(part => $"{Dialect.Quote(part.Name)} = {Bind(part.Read(write.Entity))}"))
+                    : null;
                 command.CommandText = Dialect.InsertSql(Dialect.Quote(configuration.TableName), names, values,
-                    configuration.KeyIsGenerated ? Dialect.Quote(key.Name) : null);
-                returning = configuration.KeyIsGenerated;
+                    readBack.Select(column => Dialect.Quote(column.Name)).ToList(), keyPredicate);
+                returning = readBack.Count > 0;
                 break;
             }
 
             case PendingWriteKind.Update:
             {
                 // The token it read goes into the WHERE; the bumped value goes into the SET (written back on success).
-                var columns = configuration.Columns.Where(column => !configuration.Keys.Contains(column) && column != token).ToList();
+                // A store-generated column keeps the value the store assigned: an update never writes it.
+                var columns = configuration.Columns
+                    .Where(column => !configuration.Keys.Contains(column) && column != token && !column.IsStoreGenerated)
+                    .ToList();
                 var set = string.Join(", ", columns.Select(column =>
                     $"{Dialect.Quote(column.Name)} = {Bind(column.Read(write.Entity))}"));
                 var where = string.Empty;
@@ -669,11 +679,31 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         return Guid.NewGuid();
     }
 
-    private static void AssignGeneratedKey(PendingWrite write, object value)
+    /// <summary>The columns an insert reads back, in the order it returns them: a generated key, then the store-generated columns.</summary>
+    private static List<RelationalColumn> ReadBack(RelationalEntityConfiguration configuration)
     {
-        var property = write.Configuration.Key.Property;
-        var target = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-        property.SetValue(write.Entity, target.IsInstanceOfType(value) ? value : Convert.ChangeType(value, target));
+        var columns = new List<RelationalColumn>();
+        if (configuration.KeyIsGenerated)
+        {
+            columns.Add(configuration.Key);
+        }
+
+        columns.AddRange(configuration.Columns.Where(column => column.IsStoreGenerated));
+        return columns;
+    }
+
+    /// <summary>Assigns the values an insert returned onto its entity, column by column in <see cref="ReadBack" />'s order.</summary>
+    private static void AssignReadBack(PendingWrite write, DbDataReader reader)
+    {
+        var columns = ReadBack(write.Configuration);
+        for (var ordinal = 0; ordinal < columns.Count; ordinal++)
+        {
+            var column = columns[ordinal];
+            var value = reader.IsDBNull(ordinal)
+                ? null
+                : RelationalMaterializer.Cell(column, reader.GetValue(ordinal), column.Property.PropertyType);
+            column.Property.SetValue(write.Entity, value);
+        }
     }
 
     // -------------------------------------------------------------- dispose

@@ -36,9 +36,10 @@ public sealed class EntityKeyAttribute : Attribute
 
 /// <summary>
 ///     The member's stored name — a column (relational), a document field (MongoDB) — when the provider's
-///     naming convention does not fit.
+///     naming convention does not fit. On a member of an enum declared native (relational
+///     <c>Enum&lt;TEnum&gt;(...)</c>), it is the label the enum type stores for that member.
 /// </summary>
-[AttributeUsage(AttributeTargets.Property)]
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
 public sealed class StoredAsAttribute(string name) : Attribute
 {
     /// <summary>The stored name.</summary>

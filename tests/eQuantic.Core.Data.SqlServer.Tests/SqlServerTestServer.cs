@@ -42,11 +42,87 @@ public sealed class Ticket : IEntity<long>
 }
 
 /// <summary>The relational mapping shared by the integration tests.</summary>
+/// <summary>A run's state, stored as its labels by the annotation on the enum.</summary>
+[Modeling.EnumType]
+public enum RunState
+{
+    Queued,
+    [Modeling.StoredAs("in_progress")]
+    InProgress,
+    Completed,
+}
+
+/// <summary>A delivery channel, stored as its labels by the model builder's <c>Enum&lt;Channel&gt;()</c>.</summary>
+public enum Channel
+{
+    Email,
+    Sms,
+}
+
+/// <summary>A weekday, kept as a plain enum: stored as its number.</summary>
+public enum Weekday
+{
+    Monday = 1,
+    Tuesday = 2,
+}
+
+/// <summary>Enums stored as labels, JSON members, and members the store fills, beside a client key.</summary>
+public sealed class RunRecord : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public RunState State { get; set; }
+
+    public RunState? Previous { get; set; }
+
+    public Channel Channel { get; set; }
+
+    public Weekday Day { get; set; }
+
+    public System.Text.Json.JsonDocument? Payload { get; set; }
+
+    public System.Text.Json.Nodes.JsonNode? Steps { get; set; }
+
+    public System.Text.Json.JsonElement? Meta { get; set; }
+
+    [Modeling.StoreGenerated]
+    public long Sequence { get; set; }
+
+    [Modeling.StoreGenerated]
+    public DateTime RecordedAt { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A generated key read back with the store-generated members after it (SQL Server: OUTPUT INSERTED).</summary>
+public sealed class Receipt : IEntity<long>
+{
+    public long Id { get; set; }
+
+    public string Note { get; set; } = "";
+
+    public long Number { get; set; }
+
+    public DateTime IssuedAt { get; set; }
+
+    public long GetKey() => Id;
+
+    public void SetKey(long key) => Id = key;
+}
+
 internal static class TestSchema
 {
     public static void Configure(RelationalModelBuilder builder) => builder
         .Entity<SaleOrder>(entity => entity.Table("sale_orders"))
-        .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true));
+        .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
+        .Enum<Channel>()
+        .Entity<RunRecord>(_ => { })
+        .Entity<Receipt>(entity => entity
+            .Key(x => x.Id, generated: true)
+            .Generated(x => x.Number)
+            .Generated(x => x.IssuedAt, Modeling.StoreValue.Clock));
 }
 
 /// <summary>The schema migration the runner discovers.</summary>
@@ -59,6 +135,10 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
             .EnsureCollection()
             .Index(x => x.Customer))
         .For<Ticket>(ticket => ticket
+            .EnsureCollection())
+        .For<RunRecord>(run => run
+            .EnsureCollection())
+        .For<Receipt>(receipt => receipt
             .EnsureCollection());
 }
 

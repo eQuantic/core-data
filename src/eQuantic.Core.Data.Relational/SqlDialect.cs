@@ -289,11 +289,155 @@ public abstract class SqlDialect
         throw new NotSupportedException($"{GetType().Name} has no native tuple comparison; the clause runs client-side.");
 
     /// <summary>
-    ///     Whether a member of this CLR type maps as a <b>document column</b> (e.g. a scalar-keyed dictionary
-    ///     into PostgreSQL <c>jsonb</c>). The base dialect maps none — such members stay unmapped navigations.
+    ///     Whether a member of this CLR type maps as a <b>document column</b>. Every dialect stores a JSON member
+    ///     (<c>JsonDocument</c>, <c>JsonElement</c>, <c>JsonNode</c>) in its own JSON form; a dialect may add more
+    ///     (PostgreSQL: scalar-keyed dictionaries as <c>jsonb</c>).
     /// </summary>
     /// <param name="type">The member's CLR type.</param>
-    public virtual bool IsDocumentColumn(Type type) => false;
+    public virtual bool IsDocumentColumn(Type type) => Modeling.JsonMembers.Is(type);
+
+    private readonly Dictionary<Type, RelationalNativeEnum> _nativeEnums = [];
+
+    /// <summary>
+    ///     Declares an enum stored as its labels (<see cref="Modeling.EnumTypeAttribute" /> or
+    ///     <c>Enum&lt;TEnum&gt;(...)</c>): each dialect gives it its own column (<see cref="EnumSqlType" />) and
+    ///     binds its values as labels (<see cref="BindValue" />).
+    /// </summary>
+    /// <param name="declaration">The enum, its stored type name and labels.</param>
+    public void DeclareNativeEnum(RelationalNativeEnum declaration)
+    {
+        if (_nativeEnums.TryGetValue(declaration.EnumType, out var declared)
+            && !string.Equals(declared.StoredName, declaration.StoredName, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"'{declaration.EnumType.Name}' is already declared stored as labels under \"{declared.StoredName}\", " +
+                $"and cannot also be \"{declaration.StoredName}\".");
+        }
+
+        _nativeEnums[declaration.EnumType] = declaration;
+    }
+
+    /// <summary>The enums declared stored as their labels.</summary>
+    public IReadOnlyCollection<RelationalNativeEnum> NativeEnums => _nativeEnums.Values;
+
+    /// <summary>The declaration of <paramref name="type" /> (nullable unwrapped) when it is stored as its labels.</summary>
+    /// <param name="type">A CLR type.</param>
+    public RelationalNativeEnum? NativeEnumOf(Type type) =>
+        _nativeEnums.GetValueOrDefault(Nullable.GetUnderlyingType(type) ?? type);
+
+    /// <summary>
+    ///     The column type of an enum stored as its labels. Text wide enough for its longest label by default,
+    ///     restricted to the labels by <see cref="CheckConstraintSql" />; a dialect with enum types overrides it.
+    /// </summary>
+    /// <param name="declaration">The enum.</param>
+    public virtual string EnumSqlType(RelationalNativeEnum declaration) =>
+        SizedTextType(Math.Max(1, declaration.Labels.Values.Max(label => label.Length)));
+
+    /// <summary>Whether <see cref="EnumSqlType" /> already restricts the column to the labels (an enum type does).</summary>
+    public virtual bool EnumTypeRestrictsLabels => false;
+
+    /// <summary>
+    ///     The column-level <c>CHECK</c> a column carries, or <c>null</c>: by default, an enum stored as text is held
+    ///     to its labels. A dialect adds its own (SQL Server: a JSON member's text must be JSON).
+    /// </summary>
+    /// <param name="quotedColumn">The quoted column.</param>
+    /// <param name="column">The column.</param>
+    public virtual string? CheckConstraintSql(string quotedColumn, RelationalColumn column) =>
+        !EnumTypeRestrictsLabels && NativeEnumOf(column.StoredType) is { } native
+            ? $"CHECK ({quotedColumn} IN ({string.Join(", ", native.Labels.Values.Select(TextLiteral))}))"
+            : null;
+
+    /// <summary>A text literal (quotes doubled), for DDL that cannot take parameters.</summary>
+    /// <param name="text">The text.</param>
+    public virtual string TextLiteral(string text) => "'" + text.Replace("'", "''") + "'";
+
+    /// <summary>
+    ///     The DDL creating an enum type when it does not exist yet, or <c>null</c> when the dialect has none. A
+    ///     type that exists is left as it is: a migration adds nothing to it and removes nothing from it.
+    /// </summary>
+    /// <param name="declaration">The enum.</param>
+    public virtual string? CreateEnumTypeSql(RelationalNativeEnum declaration) => null;
+
+    /// <summary>
+    ///     Makes the driver read the store's types again after a migration created some (an enum type the
+    ///     data source looked for before it existed). Nothing to do by default.
+    /// </summary>
+    /// <param name="connection">The migration's open connection.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    public virtual Task ReloadTypesAsync(System.Data.Common.DbConnection connection, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    /// <summary>
+    ///     How the store fills a store-generated column, as the DDL after its type: <c>NOT NULL</c> (the store always
+    ///     gives it a value) and then the declared default, the dialect's sequence, or the dialect's clock.
+    /// </summary>
+    /// <param name="table">The table's stored name, unquoted.</param>
+    /// <param name="column">The column.</param>
+    public string StoreGeneratedDdl(string table, RelationalColumn column) =>
+        " NOT NULL " + (column.StoreDefaultSql is { } defaultSql
+            ? "DEFAULT " + defaultSql
+            : column.StoreValue == Modeling.StoreValue.Sequence
+                ? SequenceDdl(table, column)
+                : "DEFAULT " + ClockSql(column.StoredType));
+
+    /// <summary>The DDL after <c>NOT NULL</c> that numbers a store-generated integral column (an identity by default).</summary>
+    /// <param name="table">The table's stored name, unquoted.</param>
+    /// <param name="column">The column.</param>
+    public virtual string SequenceDdl(string table, RelationalColumn column) => GeneratedKeyDdl;
+
+    /// <summary>What has to exist before a table with this store-generated column is created (a sequence object).</summary>
+    /// <param name="table">The table's stored name, unquoted.</param>
+    /// <param name="column">The column.</param>
+    public virtual IReadOnlyList<string> StoreGeneratedPrerequisiteSql(string table, RelationalColumn column) => [];
+
+    /// <summary>The expression for the store's clock, in UTC, as a default for a column of <paramref name="type" />.</summary>
+    /// <param name="type">The column's CLR type (<c>DateTime</c> or <c>DateTimeOffset</c>).</param>
+    public abstract string ClockSql(Type type);
+
+    /// <summary>
+    ///     Whether an insert can hand values the store assigned back to the caller (<c>RETURNING</c>,
+    ///     <c>OUTPUT INSERTED</c>, or a read of the row by its key in the same batch): what a database-generated
+    ///     key and a store-generated column need.
+    /// </summary>
+    public virtual bool ReadsBackInsertedValues => false;
+
+    /// <summary>
+    ///     Whether the dialect reads inserted values back by reading the row by its key after the insert (no
+    ///     <c>RETURNING</c>): the insert is then handed its key predicate. Such a dialect cannot read back a
+    ///     generated key.
+    /// </summary>
+    public virtual bool ReadsBackByKey => false;
+
+    /// <summary>
+    ///     Builds an INSERT that reads back every column in <paramref name="returning" />, in order: a generated
+    ///     key first, then the store-generated columns. With none it is a plain INSERT, and with one it is
+    ///     <see cref="InsertSql(string, string, string, string?)" />; a dialect that reads back several overrides it.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="columns">The quoted column list.</param>
+    /// <param name="values">The bound value list.</param>
+    /// <param name="returning">The quoted columns to read back.</param>
+    /// <param name="keyPredicate">The row's key predicate, for a dialect that <see cref="ReadsBackByKey" />.</param>
+    public virtual string InsertSql(string quotedTable, string columns, string values, IReadOnlyList<string> returning,
+        string? keyPredicate = null) =>
+        returning.Count switch
+        {
+            0 => InsertSql(quotedTable, columns, values, (string?)null),
+            1 => InsertSql(quotedTable, columns, values, returning[0]),
+            _ => throw new NotSupportedException(
+                $"{GetType().Name} cannot read several values back from an insert; declare client-assigned values instead."),
+        };
+
+    /// <summary>
+    ///     The CLR type a bulk loader declares for a column: the stored type, except where a value is bound in
+    ///     another form (an enum stored as its labels and a JSON member are bound as text).
+    /// </summary>
+    /// <param name="column">The column.</param>
+    public virtual Type BoundType(RelationalColumn column)
+    {
+        var stored = Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType;
+        return NativeEnumOf(stored) is not null || Modeling.JsonMembers.Is(stored) ? typeof(string) : stored;
+    }
 
     /// <summary>
     ///     Configures a just-created parameter for a bound value — the hook a dialect uses to type values its
@@ -317,8 +461,16 @@ public abstract class SqlDialect
     public virtual string AlterColumnType(string quotedTable, string quotedColumn, string sqlType) =>
         $"ALTER TABLE {quotedTable} ALTER COLUMN {quotedColumn} TYPE {sqlType}";
 
-    /// <summary>Converts a value before binding (a dialect may need CLR-side coercion, e.g. arrays); identity by default.</summary>
-    public virtual object? BindValue(object? value) => value;
+    /// <summary>
+    ///     Converts a value before binding: an enum stored as its labels binds as its label, and a JSON member as its
+    ///     JSON text. A dialect adds its own coercions (or passes those through to a driver that maps them).
+    /// </summary>
+    public virtual object? BindValue(object? value) => value switch
+    {
+        Enum enumValue when NativeEnumOf(enumValue.GetType()) is not null => Modeling.EnumLabels.Label(enumValue),
+        _ when Modeling.JsonMembers.IsValue(value) => Modeling.JsonMembers.Text(value),
+        _ => value,
+    };
 
     private static string SnakeCase(string name)
     {

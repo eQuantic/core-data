@@ -69,6 +69,16 @@ public class SqlServerDialect : SqlDialect
             : $"INSERT INTO {quotedTable} ({columns}) OUTPUT INSERTED.{returningKey} VALUES ({values})";
 
     /// <inheritdoc />
+    public override bool ReadsBackInsertedValues => true;
+
+    /// <inheritdoc />
+    public override string InsertSql(string quotedTable, string columns, string values, IReadOnlyList<string> returning,
+        string? keyPredicate = null) =>
+        returning.Count == 0
+            ? $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})"
+            : $"INSERT INTO {quotedTable} ({columns}) OUTPUT {string.Join(", ", returning.Select(column => "INSERTED." + column))} VALUES ({values})";
+
+    /// <inheritdoc />
     public override string AlterColumnType(string quotedTable, string quotedColumn, string sqlType) =>
         $"ALTER TABLE {quotedTable} ALTER COLUMN {quotedColumn} {sqlType}";
 
@@ -81,8 +91,12 @@ public class SqlServerDialect : SqlDialect
         $"EXEC sp_rename '{quotedTable}', '{target}'";
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     The statement runs through <c>EXEC</c>: SQL Server refuses <c>NEXT VALUE FOR</c> (a store-generated
+    ///     column's sequence default) in a <c>CREATE TABLE</c> that sits directly under an <c>IF</c>.
+    /// </remarks>
     public override string CreateTableSql(string quotedTable, string columnsDdl) =>
-        $"IF OBJECT_ID(N'{quotedTable}', 'U') IS NULL CREATE TABLE {quotedTable} ({columnsDdl})";
+        $"IF OBJECT_ID(N'{quotedTable}', 'U') IS NULL EXEC(N'{$"CREATE TABLE {quotedTable} ({columnsDdl})".Replace("'", "''")}')";
 
     /// <inheritdoc />
     public override string CreateIndexSql(string quotedName, string quotedTable, string columns, bool unique,
@@ -132,8 +146,7 @@ public class SqlServerDialect : SqlDialect
         var table = new System.Data.DataTable();
         for (var index = 0; index < columns.Count; index++)
         {
-            var stored = Nullable.GetUnderlyingType(columns[index].StoredType) ?? columns[index].StoredType;
-            table.Columns.Add(columns[index].Name, stored);
+            table.Columns.Add(columns[index].Name, BoundType(columns[index]));
             bulk.ColumnMappings.Add(index, columns[index].Name);
         }
 
@@ -152,7 +165,13 @@ public class SqlServerDialect : SqlDialect
 
         if (underlying.IsEnum)
         {
-            return "int";
+            return NativeEnumOf(underlying) is { } native ? EnumSqlType(native) : "int";
+        }
+
+        // SQL Server keeps JSON as text, held to being JSON by an ISJSON check (CheckConstraintSql).
+        if (IsDocumentColumn(underlying))
+        {
+            return "nvarchar(max)";
         }
 
         return underlying switch
@@ -179,7 +198,46 @@ public class SqlServerDialect : SqlDialect
     /// <inheritdoc />
     public override object? BindValue(object? value) => value switch
     {
-        Enum enumValue => Convert.ToInt32(enumValue),
-        _ => value,
+        Enum enumValue when NativeEnumOf(enumValue.GetType()) is null => Convert.ToInt32(enumValue),
+        _ => base.BindValue(value),
     };
+
+    /// <inheritdoc />
+    public override string TextLiteral(string text) => "N'" + text.Replace("'", "''") + "'";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     An enum stored as its labels is held to them, and a JSON member's text to being JSON. A JSON member may
+    ///     hold a scalar, which <c>ISJSON</c> accepts only with the <c>VALUE</c> type of SQL Server 2022; wrapped in
+    ///     brackets, any JSON value is an array that every <c>ISJSON</c> since SQL Server 2016 accepts.
+    /// </remarks>
+    public override string? CheckConstraintSql(string quotedColumn, RelationalColumn column) =>
+        base.CheckConstraintSql(quotedColumn, column)
+        ?? (column.Converter is null && IsDocumentColumn(column.StoredType)
+            ? $"CHECK (ISJSON(CONCAT(N'[', {quotedColumn}, N']')) = 1)"
+            : null);
+
+    /// <inheritdoc />
+    public override string ClockSql(Type type) =>
+        (Nullable.GetUnderlyingType(type) ?? type) == typeof(DateTimeOffset) ? "SYSDATETIMEOFFSET()" : "SYSUTCDATETIME()";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     A sequence object rather than an identity: a table holds one identity column, which a generated key
+    ///     may already be.
+    /// </remarks>
+    public override string SequenceDdl(string table, RelationalColumn column) =>
+        $"DEFAULT (NEXT VALUE FOR {Quote(SequenceName(table, column))})";
+
+    /// <inheritdoc />
+    public override IReadOnlyList<string> StoreGeneratedPrerequisiteSql(string table, RelationalColumn column) =>
+        column.StoreDefaultSql is null && column.StoreValue == eQuantic.Core.Data.Modeling.StoreValue.Sequence
+            ?
+            [
+                $"IF OBJECT_ID(N'{SequenceName(table, column).Replace("'", "''")}', N'SO') IS NULL " +
+                $"CREATE SEQUENCE {Quote(SequenceName(table, column))} AS {SqlType(column.StoredType)} START WITH 1 INCREMENT BY 1",
+            ]
+            : [];
+
+    private static string SequenceName(string table, RelationalColumn column) => $"{table}_{column.Name}_seq";
 }

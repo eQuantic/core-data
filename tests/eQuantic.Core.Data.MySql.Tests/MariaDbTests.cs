@@ -29,7 +29,7 @@ public sealed class MariaDbTests
             await _container.StartAsync();
 
             var services = new ServiceCollection();
-            services.AddMariaDbDatabase(_container.GetConnectionString(), TestSchema.Configure);
+            services.AddMariaDbDatabase(_container.GetConnectionString(), TestSchema.ConfigureMariaDb);
             services.AddMySqlRepositories();
             services.AddMySqlMigrations(typeof(MariaDbTests).Assembly);
             _provider = services.BuildServiceProvider();
@@ -98,5 +98,46 @@ public sealed class MariaDbTests
 
         var found = await repo.GetFilteredAsync(x => x.Customer == marker || x.Total > 9999m);
         Assert.That(found.Single().Total, Is.EqualTo(12.5m), "native OR pushdown over the MariaDB dialect");
+    }
+
+    private IAsyncRepository<RunRecord, Guid> Runs => _scope!.ServiceProvider.GetRequiredService<IAsyncRepository<RunRecord, Guid>>();
+
+    private Task Commit() => _scope!.ServiceProvider.GetRequiredService<MySqlDefaultUnitOfWork>().CommitAsync();
+
+    private async Task<object?> Scalar(string sql)
+    {
+        await using var command = _scope!.ServiceProvider.GetRequiredService<System.Data.Common.DbDataSource>().CreateCommand(sql);
+        return await command.ExecuteScalarAsync();
+    }
+
+    [Test]
+    public Task Enums_are_stored_as_labels() => NativeTypesScenarios.EnumsAreStoredAsLabels(Runs, Commit, Scalar);
+
+    [Test]
+    public Task Json_members_round_trip() => NativeTypesScenarios.JsonMembersRoundTrip(Runs, Commit);
+
+    [Test]
+    public Task Store_generated_members_are_read_back_with_returning() =>
+        NativeTypesScenarios.StoreGeneratedMembersAreTheStores(Runs, Commit, Scalar);
+
+    [Test]
+    public async Task A_generated_key_is_read_back_with_the_store_generated_members_after_it()
+    {
+        // Receipt's table is MariaDB's alone: MySQL cannot read a generated key back, so the shared setup leaves it out.
+        await _scope!.ServiceProvider.GetRequiredService<IMigrationExecutor>()
+            .ApplyAsync([new EnsureCollectionOperation(typeof(Receipt))]);
+        var repo = _scope.ServiceProvider.GetRequiredService<IAsyncRepository<Receipt, long>>();
+
+        var first = new Receipt { Note = "first" };
+        var second = new Receipt { Note = "second" };
+        await repo.AddAsync(first);
+        await repo.AddAsync(second);
+        await Commit();
+
+        Assert.That(first.Id, Is.GreaterThan(0L));
+        Assert.That(second.Number, Is.Not.EqualTo(first.Number));
+        Assert.That(first.Number, Is.GreaterThan(0L), "the sequence object numbered it");
+        Assert.That(first.IssuedAt, Is.Not.EqualTo(default(DateTime)));
+        Assert.That((await repo.GetAsync(second.Id))!.Number, Is.EqualTo(second.Number), "each value went to its own member");
     }
 }

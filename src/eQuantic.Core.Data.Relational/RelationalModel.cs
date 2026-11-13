@@ -50,6 +50,24 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     /// </summary>
     public object? DefaultValue { get; init; }
 
+    /// <summary>
+    ///     Whether the store assigns this column's value on insert (an identity, a sequence, a default), from
+    ///     <c>Generated(...)</c>: inserts leave it out and read it back, updates never write it.
+    /// </summary>
+    public bool IsStoreGenerated { get; init; }
+
+    /// <summary>
+    ///     What the store assigns a store-generated column (<see cref="Modeling.StoreValue.Sequence" /> or
+    ///     <see cref="Modeling.StoreValue.Clock" />) when no <see cref="StoreDefaultSql" /> is declared.
+    /// </summary>
+    public Modeling.StoreValue StoreValue { get; init; }
+
+    /// <summary>
+    ///     The default expression the store assigns a store-generated column with, as SQL (<c>now()</c>), or
+    ///     <c>null</c> for an identity column. Only the migrations read it.
+    /// </summary>
+    public string? StoreDefaultSql { get; init; }
+
     /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
     public object? Read(object entity)
     {
@@ -196,6 +214,12 @@ public sealed class RelationalModel
     public string Explain(SqlDialect dialect)
     {
         var report = new System.Text.StringBuilder();
+        foreach (var native in dialect.NativeEnums.OrderBy(entry => entry.EnumType.Name))
+        {
+            report.AppendLine($"{native.EnumType.Name} -> stored as labels, {dialect.EnumSqlType(native)} (" +
+                              string.Join(", ", native.Labels.Select(label => label.Key == label.Value ? label.Key : $"{label.Key} '{label.Value}'")) + ")");
+        }
+
         foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
         {
             report.AppendLine($"{configuration.EntityType.Name} -> table \"{configuration.TableName}\"");
@@ -221,7 +245,12 @@ public sealed class RelationalModel
                 var converted = column.Converter is not null
                     ? $" (converted from {column.Property.PropertyType.Name})"
                     : string.Empty;
-                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column)}){converted}");
+                var generated = column.IsStoreGenerated
+                    ? column.StoreDefaultSql is { } sql
+                        ? $" store-generated (default {sql})"
+                        : column.StoreValue == Modeling.StoreValue.Sequence ? " store-generated (sequence)" : " store-generated (clock)"
+                    : string.Empty;
+                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column)}){converted}{generated}");
             }
 
             if (configuration.ClusteringColumns.Count > 0)
@@ -264,6 +293,21 @@ public sealed class RelationalModelBuilder
 
     internal RelationalModelBuilder(SqlDialect dialect) => _dialect = dialect;
 
+    /// <summary>
+    ///     Declares <typeparamref name="TEnum" /> stored as its labels, as <see cref="Modeling.EnumTypeAttribute" />
+    ///     does on the enum: written, read and filtered by each member's <c>[StoredAs]</c> label (or its own name),
+    ///     in the dialect's own column (a PostgreSQL enum type, a MySQL <c>ENUM(...)</c>, or text the labels
+    ///     restrict), which the migrations create. An enum declared neither way is stored as its number.
+    /// </summary>
+    /// <typeparam name="TEnum">The enum.</typeparam>
+    /// <param name="storedName">The store's type name; the dialect's naming of the enum's name when omitted.</param>
+    /// <returns>The same builder for chaining.</returns>
+    public RelationalModelBuilder Enum<TEnum>(string? storedName = null) where TEnum : struct, global::System.Enum
+    {
+        _dialect.DeclareNativeEnum(RelationalNativeEnum.Describe<TEnum>(storedName ?? _dialect.TableName(typeof(TEnum).Name)));
+        return this;
+    }
+
     /// <summary>Maps <typeparamref name="TEntity" /> to a table and key.</summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="configure">The fluent configuration.</param>
@@ -293,6 +337,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, (int Length, int Precision, int Scale)> _facets = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<string>> _previousNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, object?> _defaults = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (Modeling.StoreValue Value, string? Sql)> _generated = new(StringComparer.OrdinalIgnoreCase);
     private List<string>? _keyMembers;
     private string? _table;
     private string? _keyMember;
@@ -352,6 +397,11 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Modeling.DefaultValueAttribute>() is { } fallback)
             {
                 _defaults[property.Name] = fallback.Value;
+            }
+
+            if (property.GetCustomAttribute<Modeling.StoreGeneratedAttribute>() is { } generated)
+            {
+                _generated[property.Name] = (generated.Value, null);
             }
         }
 
@@ -476,6 +526,41 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>
+    ///     Declares a column outside the key whose value the store assigns on insert, as
+    ///     <see cref="Modeling.StoreGeneratedAttribute" /> does: the next number of a sequence for an integral member,
+    ///     the store's clock for a date (or the kind given). Inserts leave the column out and read the store's value
+    ///     back onto the entity, updates never write it, and a bulk insert leaves it to the store.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="value">What the store assigns; inferred from the member's type by default.</param>
+    public RelationalEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
+        Modeling.StoreValue value = Modeling.StoreValue.Inferred)
+    {
+        _generated[selector.GetMemberName()] = (value, null);
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a store-generated column whose default is the given SQL expression (a relational escape hatch
+    ///     for what no <see cref="Modeling.StoreValue" /> says, such as a schema another tool created). It behaves as
+    ///     any store-generated column: left out of inserts, read back, never written by an update.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="defaultSql">The store's default expression, as SQL in this dialect.</param>
+    public RelationalEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector, string defaultSql)
+    {
+        if (string.IsNullOrWhiteSpace(defaultSql))
+        {
+            throw new ArgumentException("A store default needs its SQL expression.", nameof(defaultSql));
+        }
+
+        _generated[selector.GetMemberName()] = (Modeling.StoreValue.Inferred, defaultSql);
+        return this;
+    }
+
     /// <summary>Excludes a member from the mapping (navigations are excluded automatically; this is for the rest).</summary>
     /// <typeparam name="TMember">The member type.</typeparam>
     /// <param name="selector">The member selector.</param>
@@ -569,6 +654,20 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
 
     internal RelationalEntityConfiguration<TEntity> Build()
     {
+        // A JSON member the dialect cannot store would otherwise fall out of the mapping without a word: the
+        // insert writes NULL, the read returns nothing, and nothing fails. Refused here instead, by name.
+        foreach (var property in typeof(TEntity).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property is { CanRead: true, CanWrite: true } && Modeling.JsonMembers.Is(property.PropertyType)
+                && !_ignored.Contains(property.Name) && !_converters.ContainsKey(property.Name)
+                && !_dialect.IsDocumentColumn(property.PropertyType))
+            {
+                throw new NotSupportedException(
+                    $"Entity '{typeof(TEntity).Name}' has the JSON member '{property.Name}', and {_dialect.System} has no " +
+                    "JSON document column to store it in. Map it with Converts(...) to a string, or Ignore(...) it.");
+            }
+        }
+
         // Scalar members (and collections of scalars, for stores with array columns) map to columns; entity
         // references and entity collections are navigations — loaded through Include, never selected.
         var columns = typeof(TEntity)
@@ -589,9 +688,51 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                     Scale = facet.Scale,
                     PreviousNames = _previousNames.TryGetValue(property.Name, out var renamed) ? renamed : [],
                     DefaultValue = _defaults.TryGetValue(property.Name, out var fallback) ? fallback : null,
+                    IsStoreGenerated = _generated.ContainsKey(property.Name),
+                    StoreValue = _generated.TryGetValue(property.Name, out var generated) && generated.Sql is null
+                        ? Modeling.StoreGeneratedAttribute.Resolve(generated.Value,
+                            _converters.TryGetValue(property.Name, out var stored) ? stored.StoredType : property.PropertyType,
+                            $"{typeof(TEntity).Name}.{property.Name}")
+                        : Modeling.StoreValue.Inferred,
+                    StoreDefaultSql = generated.Sql,
                 };
             })
             .ToList();
+
+        foreach (var member in _generated.Keys)
+        {
+            if (columns.All(candidate => !string.Equals(candidate.Property.Name, member, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' to declare store-generated.");
+            }
+
+            if (!_dialect.ReadsBackInsertedValues)
+            {
+                throw new NotSupportedException(
+                    $"'{typeof(TEntity).Name}.{member}' is declared store-generated, and {_dialect.System} cannot read a value " +
+                    "back from an insert. Assign the value on the client instead.");
+            }
+
+            if (_dialect.ReadsBackByKey && _keyIsGenerated)
+            {
+                throw new NotSupportedException(
+                    $"'{typeof(TEntity).Name}.{member}' is declared store-generated, and {_dialect.System} reads it back by the " +
+                    "row's key, which the store generates here and cannot hand back. Assign the key on the client " +
+                    "(a Guid, for one) and the store-generated members are read back.");
+            }
+        }
+
+        // An enum declared stored as its labels on its own type ([EnumType]) is declared here, the first time a
+        // column uses it; Enum<TEnum>(...) on the model builder declares it ahead and wins.
+        foreach (var column in columns.Where(column => column.Converter is null))
+        {
+            if (RelationalNativeEnum.EnumOf(column.StoredType) is { } enumType && _dialect.NativeEnumOf(enumType) is null
+                && Modeling.EnumTypeAttribute.For(enumType) is { } declared)
+            {
+                _dialect.DeclareNativeEnum(RelationalNativeEnum.Describe(enumType, declared.Name ?? _dialect.TableName(enumType.Name)));
+            }
+        }
 
         foreach (var converted in _converters)
         {
@@ -644,6 +785,13 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                               ?? throw new InvalidOperationException(
                                   $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' in the composite key."))
             .ToList();
+
+        if (keys.Concat(concurrencyToken is null ? [] : [concurrencyToken]).FirstOrDefault(column => column.IsStoreGenerated) is { } misplaced)
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(TEntity).Name}.{misplaced.Property.Name}' is a key or the concurrency token, and cannot also be " +
+                "declared store-generated. A key the store generates is declared with Key(x => x.Member, generated: true).");
+        }
 
         var clusteringColumns = _clusteringMembers
             .Select(declared => new RelationalClusteringColumn(
