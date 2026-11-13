@@ -14,6 +14,7 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
 | GROUP BY / HAVING / UNION | fully native |
 | Paging | `OFFSET … FETCH`; keyset continuation over the key |
 | Upserts | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` (race-free; a filtered unique index is the conflict filter); `InsertManyAsync(…, skipDuplicates: true)` is a `TRY…CATCH` per row; `UpdateAndGetAsync` is `UPDATE … OUTPUT INSERTED`; errors 2627/2601 are `DuplicateKeyException` — see [Upserts and write outcomes](../writing/upserts.md) |
+| Read shapes | shaped includes ranked with `ROW_NUMBER()`, relation counts as correlated subqueries, nulls placed by ordering on `CASE WHEN col IS NULL` (SQL Server has no `NULLS FIRST`), `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
 
 ## Dialect specifics
 

@@ -30,7 +30,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
     IAggregateReadRepository<TEntity>,
-    IGroupedReadRepository<TEntity>
+    IGroupedReadRepository<TEntity>,
+    IDistinctReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -53,39 +54,50 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, null, false, cancellationToken, IdPredicate(id)).ConfigureAwait(false)).FirstOrDefault();
+        (await SelectWindowAsync(options, 1, cancellationToken, IdPredicate(id)).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false);
+        await SelectWindowAsync(options, null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, null, false, cancellationToken, NotNull(filter)).ConfigureAwait(false);
+        await SelectWindowAsync(options, null, cancellationToken, NotNull(filter)).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, null, false, cancellationToken, NotNull(specification).SatisfiedBy()).ConfigureAwait(false);
+        await SelectWindowAsync(options, null, cancellationToken, NotNull(specification).SatisfiedBy()).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectMappedAsync(NotNull(map), options, null, null, false, cancellationToken).ConfigureAwait(false);
+    /// <remarks>
+    ///     A relation count in the map (<c>x.Versions.Count(v =&gt; v.DeletedAt == null)</c>) renders as a correlated
+    ///     <c>(SELECT COUNT(*) …)</c> in the select list: the database counts, and no related row is read.
+    /// </remarks>
+    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, null);
+        return await SelectMappedAsync(NotNull(map), options, limit, offset, false, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, null, false, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        (await SelectWindowAsync(options, 1, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
-    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectMappedAsync(NotNull(map), options, 1, null, false, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, 1);
+        return (await SelectMappedAsync(NotNull(map), options, limit, offset, false, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 2, null, false, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
+        (await SelectWindowAsync(options, 2, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
 
     /// <inheritdoc />
     public async Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
         var items = await SelectAsync(options, page.Take, page.Skip, true, cancellationToken).ConfigureAwait(false);
         return new PagedResult<TEntity>(items, total, page.PageIndex, page.PageSize);
@@ -94,6 +106,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public async Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
         var rows = await SelectMappedAsync(NotNull(map), options, page.Take, page.Skip, true, cancellationToken).ConfigureAwait(false);
         return new PagedResult<TResult>(rows, total, page.PageIndex, page.PageSize);
@@ -102,6 +115,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "CountAsync");
         var plan = GatedPlan(options, null);
         if (plan.Residual.Count == 0)
         {
@@ -119,12 +133,18 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     }
 
     /// <inheritdoc />
-    public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, null, false, cancellationToken).ConfigureAwait(false)).Count > 0;
+    public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        ReadShapes.RefuseRowWindow(options, "AnyAsync");
+        return (await SelectAsync(options, 1, null, false, cancellationToken).ConfigureAwait(false)).Count > 0;
+    }
 
     /// <inheritdoc />
-    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
+    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        ReadShapes.RefuseRowWindow(options, "AllAsync");
+        return (await SelectAsync(options, null, null, false, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
+    }
 
     /// <inheritdoc />
     public Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -222,6 +242,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         QueryOptions<TEntity>? options, CancellationToken cancellationToken,
         Func<RelationalColumn, string> aggregate, Func<object, TResult> convert, Func<List<TEntity>, TResult> clientFallback)
     {
+        ReadShapes.RefuseRowWindow(options, "an aggregate");
         var column = SumColumn(selector);
         if (column is not null)
         {
@@ -268,6 +289,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         {
             throw new NotSupportedException("Include does not apply to a grouped projection; drop the includes.");
         }
+
+        ReadShapes.RefuseRowWindow(options, "GroupByAsync");
 
         // Interpret first so the contract is uniform: only server-side aggregate shapes are accepted on every path.
         var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
@@ -453,6 +476,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 "Keyset paging orders by the key; custom sortings are not supported — use GetPagedAsync, or sort each page client-side.");
         }
 
+        ReadShapes.RefuseRowWindow(options, "GetPageAsync");
+
         if (_configuration.HasCompositeKey)
         {
             throw new NotSupportedException(
@@ -476,6 +501,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             throw new NotSupportedException("Include does not compose with streaming yet; use GetAllAsync or page explicitly.");
         }
 
+        ReadShapes.RefuseRowWindow(options, "GetStreamAsync");
         var plan = GatedPlan(options, null);
         var residuals = Compile(plan.Residual);
         var selected = _configuration.Columns;
@@ -510,6 +536,17 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             notes.Add($"Each include ({string.Join(", ", options.IncludePaths)}) runs as one follow-up IN query.");
         }
 
+        if (options is { IncludeShapes.Count: > 0 })
+        {
+            notes.Add($"Shaped includes ({string.Join(", ", options.IncludeShapes.Keys)}) carry their filter in the follow-up WHERE and " +
+                      "their order in its ORDER BY; a skip or a limit per parent ranks the rows with ROW_NUMBER() OVER (PARTITION BY the foreign key).");
+        }
+
+        if (options is { SkipCount: not null } or { TakeCount: not null })
+        {
+            notes.Add("Skip/Take render as the dialect's LIMIT/OFFSET; no count runs.");
+        }
+
         var plan = RelationalSql.Plan(_dialect, _configuration, options, null, global);
         var sql = SelectSql(_configuration.Columns, plan.Where, options, false, null, null);
 
@@ -535,6 +572,54 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             partitionScoped: false,
             notes);
     }
+
+    // ---------------------------------------------------------------- distinct values
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     Renders a <c>SELECT DISTINCT</c> of the selected columns under the read's <c>WHERE</c>: the database
+    ///     deduplicates and only the distinct values travel. A filter with a client-side residual (behind
+    ///     <c>.AllowClientEvaluation()</c>) fetches the selected and the residual's columns and deduplicates them in memory.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GetDistinctAsync<TResult>(Expression<Func<TEntity, TResult>> selector,
+        Expression<Func<TEntity, bool>>? filter = null, QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        NotNull(selector);
+        ReadShapes.RefuseForDistinct(options);
+        var members = MapColumns(selector) ?? throw new NotSupportedException(DistinctMembersOnly);
+        var plan = GatedPlan(options, filter);
+
+        if (plan.Residual.Count > 0)
+        {
+            var rows = await SelectAsync(options, null, null, false, cancellationToken, filter, members).ConfigureAwait(false);
+            return rows.Select(selector.Compile()).Distinct().ToList();
+        }
+
+        var selected = SelectedColumns(members, plan);
+        var projector = RelationalMapCompiler.GetOrCompile(selector, selected)
+                        ?? throw new NotSupportedException(DistinctMembersOnly);
+        var sql = $"SELECT DISTINCT {string.Join(", ", selected.Select(column => _dialect.Quote(column.Name)))}"
+                  + $" FROM {_dialect.Quote(_configuration.TableName)}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty);
+
+        return await UnitOfWork.RetryAsync<IReadOnlyList<TResult>>(write: false, async _ =>
+        {
+            await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            var values = new List<TResult>();
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                values.Add(projector(reader));
+            }
+
+            return values;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private const string DistinctMembersOnly =
+        "GetDistinctAsync selects mapped members: one (x => x.Repository), or several (x => new { x.Repository, x.IssueNumber }). " +
+        "Compute over the values after reading them.";
 
     // ---------------------------------------------------------------- synchronous reads (delegate)
 
@@ -600,6 +685,14 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     // ---------------------------------------------------------------- query plumbing
 
+    /// <summary>An entity read that honours the options' <c>Skip</c>/<c>Take</c> within the read's own limit.</summary>
+    private Task<List<TEntity>> SelectWindowAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
+        Expression<Func<TEntity, bool>>? extraFilter = null)
+    {
+        var (offset, effective) = ReadShapes.Window(options, limit);
+        return SelectAsync(options, effective, offset, false, cancellationToken, extraFilter);
+    }
+
     internal Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
         bool orderByKeyWhenUnsorted, CancellationToken cancellationToken,
         Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null) =>
@@ -617,6 +710,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         QueryOptions<TEntity>? options, int? limit, int? offset, bool orderByKeyWhenUnsorted,
         CancellationToken cancellationToken)
     {
+        if (RelationCountInterpreter.Interpret(map, IsRelation) is { } counted)
+        {
+            return await SelectCountedAsync(counted, options, limit, offset, orderByKeyWhenUnsorted, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var mapColumns = MapColumns(map);
 
         if (mapColumns is not null && options is not { IncludePaths.Count: > 0 })
@@ -656,6 +755,95 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         var entities = await SelectAsync(options, limit, offset, orderByKeyWhenUnsorted, cancellationToken, null, mapColumns)
             .ConfigureAwait(false);
         return entities.Select(map.Compile()).ToList();
+    }
+
+    /// <summary>Whether a member is a collection of entities the model maps (a navigation the database can count).</summary>
+    private bool IsRelation(System.Reflection.PropertyInfo property) =>
+        _configuration.ColumnFor(property.Name) is null
+        && RelationCountInterpreter.ElementType(property.PropertyType) is { } element
+        && UnitOfWork.Model.Configurations.ContainsKey(element);
+
+    /// <summary>
+    ///     A mapped read with relation counts: each count is a correlated <c>(SELECT COUNT(*) FROM related WHERE
+    ///     related.fk = parent.key AND filter)</c> after the entity columns the map reads, and the map runs over the
+    ///     row with the counts the database returned.
+    /// </summary>
+    private async Task<List<TResult>> SelectCountedAsync<TResult>(RelationCountProjection<TEntity, TResult> counted,
+        QueryOptions<TEntity>? options, int? limit, int? offset, bool orderByKeyWhenUnsorted, CancellationToken cancellationToken)
+    {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Include applies to entity reads; project after including, or drop the includes from the mapped read.");
+        }
+
+        if (_configuration.HasCompositeKey)
+        {
+            throw new NotSupportedException(
+                $"'{typeof(TEntity).Name}' has a composite key, which a related entity's single foreign key cannot address; " +
+                "count the related entities with a read of their own.");
+        }
+
+        var project = counted.Projection.Compile();
+        return await UnitOfWork.RetryAsync(write: false, async _ =>
+        {
+            var plan = GatedPlan(options, null);
+            var residuals = Compile(plan.Residual);
+            var selected = SelectedColumns(counted.Members, plan);
+            var table = _dialect.Quote(_configuration.TableName);
+            var subqueries = counted.Counts.Select((count, index) => CountSql(count, index, table, plan.Parameters)).ToList();
+
+            var push = residuals.Count == 0;
+            var sql = SelectSql(selected, plan.Where, options, orderByKeyWhenUnsorted || offset is not null,
+                push ? limit : null, push ? offset : null, plan.Parameters, subqueries);
+
+            await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
+            var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+            var rows = new List<(TEntity Entity, long[] Counts)>();
+            await using (reader.ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var entity = RelationalMaterializer.Materialize<TEntity>(reader, selected);
+                    if (residuals.Count > 0 && !residuals.All(residual => residual(entity)))
+                    {
+                        continue;
+                    }
+
+                    var counts = new long[subqueries.Count];
+                    for (var index = 0; index < counts.Length; index++)
+                    {
+                        counts[index] = Convert.ToInt64(reader.GetValue(selected.Count + index));
+                    }
+
+                    rows.Add((entity, counts));
+                }
+            }
+
+            IEnumerable<(TEntity Entity, long[] Counts)> window = rows;
+            if (!push)
+            {
+                window = offset is { } skip ? window.Skip(skip) : window;
+                window = limit is { } take ? window.Take(take) : window;
+            }
+
+            return window.Select(row => project(row.Entity, row.Counts)).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private string CountSql(RelationCount count, int index, string parentTable, List<object?> parameters)
+    {
+        var (element, _, foreignKey) = RelationalInclude.Collection(UnitOfWork.Model, typeof(TEntity), count.Navigation, count.ElementType);
+        var alias = _dialect.Quote("eq_count" + index);
+        var where = $"{alias}.{_dialect.Quote(foreignKey.Name)} = {parentTable}.{_dialect.Quote(_configuration.Key.Name)}";
+        if (count.Predicate is not null)
+        {
+            // Unqualified columns resolve to the innermost table first: the filter reads the related rows.
+            where += " AND " + SqlFilterRenderer.Render(_dialect, element, FilterInterpreter.Interpret(count.Predicate), parameters);
+        }
+
+        return $"(SELECT COUNT(*) FROM {_dialect.Quote(element.TableName)} {alias} WHERE {where})";
     }
 
     private async Task<List<TEntity>> SelectCoreAsync(QueryOptions<TEntity>? options, int? limit, int? offset,
@@ -732,7 +920,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                     "Include applies to entity reads; project after including, or drop the includes from the mapped read.");
             }
 
-            await RelationalInclude.ApplyAsync(UnitOfWork, entities, options.IncludePaths, cancellationToken).ConfigureAwait(false);
+            await RelationalInclude.ApplyAsync(UnitOfWork, entities, options.IncludePaths, cancellationToken, options.IncludeShapes)
+                .ConfigureAwait(false);
         }
 
         return entities;
@@ -753,9 +942,10 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     }
 
     private string SelectSql(IReadOnlyList<RelationalColumn> selected, string where, QueryOptions<TEntity>? options,
-        bool orderByKeyWhenUnsorted, int? limit, int? offset, List<object?>? parameters = null)
+        bool orderByKeyWhenUnsorted, int? limit, int? offset, List<object?>? parameters = null,
+        IReadOnlyList<string>? extraColumns = null)
     {
-        var sql = $"SELECT {string.Join(", ", selected.Select(column => _dialect.Quote(column.Name)))}"
+        var sql = $"SELECT {string.Join(", ", selected.Select(column => _dialect.Quote(column.Name)).Concat(extraColumns ?? []))}"
                   + $" FROM {_dialect.Quote(_configuration.TableName)}";
         if (where.Length > 0)
         {
@@ -791,7 +981,8 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 var column = _configuration.ColumnFor(sort.KeySelector.GetMemberName())
                              ?? throw new NotSupportedException(
                                  $"'{typeof(TEntity).Name}' has no mapped member '{sort.KeySelector.GetMemberName()}' to order by.");
-                return $"{_dialect.Quote(column.Name)} {(sort.Direction == SortDirection.Descending ? "DESC" : "ASC")}";
+                return _dialect.OrderTerm(_dialect.Quote(column.Name), sort.Direction == SortDirection.Descending,
+                    options.NullsOrderOf(sort));
             });
             return " ORDER BY " + string.Join(", ", parts);
         }
@@ -804,6 +995,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     private async Task<TSum> SumCoreAsync<TSum>(LambdaExpression selector, QueryOptions<TEntity>? options,
         CancellationToken cancellationToken, Func<List<TEntity>, TSum> clientSum)
     {
+        ReadShapes.RefuseRowWindow(options, "SumAsync");
         var column = SumColumn(selector);
         if (column is not null)
         {

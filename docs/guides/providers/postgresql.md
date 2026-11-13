@@ -14,7 +14,8 @@ the shared relational engine exercises all of it.
 | Concurrency | versioned token (`int`/`long`/`Guid`) — see [Concurrency](../writing/concurrency.md) |
 | Composite keys | `Key(x => new { … })`, tuple point-lookups, composite `PRIMARY KEY` DDL |
 | Facets | `varchar(n)`, `numeric(p,s)` |
-| Includes | reference/collection with follow-up `IN` queries, dotted nested paths |
+| Includes | reference/collection with follow-up `IN` queries, dotted nested paths; a shaped include ranks each parent's rows with `ROW_NUMBER()` |
+| Read shapes | relation counts as correlated `COUNT(*)` subqueries, native `NULLS FIRST`/`NULLS LAST`, `LIMIT`/`OFFSET` pages without a count, `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
 | GROUP BY / HAVING / UNION | fully native |
 | Resilience | opt-in transient retry — see [Resilience](../operations/resilience.md) |
 | Upserts | `INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING`; `InsertManyAsync(…, skipDuplicates: true)` is `ON CONFLICT DO NOTHING`; `UpdateAndGetAsync` is `UPDATE … RETURNING`; a taken key (SQLSTATE `23505`) is `DuplicateKeyException` naming the constraint — see [Upserts and write outcomes](../writing/upserts.md) |

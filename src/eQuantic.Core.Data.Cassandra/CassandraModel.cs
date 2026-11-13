@@ -540,7 +540,8 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(property => property.CanRead && property.GetIndexParameters().Length == 0
-                               && !_unmapped.Contains(property.Name))
+                               && !_unmapped.Contains(property.Name)
+                               && !IsNavigation(property.PropertyType))
             .Select(property => new CassandraColumn(Stored(property.Name),
                 _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
                     ? "counter"
@@ -615,6 +616,22 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             _concurrencyMember is null ? null : Stored(_concurrencyMember),
             _ttlSeconds,
             generated);
+    }
+
+    /// <summary>
+    ///     Whether a member is a navigation — another entity, or a collection of them — which a row never stores: it is
+    ///     loaded by <c>Include</c> from the related table, and counted there.
+    /// </summary>
+    private static bool IsNavigation(Type type)
+    {
+        var element = type == typeof(string) || type == typeof(byte[])
+            ? null
+            : type.IsArray
+                ? type.GetElementType()
+                : type.GetInterfaces().Append(type)
+                    .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                    ?.GetGenericArguments()[0];
+        return typeof(Data.Repository.IEntity).IsAssignableFrom(element ?? type);
     }
 
     /// <summary>Whether an enum is stored as its labels: declared on the model, or annotated <c>[EnumType]</c>.</summary>

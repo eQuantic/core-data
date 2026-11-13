@@ -33,6 +33,9 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
 
     internal CassandraEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
 
+    internal CassandraEntityConfiguration? ConfigurationOf(Type entityType) =>
+        Model.Configurations.TryGetValue(entityType, out var configuration) ? configuration : null;
+
     internal ISession GetSession() => Session;
 
     private QueryFilters? _queryFilters;

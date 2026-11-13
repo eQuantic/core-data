@@ -547,13 +547,14 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
     }
 
     [Test]
-    public async Task Include_is_rejected_with_a_clear_message()
+    public async Task Including_a_column_rather_than_a_navigation_is_rejected_with_a_clear_message()
     {
         using var db = await NewSchemaAsync();
+        await Seed(db, new Account { Id = Guid.NewGuid(), Owner = "ana", Tags = ["x"] });
         var options = new QueryOptions<Account>().Include(nameof(Account.Tags));
 
         Assert.That(async () => await AccountRepo(db).GetAllAsync(options),
-            Throws.TypeOf<NotSupportedException>().With.Message.Contains("self-contained"));
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("not a navigation"));
     }
 
     [Test]

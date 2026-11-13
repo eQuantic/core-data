@@ -11,7 +11,7 @@ namespace eQuantic.Core.Data.MongoDb;
 /// </summary>
 /// <remarks>
 ///     The store-agnostic shaping — before/after customization, specification + predicate filter and
-///     sortings — is applied here. <c>Include</c> is applied separately by the repository as a server-side
+///     sortings (a placement of nulls against MongoDB's own order included) — is applied here. <c>Include</c> is applied separately by the repository as a server-side
 ///     <c>$lookup</c> (see <see cref="MongoInclude" />). The remaining EF-only knobs (change tracking, global
 ///     query filters, query tags) have no meaning for a document store and are intentionally ignored.
 /// </remarks>
@@ -50,7 +50,12 @@ public static class MongoQueryableExtensions
 
         if (options.Sortings.Count > 0)
         {
-            query = ApplySortings(query, options.Sortings);
+            // MongoDB sorts nulls (and missing fields) as the smallest value; a placement against that order sorts on
+            // whether the field is null first, as aggregation stages LINQ has no word for.
+            var sorts = eQuantic.Core.Data.Query.ReadShapes.Sorts(options);
+            query = MongoStages.NaturalNulls(sorts)
+                ? ApplySortings(query, options.Sortings)
+                : MongoStages.Append(query, MongoStages.Sort<TEntity>(sorts));
         }
 
         if (options.AfterCustomization is not null)

@@ -42,6 +42,8 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
     internal Container GetContainer<TEntity>() => Database.GetContainer(Configuration<TEntity>().ContainerName);
 
+    internal bool Maps(Type entityType) => Model.Configurations.ContainsKey(entityType);
+
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
     private DataConventions? _conventions;

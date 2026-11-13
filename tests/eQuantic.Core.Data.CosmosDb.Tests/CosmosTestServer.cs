@@ -108,7 +108,7 @@ public sealed class CosmosTestServer
     }
 
     /// <summary>The entity model shared by the client's serializer and the DI registration.</summary>
-    private static void RegisterEntities(CosmosModelBuilder model) => model
+    private static void RegisterEntities(CosmosModelBuilder model) => ReadShapesModel.Configure(model)
         .Converts<GadgetGrade, string>(
             grade => grade.ToString().ToLowerInvariant(),
             stored => Enum.Parse<GadgetGrade>(stored, ignoreCase: true))

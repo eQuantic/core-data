@@ -32,7 +32,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
     IAggregateReadRepository<TEntity>,
-    IGroupedReadRepository<TEntity>
+    IGroupedReadRepository<TEntity>,
+    IDistinctReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -59,56 +60,75 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, cancellationToken, IdPredicate(id)).ConfigureAwait(false)).FirstOrDefault();
+        (await ReadAsync(options, 1, cancellationToken, IdPredicate(id)).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, cancellationToken).ConfigureAwait(false);
+        await ReadAsync(options, null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, cancellationToken, NotNull(filter)).ConfigureAwait(false);
+        await ReadAsync(options, null, cancellationToken, NotNull(filter)).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await SelectAsync(options, null, cancellationToken, NotNull(specification).SatisfiedBy()).ConfigureAwait(false);
+        await ReadAsync(options, null, cancellationToken, NotNull(specification).SatisfiedBy()).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, null, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).ToList();
+    /// <remarks>
+    ///     A relation count in the map (<c>x.Versions.Count(v =&gt; v.DeletedAt == null)</c>) runs as
+    ///     <c>SELECT fk, COUNT(*) … GROUP BY fk</c> over the related table when its partition key is the foreign key and
+    ///     the filter pushes down; otherwise the foreign keys are fetched and counted client-side, behind
+    ///     <c>.AllowClientEvaluation()</c>. No related row is materialized whole.
+    /// </remarks>
+    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, null);
+        return await MappedAsync(NotNull(map), options, offset, limit, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        (await ReadAsync(options, 1, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
-    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false)).Select(map.Compile()).FirstOrDefault();
+    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, 1);
+        return (await MappedAsync(NotNull(map), options, offset, limit, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 2, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
+        (await ReadAsync(options, 2, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
 
     /// <inheritdoc />
     public async Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var rows = await SelectAsync(options, page.Skip + page.Take, cancellationToken).ConfigureAwait(false);
-        return new PagedResult<TEntity>(rows.Skip(page.Skip).Take(page.Take).ToList(), total, page.PageIndex, page.PageSize);
+        var items = await SelectAsync(options, page.Take, cancellationToken, null, null, page.Skip).ConfigureAwait(false);
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            await CassandraInclude.ApplyAsync(UnitOfWork, items, options).ConfigureAwait(false);
+        }
+
+        return new PagedResult<TEntity>(items, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
     public async Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var rows = await SelectAsync(options, page.Skip + page.Take, cancellationToken, null, MapColumns(NotNull(map))).ConfigureAwait(false);
-        var items = rows.Skip(page.Skip).Take(page.Take).Select(map.Compile()).ToList();
+        var items = await MappedAsync(NotNull(map), options, page.Skip, page.Take, cancellationToken).ConfigureAwait(false);
         return new PagedResult<TResult>(items, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
     public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
+        ReadShapes.RefuseRowWindow(options, "CountAsync");
         var plan = GatedPlan(options, null);
 
         if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
@@ -126,12 +146,18 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     }
 
     /// <inheritdoc />
-    public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, 1, cancellationToken).ConfigureAwait(false)).Count > 0;
+    public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        ReadShapes.RefuseRowWindow(options, "AnyAsync");
+        return (await SelectAsync(options, 1, cancellationToken).ConfigureAwait(false)).Count > 0;
+    }
 
     /// <inheritdoc />
-    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
+    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        ReadShapes.RefuseRowWindow(options, "AllAsync");
+        return (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
+    }
 
     /// <inheritdoc />
     public Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -197,6 +223,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         QueryOptions<TEntity>? options, CancellationToken cancellationToken,
         Func<string, string> aggregate, Func<Row, TResult> read, Func<List<TEntity>, TResult> clientFallback)
     {
+        ReadShapes.RefuseRowWindow(options, "an aggregate");
         var column = SumColumn(selector);
         if (column is not null)
         {
@@ -237,6 +264,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         {
             throw new NotSupportedException("Sorting does not apply to a grouped read; order the grouped result client-side.");
         }
+
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not apply to a grouped projection; drop the includes.");
+        }
+
+        ReadShapes.RefuseRowWindow(options, "GroupByAsync");
 
         // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
         var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
@@ -528,11 +562,19 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             throw new ArgumentOutOfRangeException(nameof(pageSize), pageSize, "The page size must be at least 1.");
         }
 
+        ReadShapes.RefuseRowWindow(options, "GetPageAsync");
         var plan = GatedPlan(options, null);
         if (plan.Alternatives.Count > 0)
         {
             throw new NotSupportedException(
                 "Token paging cannot span an OR-split query (there is one paging state per statement); page each branch separately or restructure the filter.");
+        }
+
+        if (NonClusteringSort(options) is { } member)
+        {
+            throw new NotSupportedException(
+                $"Cassandra can only ORDER BY clustering keys; '{member}' is not one, and token paging cannot sort client-side " +
+                "(each page is the cluster's). Page in the clustering order, or read the rows and sort them.");
         }
 
         var residuals = Compile(plan.Residual);
@@ -561,7 +603,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             entities = entities.Where(entity => residuals.All(residual => residual(entity)));
         }
 
-        return new ContinuedResult<TEntity>(entities.ToList(), state is null ? null : Convert.ToBase64String(state));
+        var items = entities.ToList();
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            await CassandraInclude.ApplyAsync(UnitOfWork, items, options).ConfigureAwait(false);
+        }
+
+        return new ContinuedResult<TEntity>(items, state is null ? null : Convert.ToBase64String(state));
     }
 
     // ---------------------------------------------------------------- streaming
@@ -570,6 +618,11 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     public async IAsyncEnumerable<TEntity> GetStreamAsync(QueryOptions<TEntity>? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not compose with streaming yet; use GetAllAsync or page explicitly.");
+        }
+
         // Streams over the native paging state: one page in memory at a time, stop whenever the consumer stops.
         string? token = null;
         do
@@ -592,7 +645,20 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var notes = new List<string>();
         if (options is { IncludePaths.Count: > 0 })
         {
-            notes.Add("Include is not supported: Cassandra rows are self-contained (execution throws NotSupportedException).");
+            notes.Add($"Each include ({string.Join(", ", options.IncludePaths)}) runs as one second query over the related table " +
+                      "(IN over the parents' keys), under the read's gates; a shape's order and limit apply per parent as the rows are " +
+                      "stitched, its limit pushed down as PER PARTITION LIMIT when the foreign key is the partition key and the order is the clustering order.");
+        }
+
+        if (NonClusteringSort(options) is { } sorted)
+        {
+            notes.Add($"'{sorted}' is not a clustering key: with .AllowClientEvaluation() the fetched rows are sorted client-side " +
+                      "(nulls placed as asked) and any limit applies after the sort.");
+        }
+
+        if (options is { SkipCount: not null } or { TakeCount: not null })
+        {
+            notes.Add("Cassandra has no OFFSET: Skip/Take fetch the first skip + take rows (a CQL LIMIT) and drop the skipped ones; no count runs.");
         }
 
         var global = GlobalFilter(options);
@@ -606,7 +672,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         string orderBy;
         try
         {
-            orderBy = OrderBy(options);
+            orderBy = NonClusteringSort(options) is null ? OrderBy(options) : string.Empty;
         }
         catch (NotSupportedException exception)
         {
@@ -708,6 +774,130 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     /// <inheritdoc />
     public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => SumAsync(selector, options).GetAwaiter().GetResult();
 
+    // ---------------------------------------------------------------- distinct values
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     When the selected members are a prefix of the primary key that covers the partition key, the cluster
+    ///     deduplicates: <c>SELECT a, b … GROUP BY a, b</c>. Any other selection fetches the selected (and residual)
+    ///     columns and deduplicates them client-side — a scan of what the filter matches, behind
+    ///     <c>.AllowClientEvaluation()</c>.
+    /// </remarks>
+    public async Task<IReadOnlyList<TResult>> GetDistinctAsync<TResult>(Expression<Func<TEntity, TResult>> selector,
+        Expression<Func<TEntity, bool>>? filter = null, QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        NotNull(selector);
+        ReadShapes.RefuseForDistinct(options);
+        var members = MapColumns(selector)
+                      ?? throw new NotSupportedException(
+                          "GetDistinctAsync selects mapped members: one (x => x.Repository), or several (x => new { x.Repository, x.IssueNumber }).");
+        var columns = members.Select(_configuration.ColumnFor).ToList();
+        var plan = GatedPlan(options, filter);
+        var project = selector.Compile();
+
+        var primary = CassandraMapper.PrimaryKey(_configuration);
+        var prefix = columns.Count >= _configuration.PartitionKeys.Count && columns.Count <= primary.Count
+                     && primary.Take(columns.Count).All(key => columns.Any(column => CassandraEntityConfiguration.Same(column, key)));
+        if (prefix && plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
+        {
+            var keys = primary.Take(columns.Count).ToList();
+            var cql = $"SELECT {string.Join(", ", keys)} FROM {_configuration.TableName}"
+                      + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                      + $" GROUP BY {string.Join(", ", keys)}"
+                      + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+            var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
+                CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
+            var only = new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
+            return rows.Select(row => project(CassandraMapper.Materialize<TEntity>(_configuration, row, only))).ToList();
+        }
+
+        if (!CassandraCql.ClientEvaluationOptedIn(options))
+        {
+            throw new NotSupportedException(
+                $"Cassandra deduplicates on the cluster only over a prefix of the primary key that covers the partition key " +
+                $"({string.Join(", ", primary)}); call .AllowClientEvaluation() to fetch the selected columns and deduplicate them client-side.");
+        }
+
+        var fetched = await SelectAsync(options, null, cancellationToken, filter, members).ConfigureAwait(false);
+        return fetched.Select(project).Distinct().ToList();
+    }
+
+    // ---------------------------------------------------------------- read shapes
+
+    /// <summary>An entity read honouring the options' <c>Skip</c>/<c>Take</c> within the read's own limit, includes loaded.</summary>
+    private async Task<List<TEntity>> ReadAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
+        Expression<Func<TEntity, bool>>? extraFilter = null)
+    {
+        var (offset, effective) = ReadShapes.Window(options, limit);
+        var entities = await SelectAsync(options, effective, cancellationToken, extraFilter, null, offset).ConfigureAwait(false);
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            await CassandraInclude.ApplyAsync(UnitOfWork, entities, options).ConfigureAwait(false);
+        }
+
+        return entities;
+    }
+
+    /// <summary>A mapped read over the narrowed columns; relation counts come from the related tables.</summary>
+    private async Task<List<TResult>> MappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options,
+        int? offset, int? limit, CancellationToken cancellationToken)
+    {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Include applies to entity reads; project after including, or drop the includes from the mapped read.");
+        }
+
+        if (RelationCountInterpreter.Interpret(map, property => CassandraInclude.IsRelation(UnitOfWork, typeof(TEntity), property)) is { } counted)
+        {
+            var members = counted.Members?.Append(_configuration.MemberFor(_configuration.KeyColumn)).ToList();
+            var entities = await SelectAsync(options, limit, cancellationToken, null, members, offset).ConfigureAwait(false);
+            var counts = await CassandraInclude.CountAsync(UnitOfWork, entities, counted.Counts, options).ConfigureAwait(false);
+            var project = counted.Projection.Compile();
+            return entities.Select((entity, index) => project(entity, counts[index])).ToList();
+        }
+
+        var rows = await SelectAsync(options, limit, cancellationToken, null, MapColumns(map), offset).ConfigureAwait(false);
+        return rows.Select(map.Compile()).ToList();
+    }
+
+    /// <summary>The first sort on a member that is not a clustering key, or <c>null</c> when CQL can order the read.</summary>
+    private string? NonClusteringSort(QueryOptions<TEntity>? options) =>
+        options?.Sortings
+            .Select(sort => sort.KeySelector.GetMemberName())
+            .FirstOrDefault(member => !_configuration.IsClusteringKey(_configuration.ColumnFor(member)));
+
+    /// <summary>
+    ///     Whether the read sorts client-side: a sort on a member that is not a clustering key, which CQL cannot order by.
+    ///     The rows are fetched and sorted (nulls placed as asked), behind <c>.AllowClientEvaluation()</c> — and
+    ///     <c>.AllowFiltering()</c> when the read is not scoped to a partition, since the fetch then scans the table.
+    ///     Clustering keys are never null, so a placement of nulls on one is already honoured by CQL's order.
+    /// </summary>
+    private bool SortsClientSide(QueryOptions<TEntity>? options, CassandraCqlPlan plan)
+    {
+        if (NonClusteringSort(options) is not { } member)
+        {
+            return false;
+        }
+
+        if (!CassandraCql.ClientEvaluationOptedIn(options))
+        {
+            throw new NotSupportedException(
+                $"Cassandra can only ORDER BY clustering keys; '{member}' is not one. Call .AllowClientEvaluation() to sort the " +
+                "fetched rows client-side, or model the read order with a clustering key.");
+        }
+
+        if (!plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
+        {
+            throw new NotSupportedException(
+                "The client-sorted read is not scoped to a partition, so the fetch scans the whole table; call .AllowFiltering() " +
+                "as well to acknowledge the scan.");
+        }
+
+        return true;
+    }
+
     // ---------------------------------------------------------------- dispose
 
     /// <inheritdoc />
@@ -726,12 +916,36 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     // ---------------------------------------------------------------- query plumbing
 
     private async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
-        Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null)
+        Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null, int? offset = null)
     {
         var plan = GatedPlan(options, extraFilter);
         var residuals = Compile(plan.Residual);
+        var clientSort = SortsClientSide(options, plan);
+        if (clientSort && mapColumns is not null)
+        {
+            // The client-side sort reads its keys from the fetched rows.
+            mapColumns = mapColumns.Concat(options!.Sortings.Select(sort => sort.KeySelector.GetMemberName())).ToList();
+        }
+
         var selected = SelectedColumns(mapColumns, plan);
 
+        // Cassandra has no OFFSET: a window fetches the first skip + take rows and drops the skipped ones.
+        if (offset is > 0 || clientSort)
+        {
+            var fetchLimit = limit is { } take ? take + (offset ?? 0) : (int?)null;
+            var rows = await SelectCoreAsync(plan, residuals, selected, options, clientSort ? null : fetchLimit, clientSort)
+                .ConfigureAwait(false);
+            IEnumerable<TEntity> window = clientSort ? ReadShapes.Order(rows, ReadShapes.Sorts(options)) : rows;
+            window = offset is > 0 ? window.Skip(offset.Value) : window;
+            return (limit is { } kept ? window.Take(kept) : window).ToList();
+        }
+
+        return await SelectCoreAsync(plan, residuals, selected, options, limit, false).ConfigureAwait(false);
+    }
+
+    private async Task<List<TEntity>> SelectCoreAsync(CassandraCqlPlan plan, List<Func<TEntity, bool>> residuals,
+        HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit, bool clientSort)
+    {
         // The engine span carries what no driver instrumentation can know: residual, split and gate facts.
         using var activity = DataActivitySource.Instance.StartActivity("cassandra.select", ActivityKind.Client);
         if (activity is not null)
@@ -745,12 +959,12 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
         if (plan.Alternatives.Count > 0)
         {
-            return await SelectSplitAsync(plan, residuals, selected, options, limit).ConfigureAwait(false);
+            return await SelectSplitAsync(plan, residuals, selected, clientSort ? null : options, limit, options).ConfigureAwait(false);
         }
 
         // A CQL LIMIT would cut rows before the residual filter sees them, so it only pushes when nothing is residual.
         var pushLimit = limit.HasValue && residuals.Count == 0;
-        var cql = SelectCql(selected, plan.Where, plan.RequiresAllowFiltering, options, pushLimit);
+        var cql = SelectCql(selected, plan.Where, plan.RequiresAllowFiltering, clientSort ? null : options, pushLimit);
         var values = pushLimit ? [.. plan.Values, limit!.Value] : plan.Values;
 
         var rows = await CassandraStatements.ExecuteAsync(Session, cql, values,
@@ -777,10 +991,10 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     ///     row is inside some branch's top-N); the merge re-applies order and limit client-side.
     /// </summary>
     private async Task<List<TEntity>> SelectSplitAsync(CassandraCqlPlan plan, List<Func<TEntity, bool>> residuals,
-        HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit)
+        HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit, QueryOptions<TEntity>? sorting)
     {
         var pushLimit = limit.HasValue && residuals.Count == 0;
-        var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(options);
+        var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(sorting);
         var executions = plan.Alternatives.Select(alternative =>
         {
             var where = plan.Where.Length > 0 ? $"{plan.Where} AND {alternative.Where}" : alternative.Where;
@@ -801,9 +1015,9 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             entities = entities.Where(entity => residuals.All(residual => residual(entity)));
         }
 
-        if (options?.Sortings is { Count: > 0 } sortings)
+        if (sorting is { Sortings.Count: > 0 })
         {
-            entities = ClientSort(entities, sortings);
+            entities = ReadShapes.Order(entities, ReadShapes.Sorts(sorting));
         }
 
         if (limit is { } take)
@@ -816,12 +1030,6 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     private CassandraCqlPlan GatedPlan(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
     {
-        if (options is { IncludePaths.Count: > 0 })
-        {
-            throw new NotSupportedException(
-                "Cassandra rows are self-contained; there are no navigations to include — model related data with the partition key or query it explicitly.");
-        }
-
         var plan = CassandraCql.Plan(_configuration, options, extraFilter, GlobalFilter(options));
 
         if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
@@ -910,8 +1118,10 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             return null;
         }
 
-        // The collectors surface CLR member names; the selected set lives in stored-column space.
-        var selected = new HashSet<string>(mapColumns.Select(_configuration.ColumnFor), StringComparer.OrdinalIgnoreCase);
+        // The collectors surface CLR member names; the selected set lives in stored-column space. A member that is not
+        // a column (a navigation) is not fetched: it stays unloaded.
+        var selected = new HashSet<string>(mapColumns.Select(_configuration.ColumnFor)
+            .Where(column => _configuration.Column(column) is not null), StringComparer.OrdinalIgnoreCase);
         if (plan.Alternatives.Count > 0)
         {
             // The split merge de-duplicates by primary key, so a projected read must fetch the key columns too.
@@ -956,28 +1166,10 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
     }
 
-    /// <summary>Re-applies the requested ordering over a merged result set (each branch arrives ordered on its own).</summary>
-    private static IEnumerable<TEntity> ClientSort(IEnumerable<TEntity> entities, IReadOnlyList<QuerySort<TEntity>> sortings)
-    {
-        IOrderedEnumerable<TEntity>? ordered = null;
-        foreach (var sort in sortings)
-        {
-            var key = Boxed(sort.KeySelector);
-            ordered = ordered is null
-                ? sort.Direction == SortDirection.Descending ? entities.OrderByDescending(key) : entities.OrderBy(key)
-                : sort.Direction == SortDirection.Descending ? ordered.ThenByDescending(key) : ordered.ThenBy(key);
-        }
-
-        return ordered ?? entities;
-    }
-
-    private static Func<TEntity, object?> Boxed(LambdaExpression keySelector) =>
-        Expression.Lambda<Func<TEntity, object?>>(
-            Expression.Convert(keySelector.Body, typeof(object)), keySelector.Parameters).Compile();
-
     private async Task<TSum> SumCoreAsync<TSum>(LambdaExpression selector, QueryOptions<TEntity>? options,
         CancellationToken cancellationToken, Func<List<TEntity>, TSum> clientSum)
     {
+        ReadShapes.RefuseRowWindow(options, "SumAsync");
         var column = SumColumn(selector);
         if (column is not null)
         {

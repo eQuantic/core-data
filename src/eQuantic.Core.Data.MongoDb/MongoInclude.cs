@@ -4,6 +4,9 @@ using System.ComponentModel.DataAnnotations.Schema;
 using System.Linq.Expressions;
 using System.Reflection;
 using eQuantic.Core.Data.MongoDb.Repository;
+using eQuantic.Core.Data.Query;
+using eQuantic.Core.Data.Repository.Options;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Bson.Serialization.Attributes;
 using MongoDB.Driver;
@@ -26,6 +29,12 @@ namespace eQuantic.Core.Data.MongoDb;
 ///     Keys are resolved by <c>[ForeignKey]</c>/<c>[Key]</c>/<c>[BsonId]</c> attributes or by the
 ///     <c>{Name}Id</c>/<c>Id</c> conventions. The entity is re-projected by the join, so it must expose a
 ///     parameterless constructor and writable navigation members.
+///     <para>
+///         A shaped collection include (a filter, an order, a skip or a limit per parent) runs as a <c>$lookup</c>
+///         with a pipeline — <c>localField</c>/<c>foreignField</c> correlate it, and the shape's <c>$match</c>,
+///         <c>$sort</c>, <c>$skip</c> and <c>$limit</c> run inside it, per parent, on the server (MongoDB 5.0 or
+///         later). The joined array lands in the navigation's own element, so the navigation must be class-mapped.
+///     </para>
 /// </summary>
 internal static class MongoInclude
 {
@@ -33,18 +42,114 @@ internal static class MongoInclude
 
     /// <summary>Applies every include path to the query.</summary>
     public static IQueryable<TEntity> Apply<TEntity>(IQueryable<TEntity> query, MongoUnitOfWork unitOfWork,
-        IReadOnlyCollection<string> paths) where TEntity : class
+        IReadOnlyCollection<string> paths, IReadOnlyDictionary<string, IncludeShape>? shapes = null) where TEntity : class
     {
         foreach (var path in paths)
         {
-            if (!string.IsNullOrWhiteSpace(path))
+            if (string.IsNullOrWhiteSpace(path))
             {
-                query = ApplyPath(query, unitOfWork, path.Trim());
+                continue;
             }
+
+            query = shapes is not null && shapes.TryGetValue(path.Trim(), out var shape)
+                ? ApplyShaped(query, path.Trim(), shape)
+                : ApplyPath(query, unitOfWork, path.Trim());
         }
 
         return query;
     }
+
+    /// <summary>
+    ///     Whether a member is a collection of documents of another collection holding a foreign key back to
+    ///     <paramref name="parentType" /> — a relation the server counts with a <c>$lookup</c>, never an embedded array.
+    /// </summary>
+    public static bool IsRelation(Type parentType, PropertyInfo member) =>
+        RelationCountInterpreter.ElementType(member.PropertyType) is { IsClass: true } element
+        && element != typeof(string)
+        && ForeignKey(element, parentType.Name) is not null;
+
+    /// <summary>
+    ///     The <c>$lookup</c> of a relation count: the related documents matching the filter, correlated by the foreign
+    ///     key, counted inside the lookup (<c>$count</c>) into <paramref name="field" /> — nothing but the count travels.
+    /// </summary>
+    public static BsonDocument CountLookup(Type parentType, RelationCount count, string field)
+    {
+        var foreignKey = ForeignKey(count.ElementType, parentType.Name)
+                         ?? throw new InvalidOperationException(
+                             $"Cannot count '{count.Navigation.Name}': no foreign key found on '{count.ElementType.Name}' back to '{parentType.Name}'.");
+        var pipeline = new BsonArray();
+        if (count.Predicate is not null)
+        {
+            pipeline.Add(new BsonDocument("$match", RenderFilter(count.ElementType, count.Predicate)));
+        }
+
+        pipeline.Add(new BsonDocument("$count", "n"));
+        return Lookup(parentType, PrimaryKey(parentType), count.ElementType, foreignKey, pipeline, field);
+    }
+
+    private static IQueryable<TEntity> ApplyShaped<TEntity>(IQueryable<TEntity> query, string path, IncludeShape shape)
+        where TEntity : class
+    {
+        var navigation = typeof(TEntity).GetProperty(path, Members)
+                         ?? throw new InvalidOperationException(
+                             $"Cannot include '{path}': '{typeof(TEntity).Name}' has no such navigation property.");
+        var elementType = ElementType(navigation.PropertyType)
+                          ?? throw new NotSupportedException(
+                              $"Cannot shape the include '{path}': a filter, an order or a limit applies to a collection, and it is a reference.");
+        var foreignKey = ForeignKey(elementType, typeof(TEntity).Name)
+                         ?? throw new InvalidOperationException(
+                             $"Cannot include '{path}': no foreign key found on '{elementType.Name}' back to '{typeof(TEntity).Name}' " +
+                             $"(expected [ForeignKey(\"{typeof(TEntity).Name}\")] or a '{typeof(TEntity).Name}Id' property).");
+        var target = MongoStages.ElementName(typeof(TEntity), navigation.Name)
+                     ?? throw new NotSupportedException(
+                         $"Cannot include '{path}' with a shape: the navigation is not mapped on '{typeof(TEntity).Name}', so the " +
+                         "joined documents have no element to land in. Keep the member mapped (and null when written).");
+
+        var pipeline = new BsonArray();
+        if (shape.Filter is not null)
+        {
+            pipeline.Add(new BsonDocument("$match", RenderFilter(elementType, shape.Filter)));
+        }
+
+        foreach (var stage in SortStages(elementType, ReadShapes.Sorts(shape)))
+        {
+            pipeline.Add(stage);
+        }
+
+        if (shape.SkipCount is > 0)
+        {
+            pipeline.Add(new BsonDocument("$skip", shape.SkipCount.Value));
+        }
+
+        if (shape.TakeCount is { } take)
+        {
+            pipeline.Add(new BsonDocument("$limit", take));
+        }
+
+        var lookup = Lookup(typeof(TEntity), PrimaryKey(typeof(TEntity)), elementType, foreignKey, pipeline, target);
+        return MongoStages.Append(query, [lookup]);
+    }
+
+    private static BsonDocument Lookup(Type parentType, PropertyInfo localKey, Type elementType, PropertyInfo foreignKey,
+        BsonArray pipeline, string target) =>
+        new("$lookup", new BsonDocument
+        {
+            { "from", MongoModeling.CollectionName(elementType) },
+            { "localField", MongoStages.ElementName(parentType, localKey.Name) ?? localKey.Name },
+            { "foreignField", MongoStages.ElementName(elementType, foreignKey.Name) ?? foreignKey.Name },
+            { "pipeline", pipeline },
+            { "as", target },
+        });
+
+    private static BsonDocument RenderFilter(Type elementType, System.Linq.Expressions.LambdaExpression predicate) =>
+        (BsonDocument)typeof(MongoStages).GetMethod(nameof(MongoStages.Filter))!
+            .MakeGenericMethod(elementType).Invoke(null, [predicate])!;
+
+    private static IReadOnlyList<BsonDocument> SortStages(Type elementType, IReadOnlyList<MemorySort> sorts) =>
+        sorts.Count == 0
+            ? []
+            : (IReadOnlyList<BsonDocument>)typeof(MongoStages).GetMethod(nameof(MongoStages.Sort))!
+                .MakeGenericMethod(elementType).Invoke(null, [sorts])!;
 
     private static IQueryable<TEntity> ApplyPath<TEntity>(IQueryable<TEntity> query, MongoUnitOfWork unitOfWork, string path)
         where TEntity : class

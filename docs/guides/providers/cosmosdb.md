@@ -87,6 +87,23 @@ model.Entity<Order>(entity => entity
   key). See [Upserts and write outcomes](../writing/upserts.md).
 - `BeginTransactionAsync` gives a `TransactionalBatch` — single partition, enforced with guidance.
 
+## Reading shapes across documents
+
+Cosmos DB has no join across containers, and the read shapes say what that costs instead of hiding
+it ([Querying](../querying/includes.md) has the full tables):
+
+- **Includes** load from the related container with **one second query** per path segment — the
+  parents' keys read with `IN`, a shape's filter in its `WHERE`. Its order, skip and limit apply per
+  parent as the rows are stitched, so every row the filter keeps travels. The related documents
+  hold the foreign key (`{Parent}Id`, or `[ForeignKey("Parent")]`), and both entities are registered
+  in the model.
+- **Relation counts** in a projection run as one grouped query per count
+  (`SELECT fk, COUNT(1) … GROUP BY fk`); the parents are read whole and the map runs in memory.
+- **Nulls** (and undefined) sort as the smallest value. A placement against that order on the first
+  sort reads as two queries — the null rows and the rest — concatenated, the window carried across
+  them; on a later sort, and on continuation paging or streaming, it is refused.
+- **Pages without a total** are `OFFSET … LIMIT`; **distinct values** are `SELECT DISTINCT VALUE`.
+
 ## What is honestly rejected
 
 - **Typed `GroupByAsync`**: the SDK's LINQ emits `SELECT VALUE {…}`, which Cosmos SQL cannot

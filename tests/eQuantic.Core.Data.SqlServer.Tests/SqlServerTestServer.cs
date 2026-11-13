@@ -251,7 +251,7 @@ public sealed class SqlServerTestDatabase : IDisposable
     public SqlServerTestDatabase(string connectionString, Action<IServiceCollection>? configure)
     {
         var services = new ServiceCollection();
-        services.AddSqlServerDatabase(connectionString, TestSchema.Configure);
+        services.AddSqlServerDatabase(connectionString, model => TestSchema.Configure(ReadShapesSchema.Configure(model)));
         services.AddSqlServerRepositories();
         services.AddSqlServerMigrations(typeof(TestSchema).Assembly);
         configure?.Invoke(services);

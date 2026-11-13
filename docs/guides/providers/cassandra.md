@@ -101,10 +101,23 @@ labels, the JSON columns and the store-generated columns.
 
 ## Reads that respect the ring
 
-- `ORDER BY` only on clustering keys — anything else throws with the reason (model the read order).
-- No `OFFSET` exists: offset paging fetches `skip + take` and slices (fine shallow); deep paging
-  uses the **driver's paging state** via `GetPageAsync`/`GetStreamAsync` — constant memory, opaque
-  token.
+- `ORDER BY` only on clustering keys — anything else throws with the reason (model the read order),
+  unless the read opts into `.AllowClientEvaluation()`: then the fetched rows sort client-side,
+  nulls placed as asked (`NullsOrder`), the limit after the sort. A clustering key is never null, so
+  a placement on one is already honoured by CQL's order.
+- No `OFFSET` exists: offset paging — `GetPagedAsync`, or `Skip`/`Take` on any read without a
+  count — fetches `skip + take` and slices (fine shallow); deep paging uses the **driver's paging
+  state** via `GetPageAsync`/`GetStreamAsync` — constant memory, opaque token.
+- **Includes** load from the related table with one second `IN` query per path segment, under the
+  read's own gates and opt-ins; partition the related table by the foreign key and cluster it in
+  the order it is read, and a shaped include's limit runs on the cluster as `PER PARTITION LIMIT`.
+  Navigations (members of an entity type, or collections of them) are not columns: the model leaves
+  them out.
+- **Relation counts** in a projection are `COUNT(*) … GROUP BY fk` when the related table is
+  partitioned by the foreign key and the filter pushes down; otherwise the foreign keys are fetched
+  and counted client-side, behind `.AllowClientEvaluation()` (a null test has no CQL form).
+- **Distinct values** are a `GROUP BY` over a primary-key prefix that covers the partition key; any
+  other selection deduplicates client-side, behind `.AllowClientEvaluation()`.
 - Typed `GroupByAsync` renders native CQL `GROUP BY` restricted to the **primary key prefix** (the
   store's rule); CQL has no `HAVING`, so predicate aggregates compute on the cluster as extra
   select cells and groups filter as they stream back — no extra rows travel either way.

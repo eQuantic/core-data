@@ -249,7 +249,7 @@ public sealed class MySqlTestDatabase : IDisposable
     public MySqlTestDatabase(string connectionString, Action<IServiceCollection>? configure)
     {
         var services = new ServiceCollection();
-        services.AddMySqlDatabase(connectionString, TestSchema.Configure);
+        services.AddMySqlDatabase(connectionString, model => TestSchema.Configure(ReadShapesSchema.Configure(model)));
         services.AddMySqlRepositories();
         services.AddMySqlMigrations(typeof(TestSchema).Assembly);
         configure?.Invoke(services);
