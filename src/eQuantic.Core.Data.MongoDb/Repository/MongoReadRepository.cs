@@ -119,7 +119,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public bool All(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null) =>
-        !Whole(options, "All").Any(Negate(NotNull(predicate)));
+        !Whole(options, "All", query => query.Where(Negate(NotNull(predicate)))).Any();
 
     /// <inheritdoc />
     public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
@@ -222,7 +222,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        !await Whole(options, "AllAsync").AnyAsync(Negate(NotNull(predicate)), cancellationToken).ConfigureAwait(false);
+        !await Whole(options, "AllAsync", query => query.Where(Negate(NotNull(predicate)))).AnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -460,7 +460,16 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
         // The driver renders the shaped queryable as its aggregate pipeline; values are inlined in the rendering.
         var (offset, limit) = ReadShapes.Window(options, null);
-        var statement = Shaped(options, null, offset, limit).ToString() ?? string.Empty;
+        var shaped = Shaped(options, null, offset, limit, explaining: true);
+        var unresolved = (UnitOfWork.Session is null ? Collection.AsQueryable() : Collection.AsQueryable(UnitOfWork.Session))
+            .ApplyQueryOptions(options);
+        if (GlobalFilter(options) is { } globalFilter)
+        {
+            unresolved = unresolved.Where(globalFilter);
+        }
+
+        notes.AddRange(MongoPredicates.Notes(unresolved.Expression));
+        var statement = shaped.ToString() ?? string.Empty;
         return new QueryPlan("MongoDb", statement, [], residual: null,
             serverSideFiltering: false, clientEvaluation: false, partitionScoped: false, notes);
     }
@@ -507,10 +516,11 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         Shaped(options, extra, null, null);
 
     /// <summary>The shaped query for a read over every matching row, which refuses the options' <c>Skip</c>/<c>Take</c>.</summary>
-    private IQueryable<TEntity> Whole(QueryOptions<TEntity>? options, string read)
+    private IQueryable<TEntity> Whole(QueryOptions<TEntity>? options, string read,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
     {
         ReadShapes.RefuseRowWindow(options, read);
-        return Query(options);
+        return Query(options, extra);
     }
 
     /// <summary>The shaped query for a read returning rows: the options' <c>Skip</c>/<c>Take</c> within the read's own limit.</summary>
@@ -568,7 +578,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     }
 
     private IQueryable<TEntity> Shaped(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra,
-        int? offset, int? limit)
+        int? offset, int? limit, bool explaining = false)
     {
         // Reads join the active transaction session, so a query inside a transaction sees its own writes.
         var session = UnitOfWork.Session;
@@ -582,6 +592,13 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         {
             query = extra(query);
         }
+
+        // The filters as the driver reads them: an array's Contains normalized, text without regard to case as an
+        // escaped regular expression, and each test across a relation resolved into the related keys — read first, in
+        // the session, through the driver's synchronous API (an explain runs nothing, and shows the keys empty).
+        query = explaining
+            ? query.Provider.CreateQuery<TEntity>(MongoPredicates.Unresolved(query.Expression))
+            : MongoPredicates.Ready(query, UnitOfWork);
 
         // The window applies before the includes, so the joins run over the page only; a skip orders by the id when
         // the read has no order of its own, so pages are stable.

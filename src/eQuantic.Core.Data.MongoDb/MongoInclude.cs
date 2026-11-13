@@ -283,13 +283,27 @@ internal static class MongoInclude
             ?.GetGenericArguments()[0];
     }
 
-    private static PropertyInfo? ForeignKey(Type type, string referencedName)
+    /// <summary>The foreign-key member on <paramref name="type" /> naming <paramref name="referencedName" />: <c>[ForeignKey]</c>, then <c>{Name}Id</c>.</summary>
+    internal static PropertyInfo? ForeignKey(Type type, string referencedName)
     {
         var byAttribute = type.GetProperties(Members).FirstOrDefault(property =>
             property.GetCustomAttribute<ForeignKeyAttribute>()?.Name.Equals(referencedName, StringComparison.OrdinalIgnoreCase) == true);
 
         return byAttribute ?? type.GetProperties(Members)
             .FirstOrDefault(property => property.Name.Equals($"{referencedName}Id", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The primary-key member of a document type, or <c>null</c> when none resolves.</summary>
+    internal static PropertyInfo? TryPrimaryKey(Type type)
+    {
+        try
+        {
+            return PrimaryKey(type);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private static PropertyInfo PrimaryKey(Type type)

@@ -114,7 +114,7 @@ public sealed class Receipt : IEntity<long>
 
 internal static class TestSchema
 {
-    public static void Configure(RelationalModelBuilder builder) => WriteOutcomeSchema.Configure(builder)
+    public static void Configure(RelationalModelBuilder builder) => QueryPredicateSchema.Configure(WriteOutcomeSchema.Configure(builder))
         .Entity<SaleOrder>(entity => entity.Table("sale_orders"))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
         .Enum<Channel>()

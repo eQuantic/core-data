@@ -179,9 +179,10 @@ public sealed class FilterInterpreterTests
     [Test]
     public void Instance_function_over_a_member_becomes_a_function_filter()
     {
-        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.ToLower() == "abc");
+        // ToLower()/ToUpper() compared with a value are text tests of their own (QueryPredicateInterpretationTests).
+        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.Trim() == "abc");
 
-        Assert.That(filter.Function, Is.EqualTo("ToLower"));
+        Assert.That(filter.Function, Is.EqualTo("Trim"));
         Assert.That(filter.Member, Is.EqualTo("Name"));
         Assert.That(filter.Operator, Is.EqualTo(ComparisonOperator.Equal));
         Assert.That(filter.Value, Is.EqualTo("abc"));

@@ -119,6 +119,29 @@ public sealed class MariaDbTests
     [Test]
     public Task A_bulk_load_of_a_taken_key_fails() => WriteOutcomeScenarios.BulkInsertOfTakenKeyFails(NewScope);
 
+    // ---------------------------------------------------------------- query predicates (the same scenarios as MySQL)
+
+    [Test]
+    public Task Any_with_a_condition() => QueryPredicateScenarios.AnyWithACondition(NewScope);
+
+    [Test]
+    public Task A_reference_member_in_a_set_based_delete() => QueryPredicateScenarios.ReferenceMemberInSetBasedDelete(NewScope);
+
+    [Test]
+    public Task No_related_row() => QueryPredicateScenarios.NoRelatedRow(NewScope);
+
+    [Test]
+    public void A_relation_test_reading_the_entity_is_refused() => QueryPredicateScenarios.CorrelationIsRefused(NewScope);
+
+    [Test]
+    public void Explain_names_the_correlated_exists() => QueryPredicateScenarios.ExplainNamesTheMechanism(NewScope);
+
+    [Test]
+    public Task Text_is_matched_without_regard_to_case() => QueryPredicateScenarios.TextWithoutRegardToCase(NewScope);
+
+    [Test]
+    public Task An_array_and_a_list_are_tested_with_Contains() => QueryPredicateScenarios.ArrayAndListContains(NewScope);
+
     // ---------------------------------------------------------------- generated keys
 
     [Test]

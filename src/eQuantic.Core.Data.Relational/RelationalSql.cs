@@ -53,7 +53,7 @@ internal static class RelationalSql
     /// </summary>
     public static RelationalSqlPlan Plan<TEntity>(SqlDialect dialect, RelationalEntityConfiguration configuration,
         QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null,
-        Expression<Func<TEntity, bool>>? globalFilter = null)
+        Expression<Func<TEntity, bool>>? globalFilter = null, RelationalRelations? relations = null)
         where TEntity : class
     {
         var clauses = new List<string>();
@@ -62,10 +62,10 @@ internal static class RelationalSql
 
         foreach (var filter in Filters(options, extraFilter, globalFilter))
         {
-            var lambda = FilterInterpreter.ToNode(filter);
+            var lambda = FilterInterpreter.ToNode(Prepared(filter, relations));
 
             if (TryInterpret(lambda.Body, out var whole)
-                && SqlFilterRenderer.TryRender(dialect, configuration, whole, parameters, out var sql))
+                && SqlFilterRenderer.TryRender(dialect, configuration, whole, parameters, out var sql, relations))
             {
                 clauses.Add(sql);
                 continue;
@@ -74,9 +74,14 @@ internal static class RelationalSql
             foreach (var conjunct in NodePredicates.Conjuncts(lambda.Body))
             {
                 if (TryInterpret(conjunct, out var interpreted)
-                    && SqlFilterRenderer.TryRender(dialect, configuration, interpreted, parameters, out var conjunctSql))
+                    && SqlFilterRenderer.TryRender(dialect, configuration, interpreted, parameters, out var conjunctSql, relations))
                 {
                     clauses.Add(conjunctSql);
+                }
+                else if (CrossesRelation(conjunct))
+                {
+                    // A relation runs on the store or not at all: say why it cannot, rather than defer it client-side.
+                    SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(conjunct), parameters, relations);
                 }
                 else
                 {
@@ -89,12 +94,39 @@ internal static class RelationalSql
     }
 
     /// <summary>
+    ///     The filter as the renderer reads it: shapes a newer compiler gives normalized, and each test across a relation
+    ///     marked for a correlated <c>EXISTS</c> (when the statement knows the model's relations).
+    /// </summary>
+    private static Expression<Func<TEntity, bool>> Prepared<TEntity>(Expression<Func<TEntity, bool>> filter, RelationalRelations? relations)
+    {
+        var normalized = PredicateNormalizer.Normalize(filter);
+        return relations is null ? normalized : RelationPredicates.Mark(normalized, relations.Navigation);
+    }
+
+    /// <summary>Whether a conjunct holds a relation's marker (under any AND, OR or NOT).</summary>
+    private static bool CrossesRelation(ExpressionNode node) => node switch
+    {
+        MethodCallNode { Method.Name: RelationPredicates.RelatedRowExistsFunction } => true,
+        BinaryNode binary => CrossesRelation(binary.Left) || CrossesRelation(binary.Right),
+        UnaryNode { Operand: { } operand } => CrossesRelation(operand),
+        _ => false,
+    };
+
+    /// <summary>The relation tests of the filters, for a plan's notes.</summary>
+    public static IReadOnlyList<RelationPredicate> Relations<TEntity>(QueryOptions<TEntity>? options,
+        Expression<Func<TEntity, bool>>? extraFilter, Expression<Func<TEntity, bool>>? globalFilter, RelationalRelations relations)
+        where TEntity : class =>
+        Filters(options, extraFilter, globalFilter)
+            .SelectMany(filter => RelationPredicates.Find(PredicateNormalizer.Normalize(filter), relations.Navigation))
+            .ToList();
+
+    /// <summary>
     ///     Renders the filters strictly — every clause must be expressible, or the refusal propagates. Set-based
     ///     writes use this: a <c>DELETE</c>/<c>UPDATE</c> cannot half-apply a predicate.
     /// </summary>
     public static (string Where, List<object?> Parameters) Where<TEntity>(SqlDialect dialect,
         RelationalEntityConfiguration configuration, Expression<Func<TEntity, bool>> filter,
-        Expression<Func<TEntity, bool>>? globalFilter = null)
+        Expression<Func<TEntity, bool>>? globalFilter = null, RelationalRelations? relations = null)
         where TEntity : class
     {
         var clauses = new List<string>();
@@ -102,7 +134,8 @@ internal static class RelationalSql
 
         foreach (var predicate in Filters(null, filter, globalFilter))
         {
-            clauses.Add(SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(predicate), parameters));
+            clauses.Add(SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(Prepared(predicate, relations)),
+                parameters, relations));
         }
 
         return (string.Join(" AND ", clauses), parameters);
@@ -113,11 +146,13 @@ internal static class RelationalSql
     ///     are appended to <paramref name="parameters" />, numbered after them.
     /// </summary>
     public static string Where<TEntity>(SqlDialect dialect, RelationalEntityConfiguration configuration,
-        Expression<Func<TEntity, bool>>? filter, Expression<Func<TEntity, bool>>? globalFilter, List<object?> parameters)
+        Expression<Func<TEntity, bool>>? filter, Expression<Func<TEntity, bool>>? globalFilter, List<object?> parameters,
+        RelationalRelations? relations = null)
         where TEntity : class
     {
         var clauses = Filters(null, filter, globalFilter)
-            .Select(predicate => SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(predicate), parameters))
+            .Select(predicate => SqlFilterRenderer.Render(dialect, configuration,
+                FilterInterpreter.Interpret(Prepared(predicate, relations)), parameters, relations))
             .ToList();
         return clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
     }

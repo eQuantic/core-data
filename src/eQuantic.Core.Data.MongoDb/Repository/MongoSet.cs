@@ -36,6 +36,14 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     private Expression<Func<TEntity, bool>> Scoped(Expression<Func<TEntity, bool>> filter) =>
         _unitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
 
+    /// <summary>
+    ///     A set-based write's filter as the driver reads it: scoped, normalized, text without regard to case as an escaped
+    ///     regular expression, and each test across a relation resolved into the related keys — read first, in the
+    ///     session — since a write's filter cannot hold a <c>$lookup</c>.
+    /// </summary>
+    private Task<Expression<Func<TEntity, bool>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
+        MongoPredicates.ReadyAsync(Scoped(filter), _unitOfWork, cancellationToken);
+
     // ---------------------------------------------------------------- IQueryable
     public Type ElementType => Queryable.ElementType;
     public Expression Expression => Queryable.Expression;
@@ -84,9 +92,10 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         }
 
         var session = _unitOfWork.Session;
+        var ready = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var result = session is null
-            ? await _collection.DeleteManyAsync(Scoped(filter), cancellationToken).ConfigureAwait(false)
-            : await _collection.DeleteManyAsync(session, Scoped(filter), cancellationToken: cancellationToken).ConfigureAwait(false);
+            ? await _collection.DeleteManyAsync(ready, cancellationToken).ConfigureAwait(false)
+            : await _collection.DeleteManyAsync(session, ready, cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.DeletedCount;
     }
 
@@ -105,9 +114,10 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     {
         var update = WithUpdateStamp(MongoUpdate.Build(updateExpression), updateExpression);
         var session = _unitOfWork.Session;
+        var ready = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var result = await MongoDuplicateKeys.TranslatingAsync(async () => session is null
-            ? await _collection.UpdateManyAsync(Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false)
-            : await _collection.UpdateManyAsync(session, Scoped(filter), update, cancellationToken: cancellationToken).ConfigureAwait(false))
+            ? await _collection.UpdateManyAsync(ready, update, cancellationToken: cancellationToken).ConfigureAwait(false)
+            : await _collection.UpdateManyAsync(session, ready, update, cancellationToken: cancellationToken).ConfigureAwait(false))
             .ConfigureAwait(false);
         return result.MatchedCount;
     }
@@ -124,7 +134,7 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken)
     {
         var update = WithUpdateStamp(MongoUpdate.Build(updateExpression), updateExpression);
-        var scoped = Builders<TEntity>.Filter.Where(Scoped(filter));
+        var scoped = Builders<TEntity>.Filter.Where(await Ready(filter, cancellationToken).ConfigureAwait(false));
         var session = _unitOfWork.Session;
         var ids = await (session is null ? _collection.Find(scoped) : _collection.Find(session, scoped))
             .Project(Builders<TEntity>.Projection.Include("_id"))

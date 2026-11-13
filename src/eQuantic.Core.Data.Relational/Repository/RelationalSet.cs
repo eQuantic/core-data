@@ -104,7 +104,8 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         }
 
         // The global filter scopes set-based writes too (a tenant-scoped delete stays tenant-scoped).
-        var (where, parameters) = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
+        var (where, parameters) = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(),
+            _unitOfWork.Relations);
         var sql = $"DELETE FROM {_dialect.Quote(_configuration.TableName)} WHERE {where}";
         await using var command = await _unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -123,7 +124,8 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     {
         var parameters = new List<object?>();
         var set = SetList(updateExpression, parameters, existingRow: null);
-        var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters);
+        var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters,
+            _unitOfWork.Relations);
 
         var sql = $"UPDATE {Table} SET {set} WHERE {where}";
         return await _unitOfWork.TranslatingAsync(async () =>
@@ -146,7 +148,8 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         var columns = _configuration.Columns;
         var parameters = new List<object?>();
         var set = SetList(updateExpression, parameters, existingRow: null);
-        var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters);
+        var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters,
+            _unitOfWork.Relations);
 
         if (_dialect.UpdateReturningSql(Table, set, where, columns.Select(column => _dialect.Quote(column.Name)).ToList()) is { } returning)
         {
@@ -159,7 +162,8 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             // update and the read that hands them back.
             var keyColumns = string.Join(", ", _configuration.Keys.Select(key => _dialect.Quote(key.Name)));
             var whereParameters = new List<object?>();
-            var lockedWhere = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), whereParameters);
+            var lockedWhere = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), whereParameters,
+                _unitOfWork.Relations);
             var keys = new List<object?[]>();
             await using (var command = await _unitOfWork.CommandAsync(
                              $"SELECT {keyColumns} FROM {Table} WHERE {lockedWhere}{_dialect.ForUpdateClause}", whereParameters,

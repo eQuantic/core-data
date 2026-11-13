@@ -59,6 +59,10 @@ public class SqlServerDialect : SqlDialect
     public override string FalseLiteral => "(1=0)";
 
     /// <inheritdoc />
+    /// <remarks>SQL Server's <c>LIKE</c> also reads <c>[</c> as the start of a character class.</remarks>
+    public override string LikeWildcards => "%_[";
+
+    /// <inheritdoc />
     public override string LimitClause(string limitParameter, string? offsetParameter) =>
         $"OFFSET {offsetParameter ?? "0"} ROWS FETCH NEXT {limitParameter} ROWS ONLY";
 

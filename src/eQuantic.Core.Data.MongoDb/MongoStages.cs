@@ -24,7 +24,7 @@ internal static class MongoStages
 
     /// <summary>Renders a predicate over <typeparamref name="T" /> as a <c>$match</c> filter document.</summary>
     public static BsonDocument Filter<T>(LambdaExpression predicate) =>
-        Builders<T>.Filter.Where((Expression<Func<T, bool>>)predicate).Render(Args<T>());
+        Builders<T>.Filter.Where((Expression<Func<T, bool>>)MongoPredicates.Rendered(predicate)).Render(Args<T>());
 
     /// <summary>Whether every sort places nulls where MongoDB already puts them (first ascending, last descending).</summary>
     public static bool NaturalNulls(IReadOnlyList<MemorySort> sorts) =>

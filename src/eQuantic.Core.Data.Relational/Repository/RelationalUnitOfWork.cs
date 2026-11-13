@@ -85,6 +85,9 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
     internal RelationalEntityConfiguration Configuration<TEntity>() => Model.For(typeof(TEntity));
 
+    /// <summary>The model's relations for one statement: a filter across them renders as a correlated <c>EXISTS</c>.</summary>
+    internal RelationalRelations Relations => new(Model, GlobalFilter);
+
     /// <summary>The global filter registered for <typeparamref name="TEntity" /> in this scope, or <c>null</c>.</summary>
     internal Expression<Func<TEntity, bool>>? GlobalFilter<TEntity>() where TEntity : class =>
         (Expression<Func<TEntity, bool>>?)GlobalFilter(typeof(TEntity));

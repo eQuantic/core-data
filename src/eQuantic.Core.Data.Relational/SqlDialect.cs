@@ -66,6 +66,12 @@ public abstract class SqlDialect
     /// <summary>The literal for an always-false predicate (an empty <c>IN</c>); some dialects have no <c>FALSE</c>.</summary>
     public virtual string FalseLiteral => "FALSE";
 
+    /// <summary>
+    ///     The characters <c>LIKE</c> reads as wildcards in this dialect (<c>%</c> and <c>_</c>, and <c>[</c> on SQL
+    ///     Server): a value matched literally has each of them escaped.
+    /// </summary>
+    public virtual string LikeWildcards => "%_";
+
     /// <summary>The DDL type for a CLR type (used by <c>CREATE TABLE</c> migrations).</summary>
     public abstract string SqlType(Type type);
 

@@ -547,7 +547,15 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             notes.Add("Skip/Take render as the dialect's LIMIT/OFFSET; no count runs.");
         }
 
-        var plan = RelationalSql.Plan(_dialect, _configuration, options, null, global);
+        var plan = RelationalSql.Plan(_dialect, _configuration, options, null, global, UnitOfWork.Relations);
+        foreach (var relation in RelationalSql.Relations(options, null, global, UnitOfWork.Relations))
+        {
+            notes.Add($"'{relation.Text}' runs as a correlated {(relation.Negated ? "NOT EXISTS" : "EXISTS")} over " +
+                      $"\"{UnitOfWork.Model.For(relation.Navigation.Target).TableName}\", its rows matched by " +
+                      $"{relation.Navigation.Target.Name}.{relation.Navigation.TargetKey.Name} = " +
+                      $"{relation.Navigation.Owner.Name}.{relation.Navigation.OwnerKey.Name}.");
+        }
+
         var sql = SelectSql(_configuration.Columns, plan.Where, options, false, null, null);
 
         if (plan.Residual.Count > 0)
@@ -929,7 +937,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
     private RelationalSqlPlan GatedPlan(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
     {
-        var plan = RelationalSql.Plan(_dialect, _configuration, options, extraFilter, GlobalFilter(options));
+        var plan = RelationalSql.Plan(_dialect, _configuration, options, extraFilter, GlobalFilter(options), UnitOfWork.Relations);
 
         if (plan.Residual.Count > 0 && !RelationalQueryOptionsExtensions.IsClientEvaluationOptedIn(options))
         {
