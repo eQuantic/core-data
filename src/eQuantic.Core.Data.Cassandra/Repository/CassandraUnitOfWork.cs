@@ -14,7 +14,7 @@ namespace eQuantic.Core.Data.Cassandra.Repository;
 ///     tracking. An explicit transaction defers its writes and runs them as one atomic <c>LOGGED BATCH</c> on
 ///     <see cref="CommitTransactionAsync" />.
 /// </summary>
-public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
+public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly ISession Session;
@@ -380,6 +380,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         finally
         {
             _inTransaction = false;
+            await EndTransactionLocksAsync().ConfigureAwait(false);
         }
     }
 
@@ -388,7 +389,7 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     {
         _pending.Clear();
         _inTransaction = false;
-        return Task.CompletedTask;
+        return EndTransactionLocksAsync();
     }
 
     // -------------------------------------------------------------- repositories / sets
@@ -443,7 +444,15 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         GC.SuppressFinalize(this);
     }
 
-    protected virtual void Dispose(bool disposing) => _disposed = _disposed || disposing;
+    protected virtual void Dispose(bool disposing)
+    {
+        if (disposing && !_disposed)
+        {
+            ReleaseNamedLocks();
+        }
+
+        _disposed = _disposed || disposing;
+    }
 }
 
 /// <summary>

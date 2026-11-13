@@ -22,6 +22,9 @@ public class SqlServerDialect : SqlDialect
     public override string System => "mssql";
 
     /// <inheritdoc />
+    public override SqlNamedLocks NamedLocks => SqlServerNamedLocks.Instance;
+
+    /// <inheritdoc />
     public override string Quote(string identifier) => "[" + identifier.Replace("]", "]]") + "]";
 
     /// <inheritdoc />

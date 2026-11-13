@@ -17,6 +17,9 @@ public class MySqlDialect : SqlDialect
     public override string System => "mysql";
 
     /// <inheritdoc />
+    public override SqlNamedLocks NamedLocks => MySqlNamedLocks.Instance;
+
+    /// <inheritdoc />
     public override string Quote(string identifier) => "`" + identifier.Replace("`", "``") + "`";
 
     /// <inheritdoc />

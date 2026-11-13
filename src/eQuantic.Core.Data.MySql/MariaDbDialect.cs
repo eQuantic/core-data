@@ -13,6 +13,10 @@ public class MariaDbDialect : MySqlDialect
     public override string System => "mariadb";
 
     /// <inheritdoc />
+    /// <remarks><c>GET_LOCK</c> as on MySQL, waiting for fractions of a second.</remarks>
+    public override SqlNamedLocks NamedLocks => MySqlNamedLocks.MariaDb;
+
+    /// <inheritdoc />
     public override string InsertSql(string quotedTable, string columns, string values, string? returningKey) =>
         returningKey is null
             ? $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})"

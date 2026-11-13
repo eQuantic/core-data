@@ -15,7 +15,7 @@ namespace eQuantic.Core.Data.CosmosDb.Repository;
 ///     defers its staged writes and runs them as a single <see cref="TransactionalBatch" /> on
 ///     <see cref="CommitTransactionAsync" />.
 /// </summary>
-public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
+public abstract partial class CosmosUnitOfWork : IQueryableUnitOfWork
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly CosmosClient Client;
@@ -319,6 +319,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         finally
         {
             _inTransaction = false;
+            await EndTransactionLocksAsync().ConfigureAwait(false);
         }
     }
 
@@ -328,7 +329,7 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
         _pending.Clear();
         _generatedInserts.Clear();
         _inTransaction = false;
-        return Task.CompletedTask;
+        return EndTransactionLocksAsync();
     }
 
     // -------------------------------------------------------------- repositories / sets
@@ -385,6 +386,11 @@ public abstract class CosmosUnitOfWork : IQueryableUnitOfWork
 
     protected virtual void Dispose(bool disposing)
     {
+        if (disposing && !_disposed)
+        {
+            ReleaseNamedLocks();
+        }
+
         _disposed = _disposed || disposing;
     }
 }
