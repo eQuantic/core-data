@@ -59,3 +59,30 @@ keeps working when it lands.)
 aggregates the projection didn't select are still computed server-side where the store allows.
 `Sorting does not apply to a grouped read` (every provider says so consistently): order the grouped
 result in memory — it is already small.
+
+## Distinct values
+
+Each distinct value of a member — or each distinct combination of several — among the rows a
+filter matches, deduplicated by the store and never by loading the rows whole:
+
+```csharp
+var distinct = (IDistinctReadRepository<Comment>)repo;
+var issues = await distinct.GetDistinctAsync(
+    c => new { c.Repository, c.IssueNumber },          // one member, or several
+    c => c.Repository == "repo-a");                    // the rows to look at (optional)
+// (repo-a, 1), (repo-a, 2) — each combination once
+```
+
+The values come back in no particular order; an order, a skip or a limit in the options is refused
+rather than ignored — order the (already small) result in memory. The query filters apply as on any
+read.
+
+| Store | Executes as |
+|---|---|
+| Relational | `SELECT DISTINCT a, b FROM … WHERE …` |
+| MongoDB | `$match` then a `$group` on the selected value (the driver's LINQ `Distinct`) |
+| Cosmos DB | `SELECT DISTINCT VALUE { … } FROM … WHERE …` |
+| Cassandra | `SELECT a, b … GROUP BY a, b` when the members are a prefix of the primary key that covers the partition key; any other selection fetches the selected columns and deduplicates them client-side, behind `.AllowClientEvaluation()` |
+
+A filter with a client-side residual (behind the store's opt-in) fetches the selected and the
+residual's columns and deduplicates in memory — the same gate as any read.

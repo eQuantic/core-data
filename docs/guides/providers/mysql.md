@@ -18,6 +18,10 @@ truth lives.
 - Concurrency tokens, composite keys, facets (`varchar(n)`, `decimal(p,s)`), converters,
   navigations/includes, GROUP BY/HAVING, UNION/UNION ALL — the full
   [relational engine surface](../concepts/contracts.md).
+- Read shapes on both dialects: shaped includes ranked with `ROW_NUMBER()` (MySQL 8.0, MariaDB
+  10.2 or later), relation counts as correlated subqueries, nulls placed by ordering on
+  `CASE WHEN col IS NULL` (neither engine has `NULLS FIRST`), `LIMIT`/`OFFSET` pages without a count
+  and `SELECT DISTINCT` — see [Querying](../querying/includes.md).
 - `[SearchIndex]` materializes **no index** on MySQL (no trigram equivalent in the box) — `LIKE`
   still pushes down, unindexed, and [`Explain()`](../modeling/explain.md) says exactly that. The
   declaration stays portable; the plan differs per dialect, visibly.

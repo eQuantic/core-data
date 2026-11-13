@@ -13,6 +13,7 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
 | Composite keys / facets / converters / includes | full relational engine surface |
 | GROUP BY / HAVING / UNION | fully native |
 | Paging | `OFFSET … FETCH`; keyset continuation over the key |
+| Read shapes | shaped includes ranked with `ROW_NUMBER()`, relation counts as correlated subqueries, nulls placed by ordering on `CASE WHEN col IS NULL` (SQL Server has no `NULLS FIRST`), `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
 
 ## Dialect specifics
 

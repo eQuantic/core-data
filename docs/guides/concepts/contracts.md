@@ -14,6 +14,7 @@ application code compiled against the contracts does not know (or care) which st
 | `IQueryableRepository<…>` / `IAsyncQueryableRepository<…>` | The same, constrained to a queryable unit of work |
 | `IAggregateReadRepository<TEntity>` | `Sum`, `Min`, `Max`, `Average` — pushed down where the store can |
 | `IGroupedReadRepository<TEntity>` | Typed `GroupByAsync` with aggregates and `HAVING` |
+| `IDistinctReadRepository<TEntity>` | `GetDistinctAsync` — the distinct values of one member, or combinations of several |
 | `IContinuationReadRepository<TEntity>` | `GetPageAsync(pageSize, continuationToken)` — keyset/native continuation paging |
 | `IStreamingReadRepository<TEntity>` | `GetStreamAsync` — `IAsyncEnumerable<TEntity>`, one page in memory at a time |
 | `IExplainableRepository<TEntity>` | `Explain(options)` — the query plan, before you run it |
@@ -49,7 +50,11 @@ var options = new QueryOptions<Product>()
     .Where("price", FilterOperator.LessThan, 30)       // …path + operator (wire-friendly)…
     .Where(specification)                              // …or a specification
     .OrderBy(p => p.Price).ThenByDescending(p => p.Name)
-    .Include(nameof(Product.Supplier))           // navigations (relational, MongoDB)
+    .ThenBy(p => p.Discontinued, NullsOrder.Last)      // nulls first or last, on every store
+    .Skip(20).Take(10)                                 // a page, no count
+    .Include(nameof(Product.Supplier))                 // navigations, on every store
+    .Include(p => p.Reviews, r => r                    // …or a collection, shaped per parent
+        .Where(x => x.Approved).OrderByDescending(x => x.At).Take(3))
     .IgnoringQueryFilters()                      // opt out of global filters
     .WithTag("catalog-page");                    // lands in traces / query text
 ```
@@ -60,7 +65,12 @@ They compose on the same options object, so the *shape* of a query stays portabl
 *store-specific costs* stay visible at the call site.
 
 Paging types are equally small: `PageRequest(pageIndex, pageSize)` in, `PagedResult<T>` (items +
-total count) out; `ContinuedResult<T>` (items + opaque continuation token) for token paging.
+total count) out; `ContinuedResult<T>` (items + opaque continuation token) for token paging. The
+read shapes — [shaped includes](../querying/includes.md#shaping-an-included-collection),
+[relation counts](../querying/projections.md#counting-a-relation),
+[nulls placement and pages without a total](../querying/paging.md#where-nulls-go) and
+[distinct values](../querying/aggregates.md#distinct-values) — mean the same on every store, and
+each page says which mechanism each store uses.
 
 ## Global query filters
 
