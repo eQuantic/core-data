@@ -1,5 +1,7 @@
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Write;
 using eQuantic.Linq.Specification;
 
 namespace eQuantic.Core.Data.Cassandra.Repository;
@@ -8,7 +10,8 @@ namespace eQuantic.Core.Data.Cassandra.Repository;
 ///     The native Apache Cassandra repository — the read surface from <see cref="CassandraReadRepository{TEntity, TKey}" />
 ///     plus writes. Entity writes are staged on the unit of work (a Cassandra <c>INSERT</c> is an upsert, so
 ///     <c>Add</c>/<c>Modify</c>/<c>Merge</c> map to it) and flushed on commit; set-based <c>DeleteMany</c>/<c>UpdateMany</c>
-///     run immediately and require the primary key in their <c>WHERE</c>.
+///     run immediately and require the partition key in their filter — conditions on other members become a lightweight
+///     transaction's <c>IF</c>. Upserts, inserts skipping duplicates and returning updates are lightweight transactions too.
 /// </summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
 /// <typeparam name="TKey">The key type.</typeparam>
@@ -17,7 +20,10 @@ public class CassandraRepository<TEntity, TKey> :
     IRepository<TEntity, TKey>,
     IAsyncRepository<TEntity, TKey>,
     IQueryableRepository<TEntity, TKey>,
-    IAsyncQueryableRepository<TEntity, TKey>
+    IAsyncQueryableRepository<TEntity, TKey>,
+    IUpsertRepository<TEntity, TKey>,
+    IReturningUpdateRepository<TEntity, TKey>,
+    IPartialModifyRepository<TEntity, TKey>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>Initializes the repository over a unit of work.</summary>
@@ -136,4 +142,45 @@ public class CassandraRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<long> UpdateManyAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory, CancellationToken cancellationToken = default) =>
         Set().UpdateManyAsync(specification.SatisfiedBy(), updateFactory, cancellationToken);
+
+    // ---------------------------------------------------------------- upserts and returning updates (immediate)
+
+    /// <inheritdoc />
+    public Task<TEntity> UpsertAsync(TEntity entity, CancellationToken cancellationToken = default) =>
+        Set().UpsertAsync(entity, null, null, null, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>Cassandra holds nothing unique but the primary key: <paramref name="on" /> has to name all of it.</remarks>
+    public Task<TEntity> UpsertAsync(TEntity entity, Expression<Func<TEntity, object?>> on,
+        Expression<Func<TEntity, TEntity>>? update = null, Expression<Func<TEntity, bool>>? conflictFilter = null,
+        CancellationToken cancellationToken = default) =>
+        Set().UpsertAsync(entity, MemberSelection.Names(on), update, conflictFilter, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<long> InsertManyAsync(IEnumerable<TEntity> items, bool skipDuplicates = false,
+        CancellationToken cancellationToken = default) =>
+        Set().InsertManyAsync(items, skipDuplicates, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(Expression<Func<TEntity, bool>> filter,
+        Expression<Func<TEntity, TEntity>> update, CancellationToken cancellationToken = default) =>
+        Set().UpdateAndGetAsync(filter, update, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(ISpecification<TEntity> specification,
+        Expression<Func<TEntity, TEntity>> update, CancellationToken cancellationToken = default) =>
+        Set().UpdateAndGetAsync(specification.SatisfiedBy(), update, cancellationToken);
+
+    // ---------------------------------------------------------------- member-scoped staged updates
+
+    /// <inheritdoc />
+    public void Modify(TEntity item, Expression<Func<TEntity, object?>> members) =>
+        UnitOfWork.StagePartialUpdate(item, MemberSelection.Names(members));
+
+    /// <inheritdoc />
+    public Task ModifyAsync(TEntity item, Expression<Func<TEntity, object?>> members)
+    {
+        UnitOfWork.StagePartialUpdate(item, MemberSelection.Names(members));
+        return Task.CompletedTask;
+    }
 }

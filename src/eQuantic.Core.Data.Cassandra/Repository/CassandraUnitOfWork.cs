@@ -210,6 +210,14 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
     ///     A LOGGED BATCH cannot carry a lightweight transaction alongside other partitions' writes — Cassandra
     ///     restricts conditional batches to a single partition. The combination refuses instead of degrading.
     /// </summary>
+    private void GuardConditionalInTransaction<TEntity>(CassandraEntityConfiguration configuration)
+    {
+        if (configuration.ConcurrencyColumn is not null)
+        {
+            GuardConditionalInTransaction<TEntity>();
+        }
+    }
+
     private void GuardConditionalInTransaction<TEntity>()
     {
         if (_inTransaction)
@@ -280,6 +288,81 @@ public abstract class CassandraUnitOfWork : IQueryableUnitOfWork
         await ReadBackAsync(statements, consistency).ConfigureAwait(false);
         return statements.Count;
     }
+
+    /// <summary>Gives these entities, about to be inserted, the numbers their sequences hand out.</summary>
+    internal Task AssignSequencesAsync(CassandraEntityConfiguration configuration, IEnumerable<object> entities) =>
+        AssignSequencesAsync(entities.Select(entity => new PendingStatement(() => default, false)
+        {
+            Generating = entity,
+            Configuration = configuration,
+        }).ToList());
+
+    /// <summary>
+    ///     Stages an update of the named members only (and of the update's lifecycle stamps): <c>UPDATE … SET</c> those
+    ///     columns <c>WHERE</c> the primary key — a lightweight transaction on the version read when the entity carries a
+    ///     token. Every other column keeps what it holds. Cassandra's <c>UPDATE</c> is an upsert: a row deleted meanwhile
+    ///     is written again, with these columns only.
+    /// </summary>
+    internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
+    {
+        var configuration = Configuration<TEntity>();
+        var columns = new List<CassandraColumn>();
+        foreach (var member in members)
+        {
+            var column = configuration.Column(configuration.ColumnFor(member))
+                         ?? throw new NotSupportedException($"'{typeof(TEntity).Name}' has no mapped member '{member}' to modify.");
+            if (configuration.IsKey(column.Name))
+            {
+                throw new NotSupportedException($"'{member}' is part of the primary key, which identifies the row and is never modified.");
+            }
+
+            if (configuration.IsStoreGenerated(column.Name) || configuration.IsCounter(column.Name)
+                || CassandraEntityConfiguration.Same(column.Name, configuration.ConcurrencyColumn ?? string.Empty))
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is store-generated, a counter or the concurrency token: an update does not set it.");
+            }
+
+            columns.Add(column);
+        }
+
+        GuardConditionalInTransaction<TEntity>(configuration);
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        foreach (var stamp in EntityLifecycle.UpdateStamps(typeof(TEntity), Conventions, ServiceProvider))
+        {
+            if (configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Member, stamp.Name)) is { } stampColumn
+                && !columns.Contains(stampColumn))
+            {
+                columns.Add(stampColumn);
+            }
+        }
+
+        var keys = CassandraMapper.PrimaryKey(configuration);
+        var sets = columns.Select(column => $"{column.Name} = ?").ToList();
+        var values = columns.Select(column => CassandraValues.ToStored(column, Read(item, column.Member))).ToList();
+        values.AddRange(keys.Select(key => CassandraValues.ToStored(configuration.Column(key), Read(item, configuration.MemberFor(key)))));
+        var cql = $"UPDATE {configuration.TableName} SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))}";
+
+        if (configuration.ConcurrencyColumn is not { } token)
+        {
+            _pending.Add(new PendingStatement(cql, values.ToArray(), false));
+            return;
+        }
+
+        var property = typeof(TEntity).GetProperty(configuration.MemberFor(token),
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)!;
+        var current = Convert.ToInt64(property.GetValue(item) ?? 0L);
+        property.SetValue(item, Convert.ChangeType(current + 1, Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType));
+        values.Insert(sets.Count, current + 1);
+        sets.Add($"{token} = ?");
+        cql = $"UPDATE {configuration.TableName} SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))} IF {token} = ?";
+        values.Add(current);
+        _pending.Add(new PendingStatement(cql, values.ToArray(), true));
+    }
+
+    private static object? Read(object entity, string member) =>
+        entity.GetType().GetProperty(member, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance
+                                             | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(entity);
 
     /// <summary>
     ///     Gives every staged insert the numbers its sequences hand out: one compare-and-set per sequence for the whole

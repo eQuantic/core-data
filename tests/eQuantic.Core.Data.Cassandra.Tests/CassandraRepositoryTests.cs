@@ -185,13 +185,19 @@ public sealed class CassandraRepositoryTests : CassandraIntegrationTest
     }
 
     [Test]
-    public async Task Update_many_numeric_increment_is_rejected_with_counter_guidance()
+    public async Task Update_many_numeric_increment_on_a_plain_column_is_a_compare_and_set()
     {
         using var db = await NewSchemaAsync();
+        var account = new Account { Id = Guid.NewGuid(), Owner = "ana", Balance = 10m };
+        await Seed(db, account);
 
-        Assert.That(async () => await AccountRepo(db).UpdateManyAsync(x => x.Id == Guid.NewGuid(),
-                x => new Account { Balance = x.Balance + 1m }),
-            Throws.TypeOf<NotSupportedException>().With.Message.Contains("counter"));
+        // CQL has no col = col + n outside counter columns: the row is read, and the sum is written IF the column
+        // still holds what was read — a lightweight transaction, retried when another writer moved it first.
+        Assert.That(await AccountRepo(db).UpdateManyAsync(x => x.Id == account.Id, x => new Account { Balance = x.Balance + 1m }),
+            Is.EqualTo(1L));
+        Assert.That((await AccountRepo(db).GetAsync(account.Id))!.Balance, Is.EqualTo(11m));
+        Assert.That(await AccountRepo(db).UpdateManyAsync(x => x.Id == Guid.NewGuid(), x => new Account { Balance = x.Balance + 1m }),
+            Is.EqualTo(0L), "no row matched, so none was written");
     }
 
     [Test]

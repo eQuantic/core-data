@@ -81,6 +81,9 @@ public static class CassandraServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<,>), typeof(CassandraRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncRepository<,>), typeof(CassandraRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncQueryableRepository<,>), typeof(CassandraRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IUpsertRepository<,>), typeof(CassandraRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IReturningUpdateRepository<,>), typeof(CassandraRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IPartialModifyRepository<,>), typeof(CassandraRepository<,>), lifetime));
 
         return services;
     }
