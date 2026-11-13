@@ -46,7 +46,8 @@ public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelS
                 : null,
             TimeToLiveSeconds = configuration.DefaultTtlSeconds,
             Search = configuration.SearchColumns
-                .Select(search => new SearchSnapshot(configuration.MemberFor(search.Column), search.Mode.ToString()))
+                .Select(search => new SearchSnapshot(configuration.MemberFor(search.Column),
+                    search.CaseInsensitive ? search.Mode + ", case-insensitive" : search.Mode.ToString()))
                 .ToList(),
         };
 

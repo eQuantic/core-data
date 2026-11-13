@@ -25,6 +25,9 @@ public sealed class CosmosTestServer
     public const string SecretsContainer = "secrets";
     public const string UsersContainer = "users";
 
+    private static readonly string[] RelationContainers =
+        ["rel_items", "rel_mentions", "rel_runs", "rel_boxes", "rel_artifacts", "rel_repos", "rel_spaces"];
+
     // The well-known emulator account key (identical across the classic and vNext emulators).
     private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
 
@@ -84,6 +87,12 @@ public sealed class CosmosTestServer
                 UniqueKeyPolicy = new UniqueKeyPolicy { UniqueKeys = { new UniqueKey { Paths = { "/email" } } } },
             }));
 
+            // The query-predicate entities each live in a container of their own: a relation crosses containers.
+            foreach (var relationContainer in RelationContainers)
+            {
+                await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(relationContainer, "/category")));
+            }
+
             var services = new ServiceCollection();
             services.AddSingleton(_client);
 
@@ -136,7 +145,15 @@ public sealed class CosmosTestServer
         .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
-        .Entity<WideRecord>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category).ConcurrencyToken(x => x.ETag));
+        .Entity<WideRecord>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category).ConcurrencyToken(x => x.ETag))
+        .Entity<RelItem>(entity => entity.Container("rel_items").PartitionKey(x => x.Category))
+        .Entity<RelMention>(entity => entity.Container("rel_mentions").PartitionKey(x => x.Category))
+        .Entity<RelRun>(entity => entity.Container("rel_runs").PartitionKey(x => x.Category))
+        .Entity<RelBox>(entity => entity.Container("rel_boxes").PartitionKey(x => x.Category))
+        .Entity<RelArtifact>(entity => entity.Container("rel_artifacts").PartitionKey(x => x.Category))
+        .Entity<RelRepo>(entity => entity.Container("rel_repos").PartitionKey(x => x.Category))
+        .Entity<RelSpace>(entity => entity.Container("rel_spaces").PartitionKey(x => x.Category))
+        .Entity<RelCompany>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
 
     [OneTimeTearDown]
     public async Task StopAsync()

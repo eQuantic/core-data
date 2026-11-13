@@ -114,6 +114,11 @@ internal static class CassandraCql
     public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration,
         QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null,
         Expression<Func<TEntity, bool>>? globalFilter = null)
+        where TEntity : class =>
+        Plan(configuration, Filters(options, extraFilter, globalFilter).Select(PredicateNormalizer.Normalize));
+
+    /// <summary>The pushdown plan of the filters as given (each already prepared: normalized, its relations resolved).</summary>
+    public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration, IEnumerable<Expression<Func<TEntity, bool>>> filters)
         where TEntity : class
     {
         var clauses = new List<string>();
@@ -123,7 +128,7 @@ internal static class CassandraCql
         var requiresFiltering = false;
         var partitionScoped = false;
 
-        foreach (var filter in Filters(options, extraFilter, globalFilter))
+        foreach (var filter in filters)
         {
             // One node-model conversion per filter (a single partial-evaluation pass); splitting, interpretation
             // and the OR analysis all walk the nodes, and only a refused conjunct is rebuilt into an expression
@@ -249,7 +254,8 @@ internal static class CassandraCql
     public static bool ClientEvaluationOptedIn<TEntity>(QueryOptions<TEntity>? options) where TEntity : class =>
         CassandraQueryOptionsExtensions.IsClientEvaluationOptedIn(options);
 
-    private static IEnumerable<Expression<Func<TEntity, bool>>> Filters<TEntity>(
+    /// <summary>The filters a read applies: the global filter, the options' filter and specification, and the extra filter.</summary>
+    public static IEnumerable<Expression<Func<TEntity, bool>>> Filters<TEntity>(
         QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
         Expression<Func<TEntity, bool>>? globalFilter) where TEntity : class
     {

@@ -91,6 +91,9 @@ internal static class CassandraCqlRenderer
                     _ => "%" + EscapedFragment(text.Value) + "%",
                 }, prefixOnly: text.Operator == StringOperator.StartsWith, values));
                 return;
+            case TextFilter text:
+                clauses.Add(IgnoringCase(configuration, text, values));
+                return;
             case FunctionFilter { Function: "Like", Operator: null, Arguments: [string pattern] } like:
                 clauses.Add(Like(configuration, like.Member, Column(configuration, like.Member), pattern,
                     prefixOnly: !pattern.StartsWith('%') && pattern.EndsWith('%') && pattern.IndexOf('%') == pattern.Length - 1,
@@ -132,6 +135,48 @@ internal static class CassandraCqlRenderer
         }
 
         values.Add(pattern);
+        return $"{column} LIKE ?";
+    }
+
+    /// <summary>
+    ///     Renders a text test that ignores case as a <c>LIKE</c> — only on a column whose search index matches without
+    ///     regard to case (a non-tokenizing, case-insensitive SASI analyzer), and only when the index's mode serves the
+    ///     match. Every refusal degrades to the gated client-side residual, where C# decides — a test over the lower-cased
+    ///     text whose value holds an upper-case letter included.
+    /// </summary>
+    private static string IgnoringCase(CassandraEntityConfiguration configuration, TextFilter text, List<object?> values)
+    {
+        var column = Column(configuration, text.Member);
+        if (!configuration.CanLikeIgnoringCase(column, out var mode))
+        {
+            throw new NotSupportedException(
+                $"'{text.Member}' has no case-insensitive search index; declare one with SearchIndex(x => x.{text.Member}, mode, " +
+                "caseInsensitive: true) to push the match down, or run it client-side.");
+        }
+
+        if (!text.CanMatch)
+        {
+            throw new NotSupportedException("A test over the folded text whose value holds a letter of the other case matches nothing; it runs client-side.");
+        }
+
+        if (text.Value.Contains('%'))
+        {
+            throw new NotSupportedException("The value contains a literal '%' and SASI's LIKE has no escape syntax; run the match client-side.");
+        }
+
+        if (mode == CassandraSearchMode.Prefix && text.Match is not (TextMatch.StartsWith or TextMatch.Equals))
+        {
+            throw new NotSupportedException(
+                $"The search index on '{text.Member}' matches prefixes only; declare it with CassandraSearchMode.Contains, or run the match client-side.");
+        }
+
+        values.Add(text.Match switch
+        {
+            TextMatch.Equals => text.Value,
+            TextMatch.StartsWith => text.Value + "%",
+            TextMatch.EndsWith => "%" + text.Value,
+            _ => "%" + text.Value + "%",
+        });
         return $"{column} LIKE ?";
     }
 
@@ -194,7 +239,10 @@ internal static class CassandraCqlRenderer
 
         if (!configuration.IsKey(column))
         {
-            requiresFiltering = true;
+            // Cassandra takes IN only on the primary key ("IN predicates on non-primary-key columns are not yet
+            // supported"), with or without ALLOW FILTERING: the clause runs client-side.
+            throw new NotSupportedException(
+                $"Cassandra CQL takes IN only on the primary key; '{filter.Member} IN (…)' runs client-side.");
         }
 
         values.AddRange(filter.Values.Select(value => Stored(configuration, column, value)));

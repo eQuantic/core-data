@@ -254,6 +254,57 @@ internal static class CassandraInclude
             .ToList();
     }
 
+    /// <summary>
+    ///     The distinct values of a member of the related rows a relation test reads: <c>SELECT DISTINCT</c> of the
+    ///     partition key when the member is the table's partition key and nothing filters it; otherwise the member (and
+    ///     what a client-side filter reads) of the rows the condition matches, deduplicated client-side — through the same
+    ///     planner and gates as any read, under the read's opt-ins (a write carries none, so its related read has to be one
+    ///     the table serves natively).
+    /// </summary>
+    public static async Task<IReadOnlyCollection<object?>> RelatedKeysAsync<TTarget>(CassandraUnitOfWork unitOfWork,
+        Expression<Func<TTarget, bool>>? condition, PropertyInfo member, object? parentOptions, string what)
+        where TTarget : class
+    {
+        var configuration = unitOfWork.ConfigurationOf(typeof(TTarget))
+                            ?? throw new InvalidOperationException($"'{typeof(TTarget).Name}' is not registered in the Cassandra model.");
+        var column = configuration.ColumnFor(member.Name);
+        var options = Options(parentOptions, condition);
+        var plan = CassandraCql.Plan(configuration, options, null, unitOfWork.GlobalFilter<TTarget>());
+        var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions);
+
+        if (plan.Where.Length == 0 && plan.Residual.Count == 0 && plan.Alternatives.Count == 0
+            && configuration.PartitionKeys is [var partition] && CassandraEntityConfiguration.Same(partition, column))
+        {
+            var distinct = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(),
+                $"SELECT DISTINCT {column} FROM {configuration.TableName}", [], consistency, unitOfWork.CommandLogger,
+                unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            var only = new HashSet<string>([column], StringComparer.OrdinalIgnoreCase);
+            return distinct.Select(row => CassandraMapper.Materialize<TTarget>(configuration, row, only))
+                .Select(target => member.GetValue(target)).Distinct().ToList();
+        }
+
+        Gate(plan, options, what, clientWork: false);
+        if (plan.Residual.Count > 0 && !plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
+        {
+            throw new NotSupportedException(
+                $"{Capitalized(what)} runs client-side over a read of the whole table; call .AllowFiltering() as well to acknowledge the scan, " +
+                "or restrict the related rows by their partition key.");
+        }
+
+        var selected = new HashSet<string>([column, .. ResidualColumns(configuration, plan)], StringComparer.OrdinalIgnoreCase);
+        var cql = $"SELECT {string.Join(", ", selected)} FROM {configuration.TableName}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
+                  + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+        var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, plan.Values, consistency,
+            unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
+        var residuals = plan.Residual.Select(predicate => ((Expression<Func<TTarget, bool>>)predicate).Compile()).ToList();
+        return rows.Select(row => CassandraMapper.Materialize<TTarget>(configuration, row, selected))
+            .Where(target => residuals.All(residual => residual(target)))
+            .Select(target => member.GetValue(target))
+            .Distinct()
+            .ToList();
+    }
+
     /// <summary>The read's gates, applied to a related read: a scan needs <c>.AllowFiltering()</c>, client work <c>.AllowClientEvaluation()</c>.</summary>
     private static void Gate<TElement>(CassandraCqlPlan plan, QueryOptions<TElement> options, string what, bool clientWork)
         where TElement : class
@@ -374,7 +425,7 @@ internal static class CassandraInclude
     /// <summary>A key compared by its text, so a foreign key and the key it names match whatever their CLR types.</summary>
     private static string KeyText(object? value) => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
 
-    private static PropertyInfo Key(CassandraUnitOfWork unitOfWork, Type type)
+    internal static PropertyInfo Key(CassandraUnitOfWork unitOfWork, Type type)
     {
         var configuration = unitOfWork.ConfigurationOf(type)
                             ?? throw new InvalidOperationException($"'{type.Name}' is not registered in the Cassandra model.");
@@ -383,7 +434,7 @@ internal static class CassandraInclude
     }
 
     /// <summary>The foreign-key member on <paramref name="type" /> naming <paramref name="referenced" />: <c>[ForeignKey]</c>, then <c>{Name}Id</c>.</summary>
-    private static PropertyInfo? ForeignKey(Type type, string referenced) =>
+    internal static PropertyInfo? ForeignKey(Type type, string referenced) =>
         type.GetProperties(Members).FirstOrDefault(property =>
             property.GetCustomAttribute<ForeignKeyAttribute>()?.Name.Equals(referenced, StringComparison.OrdinalIgnoreCase) == true)
         ?? type.GetProperties(Members).FirstOrDefault(property =>

@@ -85,6 +85,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 cancellationToken).ConfigureAwait(false);
         }
 
+        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         if (split.Conditions.Count == 0)
         {
@@ -155,6 +156,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
+        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         var assignments = Assignments(updateExpression);
         if (split.Conditions.Count == 0 && !NeedsReadOfRow(assignments))
@@ -165,6 +167,19 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             }
 
             var (set, setValues) = CassandraUpdate.Build(_configuration, assignments);
+            if (!split.NamesEveryKey)
+            {
+                // An UPDATE names every primary-key column: the rows the partition restriction finds are read for their
+                // keys, and each is updated by its own (Cassandra's UPDATE is an upsert, as the single UPDATE is).
+                var keyed = await KeyedRowsAsync(split, cancellationToken).ConfigureAwait(false);
+                var primary = CassandraMapper.PrimaryKey(_configuration);
+                var byKey = string.Join(" AND ", primary.Select(key => $"{key} = ?"));
+                await Task.WhenAll(keyed.Select(row => CassandraStatements.ExecuteAsync(_session,
+                    $"UPDATE {_configuration.TableName} SET {set} WHERE {byKey}", [.. setValues, .. KeyValues(row, primary)], null,
+                    _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging))).ConfigureAwait(false);
+                return keyed.Count;
+            }
+
             var count = await CountAsync(split.KeyWhere, split.KeyValues, cancellationToken).ConfigureAwait(false);
             await CassandraStatements.ExecuteAsync(_session,
                 $"UPDATE {_configuration.TableName} SET {set} WHERE {split.KeyWhere}", setValues.Concat(split.KeyValues).ToArray(), null,
@@ -185,9 +200,18 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     internal async Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken)
     {
+        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         return await UpdateConditionallyAsync(split, filter, Assignments(updateExpression), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    ///     A set-based write's filter as the planner reads it: normalized, and each test across a relation resolved into
+    ///     the related keys (read first; a write carries no opt-ins, so the related read has to be one the table serves
+    ///     natively) — the write then finds its rows by those keys as by any other.
+    /// </summary>
+    private Task<Expression<Func<TEntity, bool>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
+        CassandraPredicates.ResolveAsync(filter, _unitOfWork, null, cancellationToken);
 
     /// <summary>The update's assignments, with the update's lifecycle stamps unless it assigns them.</summary>
     private List<UpdateAssignment> Assignments(Expression<Func<TEntity, TEntity>> updateExpression)

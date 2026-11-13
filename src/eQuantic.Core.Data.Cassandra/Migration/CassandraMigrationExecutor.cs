@@ -198,7 +198,11 @@ public sealed class CassandraMigrationExecutor : IMigrationExecutor
         new($"CREATE CUSTOM INDEX IF NOT EXISTS {configuration.TableName}_{search.Column}_search " +
             $"ON {configuration.TableName} ({search.Column}) " +
             "USING 'org.apache.cassandra.index.sasi.SASIIndex' " +
-            $"WITH OPTIONS = {{'mode': '{(search.Mode == CassandraSearchMode.Contains ? "CONTAINS" : "PREFIX")}'}}");
+            $"WITH OPTIONS = {{'mode': '{(search.Mode == CassandraSearchMode.Contains ? "CONTAINS" : "PREFIX")}'" +
+            (search.CaseInsensitive
+                ? ", 'analyzer_class': 'org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer', 'case_sensitive': 'false'"
+                : string.Empty) +
+            "}");
 
     private SimpleStatement Update(UpdateOperation operation)
     {

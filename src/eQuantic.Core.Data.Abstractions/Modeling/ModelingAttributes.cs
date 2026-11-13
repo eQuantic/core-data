@@ -164,6 +164,13 @@ public sealed class SearchIndexAttribute : Attribute
 {
     /// <summary>The matching mode (<see cref="SearchMode.Contains" /> by default).</summary>
     public SearchMode Mode { get; set; } = SearchMode.Contains;
+
+    /// <summary>
+    ///     Whether the index matches without regard to case (<c>false</c> by default): text tests that ignore case
+    ///     (<c>string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)</c>, <c>Contains(v, …IgnoreCase)</c>,
+    ///     <c>x.Name.ToLower() == v</c>) push down on it (Cassandra SASI with a non-tokenizing, case-insensitive analyzer).
+    /// </summary>
+    public bool CaseInsensitive { get; set; }
 }
 
 /// <summary>Declares the entity's default time-to-live (Cosmos DB container TTL).</summary>

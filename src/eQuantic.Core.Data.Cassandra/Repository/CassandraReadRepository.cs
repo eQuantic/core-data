@@ -129,7 +129,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         ReadShapes.RefuseRowWindow(options, "CountAsync");
-        var plan = GatedPlan(options, null);
+        var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
 
         if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
         {
@@ -156,7 +156,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         ReadShapes.RefuseRowWindow(options, "AllAsync");
-        return (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).All(predicate.Compile());
+        var all = (await CassandraPredicates.ResolveAsync(predicate, UnitOfWork, options, cancellationToken).ConfigureAwait(false)).Compile();
+        return (await SelectAsync(options, null, cancellationToken).ConfigureAwait(false)).All(all);
     }
 
     /// <inheritdoc />
@@ -227,7 +228,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var column = SumColumn(selector);
         if (column is not null)
         {
-            var plan = GatedPlan(options, null);
+            var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
             if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
             {
                 var cql = $"SELECT {aggregate(column)} FROM {_configuration.TableName}"
@@ -275,7 +276,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
         var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
         var predicate = having is null ? null : GroupInterpreter.InterpretHaving(having, group.Key);
-        var plan = GatedPlan(options, null);
+        var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
 
         if (plan.Alternatives.Count > 0)
         {
@@ -563,7 +564,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         ReadShapes.RefuseRowWindow(options, "GetPageAsync");
-        var plan = GatedPlan(options, null);
+        var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
         if (plan.Alternatives.Count > 0)
         {
             throw new NotSupportedException(
@@ -667,7 +668,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             notes.Add("A global query filter is ANDed into this query; IgnoringQueryFilters() opts out.");
         }
 
-        var plan = CassandraCql.Plan(_configuration, options, null, global);
+        var explained = CassandraCql.Filters(options, null, global).ToList();
+        foreach (var filter in explained)
+        {
+            notes.AddRange(CassandraPredicates.Notes(filter, UnitOfWork));
+        }
+
+        var plan = CassandraCql.Plan(_configuration, explained.Select(filter => CassandraPredicates.Unresolved(filter, UnitOfWork)));
 
         string orderBy;
         try
@@ -793,7 +800,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                       ?? throw new NotSupportedException(
                           "GetDistinctAsync selects mapped members: one (x => x.Repository), or several (x => new { x.Repository, x.IssueNumber }).");
         var columns = members.Select(_configuration.ColumnFor).ToList();
-        var plan = GatedPlan(options, filter);
+        var plan = await GatedPlanAsync(options, filter, cancellationToken).ConfigureAwait(false);
         var project = selector.Compile();
 
         var primary = CassandraMapper.PrimaryKey(_configuration);
@@ -918,7 +925,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     private async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
         Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null, int? offset = null)
     {
-        var plan = GatedPlan(options, extraFilter);
+        var plan = await GatedPlanAsync(options, extraFilter, cancellationToken).ConfigureAwait(false);
         var residuals = Compile(plan.Residual);
         var clientSort = SortsClientSide(options, plan);
         if (clientSort && mapColumns is not null)
@@ -1028,9 +1035,24 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         return entities.ToList();
     }
 
-    private CassandraCqlPlan GatedPlan(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter)
+    /// <summary>
+    ///     The read's plan, its gates applied: each filter prepared first — an array's <c>Contains</c> normalized, and each
+    ///     test across a relation resolved into the related keys (read first, under this read's opt-ins).
+    /// </summary>
+    private async Task<CassandraCqlPlan> GatedPlanAsync(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
+        CancellationToken cancellationToken)
     {
-        var plan = CassandraCql.Plan(_configuration, options, extraFilter, GlobalFilter(options));
+        var filters = new List<Expression<Func<TEntity, bool>>>();
+        foreach (var filter in CassandraCql.Filters(options, extraFilter, GlobalFilter(options)))
+        {
+            filters.Add(await CassandraPredicates.ResolveAsync(filter, UnitOfWork, options, cancellationToken).ConfigureAwait(false));
+        }
+
+        return Gated(CassandraCql.Plan(_configuration, filters), options);
+    }
+
+    private CassandraCqlPlan Gated(CassandraCqlPlan plan, QueryOptions<TEntity>? options)
+    {
 
         if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
         {
@@ -1173,7 +1195,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         var column = SumColumn(selector);
         if (column is not null)
         {
-            var plan = GatedPlan(options, null);
+            var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
             if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
             {
                 var cql = $"SELECT SUM({column}) FROM {_configuration.TableName}"

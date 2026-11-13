@@ -13,8 +13,9 @@ namespace eQuantic.Core.Data.Cassandra;
 /// <param name="KeyValues">Its bound values.</param>
 /// <param name="PinsPartition">Whether the key restriction names the partition (a write may only run per partition).</param>
 /// <param name="Conditions">The <c>IF</c> conditions, each with its bound values.</param>
+/// <param name="NamesEveryKey">Whether the key restriction names every column of the primary key (with <c>=</c> or <c>IN</c>).</param>
 internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues, bool PinsPartition,
-    IReadOnlyList<(string Cql, object?[] Values)> Conditions)
+    IReadOnlyList<(string Cql, object?[] Values)> Conditions, bool NamesEveryKey = false)
 {
     /// <summary>Splits the filter (and the global filter) into the key restriction and the conditions.</summary>
     public static CassandraConditions Split<TEntity>(CassandraEntityConfiguration configuration,
@@ -25,6 +26,7 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
         var keyValues = new List<object?>();
         var conditions = new List<(string Cql, object?[] Values)>();
         var pinsPartition = false;
+        var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var predicate in new[] { globalFilter, filter }.Where(predicate => predicate is not null))
         {
@@ -38,6 +40,15 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
                     keyClauses.Add(rendered.Cql);
                     keyValues.AddRange(rendered.Values);
                     pinsPartition |= CassandraCqlRenderer.PinsPartition(configuration, conjunct);
+                    if (conjunct is ComparisonFilter { Operator: ComparisonOperator.Equal } equal)
+                    {
+                        named.Add(configuration.ColumnFor(equal.Member));
+                    }
+                    else if (conjunct is InFilter inFilter)
+                    {
+                        named.Add(configuration.ColumnFor(inFilter.Member));
+                    }
+
                     continue;
                 }
 
@@ -45,7 +56,8 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
             }
         }
 
-        return new CassandraConditions(string.Join(" AND ", keyClauses), keyValues.ToArray(), pinsPartition, conditions);
+        var namesEveryKey = CassandraMapper.PrimaryKey(configuration).All(named.Contains);
+        return new CassandraConditions(string.Join(" AND ", keyClauses), keyValues.ToArray(), pinsPartition, conditions, namesEveryKey);
     }
 
     private static IEnumerable<QueryFilter> Conjuncts(QueryFilter filter) =>

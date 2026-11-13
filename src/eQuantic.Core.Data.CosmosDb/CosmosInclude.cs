@@ -136,7 +136,7 @@ internal static class CosmosInclude
             .Where(In<TElement>(foreignKey, keys));
         if (shape?.Filter is Expression<Func<TElement, bool>> filter)
         {
-            query = query.Where(filter);
+            query = query.Where(CosmosPredicates.Rendered(filter));
         }
 
         var elements = await ReadAllAsync(query, cancellationToken).ConfigureAwait(false);
@@ -203,7 +203,7 @@ internal static class CosmosInclude
         var query = container.GetItemLinqQueryable<TElement>().Where(In<TElement>(foreignKey, keys));
         if (predicate is Expression<Func<TElement, bool>> filter)
         {
-            query = query.Where(filter);
+            query = query.Where(CosmosPredicates.Rendered(filter));
         }
 
         var parameter = Expression.Parameter(typeof(TElement), "element");

@@ -114,6 +114,14 @@ public abstract class CassandraEntityConfiguration
         return search is not null;
     }
 
+    /// <summary>Whether <paramref name="column" /> has a search index that matches without regard to case, and in which mode.</summary>
+    public bool CanLikeIgnoringCase(string column, out CassandraSearchMode mode)
+    {
+        var search = SearchColumns.FirstOrDefault(candidate => Same(candidate.Column, column) && candidate.CaseInsensitive);
+        mode = search?.Mode ?? CassandraSearchMode.Prefix;
+        return search is not null;
+    }
+
     /// <summary>Whether <paramref name="column" /> is part of the primary key (partition or clustering).</summary>
     public bool IsKey(string column) =>
         PartitionKeys.Any(key => Same(key, column)) || ClusteringKeys.Any(key => Same(key.Column, column));
@@ -145,7 +153,14 @@ public enum CassandraSearchMode
 /// <summary>A search-indexed column and its matching mode.</summary>
 /// <param name="Column">The column name.</param>
 /// <param name="Mode">The SASI matching mode.</param>
-public sealed record CassandraSearchColumn(string Column, CassandraSearchMode Mode);
+public sealed record CassandraSearchColumn(string Column, CassandraSearchMode Mode)
+{
+    /// <summary>
+    ///     Whether the index matches without regard to case: SASI's non-tokenizing analyzer with <c>case_sensitive: false</c>,
+    ///     on which the text tests that ignore case push down as <c>LIKE</c>.
+    /// </summary>
+    public bool CaseInsensitive { get; init; }
+}
 
 /// <summary>The typed Cassandra mapping for <typeparamref name="TEntity" />.</summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
@@ -395,7 +410,10 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Data.Modeling.SearchIndexAttribute>() is { } search)
             {
                 _searchColumns.Add(new CassandraSearchColumn(property.Name,
-                    search.Mode == Data.Modeling.SearchMode.Prefix ? CassandraSearchMode.Prefix : CassandraSearchMode.Contains));
+                    search.Mode == Data.Modeling.SearchMode.Prefix ? CassandraSearchMode.Prefix : CassandraSearchMode.Contains)
+                {
+                    CaseInsensitive = search.CaseInsensitive,
+                });
             }
         }
     }
@@ -522,6 +540,22 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         CassandraSearchMode mode = CassandraSearchMode.Contains)
     {
         _searchColumns.Add(new CassandraSearchColumn(selector.GetMemberName(), mode));
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a SASI search index on a text column, matching with or without regard to case. A case-insensitive
+    ///     index (a non-tokenizing analyzer with <c>case_sensitive: false</c>) also serves the text tests that ignore case —
+    ///     <c>string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)</c>, <c>Contains</c>/<c>StartsWith</c>/<c>EndsWith</c>
+    ///     with that comparison, and the same over <c>ToLower()</c>/<c>ToUpper()</c> — as a native <c>LIKE</c>.
+    /// </summary>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="mode">What the index matches: substrings (<see cref="CassandraSearchMode.Contains" />) or prefixes.</param>
+    /// <param name="caseInsensitive">Whether the index matches without regard to case.</param>
+    public CassandraEntityBuilder<TEntity> SearchIndex(Expression<Func<TEntity, string?>> selector, CassandraSearchMode mode,
+        bool caseInsensitive)
+    {
+        _searchColumns.Add(new CassandraSearchColumn(selector.GetMemberName(), mode) { CaseInsensitive = caseInsensitive });
         return this;
     }
 

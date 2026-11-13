@@ -105,34 +105,34 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         AllAsync(predicate, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
+    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Ready(Whole(options, "Sum")).Select(NotNull(selector)).AsEnumerable().Sum();
 
     // ---------------------------------------------------------------- asynchronous reads
 
@@ -201,7 +201,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "CountAsync").CountAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "CountAsync"), cancellationToken).ConfigureAwait(false)).CountAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
@@ -216,62 +216,62 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "SumAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     // ---------------------------------------------------------------- min / max / average
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE MIN(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
     public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "MinAsync").Select(NotNull(selector)).MinAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "MinAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).MinAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE MAX(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
     public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Whole(options, "MaxAsync").Select(NotNull(selector)).MaxAsync(cancellationToken).ConfigureAwait(false);
+        await (await ReadyAsync(Whole(options, "MaxAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector)).MaxAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE AVG(...)</c> over the numeric member; an empty match yields <c>0</c>.</remarks>
     public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         // The SDK's AverageAsync overloads are per numeric type; dispatch on the selected member's type.
-        var selected = Whole(options, "AverageAsync").Select(NotNull(selector));
+        var selected = (await ReadyAsync(Whole(options, "AverageAsync"), cancellationToken).ConfigureAwait(false)).Select(NotNull(selector));
         return selected switch
         {
             IQueryable<int> value => await value.AverageAsync(cancellationToken).ConfigureAwait(false),
@@ -349,6 +349,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
             query = query.Where(global);
         }
 
+        query = await ReadyAsync(query, cancellationToken).ConfigureAwait(false);
         using var iterator = query.ToFeedIterator();
         if (!iterator.HasMoreResults)
         {
@@ -380,7 +381,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         RefuseSplitNulls(options, "GetStreamAsync");
 
         // Streams through the FeedIterator: one response page in memory at a time.
-        using var iterator = Query(options).ToFeedIterator();
+        using var iterator = (await ReadyAsync(Query(options), cancellationToken).ConfigureAwait(false)).ToFeedIterator();
         while (iterator.HasMoreResults)
         {
             foreach (var entity in await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false))
@@ -424,7 +425,9 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         var shaped = Container
             .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true)
             .ApplyQueryOptions(options, nullsPlaced: true);
-        var definition = (global is null ? shaped : shaped.Where(global)).ToQueryDefinition();
+        var filtered = global is null ? shaped : shaped.Where(global);
+        notes.AddRange(CosmosPredicates.Notes(filtered.Expression, UnitOfWork));
+        var definition = CosmosPredicates.Unresolved(filtered, UnitOfWork).ToQueryDefinition();
 
         var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, global, options?.Filter, options?.Specification?.SatisfiedBy());
         notes.Add(partitionKey is not null
@@ -539,7 +542,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
                 // The window began inside this part when it returned rows; otherwise the skip passes it whole.
                 skip = rows.Count > 0
                     ? 0
-                    : Math.Max(0, skip - await Query(options, segment).CountAsync(cancellationToken).ConfigureAwait(false));
+                    : Math.Max(0, skip - await (await ReadyAsync(Query(options, segment), cancellationToken).ConfigureAwait(false))
+                        .CountAsync(cancellationToken).ConfigureAwait(false));
             }
         }
 
@@ -692,10 +696,10 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         return Expression.Lambda<Func<TEntity, bool>>(body, _idSelector.Parameters);
     }
 
-    private static async Task<List<T>> MaterializeAsync<T>(IQueryable<T> query, CancellationToken cancellationToken)
+    private async Task<List<T>> MaterializeAsync<T>(IQueryable<T> query, CancellationToken cancellationToken)
     {
         var results = new List<T>();
-        using var iterator = query.ToFeedIterator();
+        using var iterator = (await ReadyAsync(query, cancellationToken).ConfigureAwait(false)).ToFeedIterator();
         while (iterator.HasMoreResults)
         {
             results.AddRange(await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false));
@@ -703,6 +707,17 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
         return results;
     }
+
+    /// <summary>
+    ///     The query as the SDK translates it: an array's <c>Contains</c> and <c>string.Equals(a, b, comparison)</c> in the
+    ///     shapes the SDK reads, and each test across a relation resolved into the related keys — read first, one
+    ///     <c>SELECT DISTINCT VALUE</c> over the related container per test (a relation crosses containers).
+    /// </summary>
+    private Task<IQueryable<T>> ReadyAsync<T>(IQueryable<T> query, CancellationToken cancellationToken) =>
+        CosmosPredicates.ReadyAsync(query, UnitOfWork, cancellationToken);
+
+    /// <summary>The query as the SDK translates it, for the synchronous surface.</summary>
+    private IQueryable<T> Ready<T>(IQueryable<T> query) => ReadyAsync(query, CancellationToken.None).GetAwaiter().GetResult();
 
     private static Expression<Func<TEntity, bool>> Negate(Expression<Func<TEntity, bool>> predicate) =>
         Expression.Lambda<Func<TEntity, bool>>(Expression.Not(predicate.Body), predicate.Parameters);

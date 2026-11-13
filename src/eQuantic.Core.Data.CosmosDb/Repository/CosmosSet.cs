@@ -70,6 +70,14 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     private Expression<Func<TEntity, bool>> Scoped(Expression<Func<TEntity, bool>> filter) =>
         _unitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
 
+    /// <summary>
+    ///     A set-based write's filter as the SDK translates it: scoped, in the shapes the SDK reads, and each test across a
+    ///     relation resolved into the related keys (read first: a relation crosses containers, and a patch's condition
+    ///     reads only the item) — the condition each item is then written under.
+    /// </summary>
+    private Task<Expression<Func<TEntity, bool>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
+        CosmosPredicates.ReadyAsync(Scoped(filter), _unitOfWork, cancellationToken);
+
     // ---------------------------------------------------------------- set-based writes (immediate)
     public long DeleteMany(Expression<Func<TEntity, bool>> filter) => DeleteManyAsync(filter).GetAwaiter().GetResult();
 
@@ -86,7 +94,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
                 cancellationToken).ConfigureAwait(false);
         }
 
-        var scoped = Scoped(filter);
+        var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var where = WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
         var deleted = await Task.WhenAll(matches.Select(async item =>
@@ -150,15 +158,24 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken)
     {
         var patch = WithUpdateStamps(CosmosPatch.Build(updateExpression), updateExpression);
-        var scoped = Scoped(filter);
+        var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var condition = "FROM root WHERE " + WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
+        var where = WhereClause(scoped);
         var patched = await Task.WhenAll(matches.Select(async item =>
         {
+            var id = _configuration.GetId(item);
+            var partitionKey = _configuration.GetPartitionKey(item);
             try
             {
-                return await CosmosPatch.ApplyAsync<TEntity>(_container, _configuration.GetId(item), _configuration.GetPartitionKey(item),
-                    patch, condition, ifMatchEtag: null, cancellationToken).ConfigureAwait(false);
+                return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, condition, ifMatchEtag: null, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
+            {
+                // The store could not evaluate the filter as a patch's condition (a function its condition evaluator does
+                // not take): the item is patched under the _etag of a read that still finds it matching, instead.
+                return await PatchUnderETagAsync(id, partitionKey, patch, where, cancellationToken).ConfigureAwait(false);
             }
             catch (CosmosException exception) when (exception.StatusCode is System.Net.HttpStatusCode.PreconditionFailed
                                                         or System.Net.HttpStatusCode.NotFound)
@@ -172,6 +189,39 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
             }
         })).ConfigureAwait(false);
         return patched.Where(item => item is not null).Select(item => item!).ToList();
+    }
+
+    /// <summary>
+    ///     Patches an item under the <c>_etag</c> of a read that finds it still matching the filter, reading again after a
+    ///     concurrent change: the same compare-and-set as a patch under the filter, in two round trips.
+    /// </summary>
+    private async Task<TEntity?> PatchUnderETagAsync(string id, PartitionKey partitionKey, IReadOnlyList<PatchOperation> patch, string where,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < ConditionalAttempts; attempt++)
+        {
+            if (await MatchingETagAsync(id, partitionKey, where, cancellationToken).ConfigureAwait(false) is not { } etag)
+            {
+                return null;
+            }
+
+            try
+            {
+                return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, filterPredicate: null, etag, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.PreconditionFailed)
+            {
+                // Changed since the read: read it again.
+            }
+            catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return null;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"The item '{id}' kept changing while it was being updated; {ConditionalAttempts} attempts did not settle.");
     }
 
     /// <summary>
@@ -326,7 +376,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
 
         var target = Expression.Lambda<Func<TEntity, bool>>(body!, parameter);
         return _container.GetItemLinqQueryable<TEntity>(requestOptions: new QueryRequestOptions { PartitionKey = partitionKey })
-            .Where(conflictFilter is null ? target : target.AndAlso(conflictFilter));
+            .Where(conflictFilter is null ? target : CosmosPredicates.Rendered(target.AndAlso(conflictFilter)));
     }
 
     private async Task<(TEntity Resource, string ETag)?> QueryTargetAsync(IQueryable<TEntity> query, PartitionKey partitionKey,
