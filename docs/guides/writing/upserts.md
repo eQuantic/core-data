@@ -5,11 +5,12 @@ taken", "how many rows did my condition match", "what does the row hold now". Ea
 means the same thing on every engine, through the engine's own mechanism — and where an engine's
 guarantee is weaker, the tables below say so.
 
-These writes run **at once** (they are not staged for the next `Commit`) and join an open
-[explicit transaction](transactions.md) on the relational stores and MongoDB. On Cosmos DB and
-Cassandra an explicit transaction is a batch of the *staged* writes, deferred to its commit, which a
-write that has to read first cannot join: there they run on their own. They live on capability
-interfaces every provider's repository implements — cast to them, or resolve them from DI:
+Upserts, inserts skipping duplicates and returning updates run **at once** (they are not staged for
+the next `Commit`) and join an open [explicit transaction](transactions.md) on the relational stores
+and MongoDB. On Cosmos DB and Cassandra an explicit transaction is a batch of the *staged* writes,
+deferred to its commit, which a write that has to read first cannot join: there they run on their
+own. The member-scoped `Modify` is staged, like any `Modify`, and commits with the rest. They live on
+capability interfaces every provider's repository implements — cast to them, or resolve them from DI:
 
 | Interface | What it adds |
 |---|---|
