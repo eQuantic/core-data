@@ -118,6 +118,14 @@ labels, the JSON columns and the store-generated columns.
 Per query: `options.WithConsistency(ConsistencyLevel.LocalQuorum)`. Per commit: the save option
 above. Defaults are the driver's — the provider adds no hidden policy.
 
+## Named locks
+
+A named lock is a **lease**: a row in the `equantic_locks` table (created on first use), taken with
+`INSERT … IF NOT EXISTS USING TTL`, renewed with `UPDATE … USING TTL … IF owner = ?` and released with
+`DELETE … IF owner = ?` — lightweight transactions all, so of two holders exactly one is applied. It
+is written outside the `LOGGED BATCH`, and a dead holder's row expires with its TTL, in whole
+seconds — see [Named locks](../writing/locks.md).
+
 ## Registration recap
 
 ```csharp

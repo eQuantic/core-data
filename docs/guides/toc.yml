@@ -56,6 +56,8 @@
       href: writing/lifecycle.md
     - name: Time to live
       href: writing/ttl.md
+    - name: Named locks
+      href: writing/locks.md
     - name: Bulk loading and raw SQL
       href: writing/bulk-and-raw-sql.md
 - name: Migrations

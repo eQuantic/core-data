@@ -111,6 +111,14 @@ it ([Querying](../querying/includes.md) has the full tables):
 expire that long after their **last write** unless they override it. See
 [Time to live](../writing/ttl.md) for the cross-store semantics table.
 
+## Named locks
+
+A named lock is a **lease**: an item in the `_locks` container (partitioned by `/id`, created on first
+use), written by a create that answers 409 while another owner's item is there, taken over only once
+its `_ts` plus its lease is past the server's `GetCurrentDateTime()`, with a replace guarded by the
+item's ETag, and renewed and deleted the same way. It is written outside the transactional batch, and
+a dead holder's lease expires — see [Named locks](../writing/locks.md).
+
 ## Registration recap
 
 ```csharp

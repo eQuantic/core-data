@@ -16,6 +16,7 @@ queries so they can never disagree.
 | Read shapes | relation counts as `$lookup` + `$count`, nulls placed against MongoDB's order with an is-null flag, `$skip`/`$limit` pages without a count, distinct values via `$group` — see [Querying](../querying/includes.md) |
 | Set-based writes | native operators: `$set`, `$inc`, `$mul`, `$push`, `$addToSet`, `$pull` |
 | Concurrency | `[ConcurrencyToken]` → version-filtered conditional replaces/deletes |
+| Named locks | **leases** in `_locks`: one conditional `findOneAndUpdate` upsert on the server's clock (`$$NOW`), renewed while held, swept by a TTL index; a dead holder's lease expires — see [Named locks](../writing/locks.md) |
 | TTL | `[TimeToLive]` → per-document TTL index (from `CreatedAt` or an explicit date member) |
 | Ordered reads | `[ClusteringKey]` → compound index with directions |
 | Migrations | collections, all index kinds (unique, filtered, text, TTL, composite), field ops, `Run` |
