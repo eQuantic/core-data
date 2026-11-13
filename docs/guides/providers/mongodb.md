@@ -91,7 +91,9 @@ stamps `UpdatedAt`.
 `$setOnInsert` (the update runs again when that finds the target after all). With a unique index on
 the target, ten concurrent upserts leave one document; without one, MongoDB itself can insert twice.
 `InsertManyAsync(…, skipDuplicates: true)` is an unordered `insertMany` discarding only E11000 — except
-inside a transaction, which MongoDB aborts on any write error, so there a duplicate fails the call.
+inside a transaction, which MongoDB aborts on any write error: there the `_id`s and every unique
+index's values are looked up inside the session first, and only the free documents are inserted (a
+concurrent writer taking a key in between surfaces as MongoDB's transient write conflict).
 `UpdateAndGetAsync` runs `findOneAndUpdate` per matching document. E11000 — from a write, a bulk write
 or a command — is `DuplicateKeyException` naming the index. See
 [Upserts and write outcomes](../writing/upserts.md).

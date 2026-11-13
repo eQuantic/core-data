@@ -342,7 +342,7 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
     }
 
     [Test]
-    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_fails_because_MongoDB_aborts_it()
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_leaves_out_the_taken_keys()
     {
         var stored = new Secret { WorkspaceId = "w", Name = "taken", Value = "stored" };
         using (var seed = NewScope())
@@ -354,17 +354,89 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
         using var scope = NewScope();
         var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
         await unitOfWork.BeginTransactionAsync();
-        var refusal = Assert.ThrowsAsync<DuplicateKeyException>(() => Resolve<IUpsertRepository<Secret, string>>(scope).InsertManyAsync(
+        var inserted = await Resolve<IUpsertRepository<Secret, string>>(scope).InsertManyAsync(
         [
             new Secret { WorkspaceId = "w", Name = "fresh", Value = "new" },
             new Secret { WorkspaceId = "w", Name = "taken", Value = "new" },
-        ], skipDuplicates: true));
-        Assert.That(refusal!.Message, Does.Contain("aborted"));
+            new Secret { Id = stored.Id, WorkspaceId = "w", Name = "same-id", Value = "new" },
+            new Secret { WorkspaceId = "w", Name = "fresh", Value = "repeated in the batch" },
+            new Secret { WorkspaceId = "w", Name = "other", Value = "new" },
+        ], skipDuplicates: true);
+
+        Assert.That(inserted, Is.EqualTo(2L), "the unique key, the id and the batch's own repeat are left out");
+        Assert.That((await Repo<Secret>(scope).GetFilteredAsync(x => x.WorkspaceId == "w")).Select(x => x.Name),
+            Is.EquivalentTo(new[] { "taken", "fresh", "other" }), "the transaction reads its own writes");
+        using (var outside = NewScope())
+        {
+            Assert.That((await Repo<Secret>(outside).GetFilteredAsync(x => x.WorkspaceId == "w")).Select(x => x.Name),
+                Is.EqualTo(new[] { "taken" }), "nothing is visible before the transaction commits");
+        }
+
+        await unitOfWork.CommitTransactionAsync();
+
+        using var check = NewScope();
+        var rows = (await Repo<Secret>(check).GetFilteredAsync(x => x.WorkspaceId == "w")).ToList();
+        Assert.That(rows.Select(x => x.Name), Is.EquivalentTo(new[] { "taken", "fresh", "other" }));
+        Assert.That(rows.Single(x => x.Name == "taken").Value, Is.EqualTo("stored"));
+        Assert.That(rows.Single(x => x.Name == "fresh").Value, Is.EqualTo("new"), "the first of a repeated key is the one written");
+    }
+
+    [Test]
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_reads_a_partial_index_and_rolls_back()
+    {
+        using (var seed = NewScope())
+        {
+            await Repo<Label>(seed).AddRangeAsync(
+            [
+                new Label { Name = "live", Color = "stored" },
+                new Label { Name = "gone", Color = "stored", DeletedAt = DateTime.UtcNow },
+            ]);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var inserted = await Resolve<IUpsertRepository<Label, string>>(scope).InsertManyAsync(
+        [
+            new Label { Name = "live", Color = "new" },
+            new Label { Name = "gone", Color = "new" },
+            new Label { Name = "live", Color = "deleted, so outside the index", DeletedAt = DateTime.UtcNow },
+        ], skipDuplicates: true);
+        Assert.That(inserted, Is.EqualTo(2L), "a deleted label is outside the partial index: its name does not take the live one's");
         await unitOfWork.RollbackTransactionAsync();
 
         using var check = NewScope();
-        Assert.That((await Repo<Secret>(check).GetFilteredAsync(x => x.WorkspaceId == "w")).Select(x => x.Name),
-            Is.EqualTo(new[] { "taken" }), "the aborted transaction wrote nothing");
+        Assert.That(await Repo<Label>(check).GetFilteredAsync(x => x.Color == "new"), Is.Empty, "the rollback took the inserts back");
+    }
+
+    [Test]
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_compares_under_the_index_collation()
+    {
+        await _db.Database.GetCollection<BsonDocument>("ItemType").Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(
+            Builders<BsonDocument>.IndexKeys.Ascending("Name"),
+            new CreateIndexOptions { Unique = true, Name = "ux_item_type_name", Collation = new Collation("en", strength: CollationStrength.Secondary) }));
+        using (var seed = NewScope())
+        {
+            await Repo<ItemType>(seed).AddAsync(new ItemType { Name = "bug" });
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var inserted = await Resolve<IUpsertRepository<ItemType, string>>(scope).InsertManyAsync(
+        [
+            new ItemType { Name = "BUG" },
+            new ItemType { Name = "Task" },
+            new ItemType { Name = "TASK" },
+            new ItemType { Name = "Epic" },
+        ], skipDuplicates: true);
+        await unitOfWork.CommitTransactionAsync();
+
+        Assert.That(inserted, Is.EqualTo(2L));
+        using var check = NewScope();
+        Assert.That((await Repo<ItemType>(check).GetAllAsync()).Select(x => x.Name), Is.EquivalentTo(new[] { "bug", "Task", "Epic" }));
     }
 
     [Test]

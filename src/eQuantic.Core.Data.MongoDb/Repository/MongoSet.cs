@@ -341,7 +341,10 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     ///     Inserts the batch at once and counts the documents inserted: an ordered <c>insertMany</c>, which stops at a
     ///     taken key and fails with <see cref="DuplicateKeyException" /> (the documents before it stay written, unless an
     ///     explicit transaction is open); with <paramref name="skipDuplicates" />, an unordered one that writes every
-    ///     other document and discards only the duplicate-key errors.
+    ///     other document and discards only the duplicate-key errors. Inside an explicit transaction, where MongoDB
+    ///     aborts the transaction on any write error, the duplicates are found first, inside the session
+    ///     (<see cref="MongoTakenKeys" />: the <c>_id</c> and every unique index), and only the free documents are
+    ///     inserted; a key a concurrent writer takes in between surfaces as MongoDB's transient write conflict.
     /// </summary>
     internal async Task<long> InsertManyAsync(IEnumerable<TEntity> items, bool skipDuplicates, CancellationToken cancellationToken)
     {
@@ -362,6 +365,18 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
 
         var options = new InsertManyOptions { IsOrdered = !skipDuplicates };
         var session = _unitOfWork.Session;
+        if (skipDuplicates && session is { IsInTransaction: true })
+        {
+            // A write error would abort the transaction: leave out what is taken before writing anything.
+            entities = await MongoTakenKeys.FreeAsync(_collection, session, entities, cancellationToken).ConfigureAwait(false);
+            if (entities.Count == 0)
+            {
+                return 0;
+            }
+
+            options.IsOrdered = true;
+        }
+
         try
         {
             if (session is null)
@@ -375,21 +390,21 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
 
             return entities.Count;
         }
-        catch (MongoBulkWriteException exception) when (skipDuplicates && exception.WriteErrors.Count > 0
+        catch (MongoBulkWriteException exception) when (skipDuplicates && session is not { IsInTransaction: true }
+                                                         && exception.WriteErrors.Count > 0
                                                          && exception.WriteErrors.All(MongoDuplicateKeys.IsDuplicate)
                                                          && exception.WriteConcernError is null)
         {
-            if (session is { IsInTransaction: true })
-            {
-                // MongoDB aborts a transaction on any write error, a duplicate key included: nothing of it will commit,
-                // so the duplicates cannot be skipped inside one.
-                throw new DuplicateKeyException(
-                    "The store refused the write: a key or a unique key it holds is already taken, and MongoDB aborted the " +
-                    "open transaction on it (it aborts on any write error), so duplicates cannot be skipped inside a transaction.",
-                    MongoDuplicateKeys.From(exception)?.ConstraintName, exception);
-            }
-
             return entities.Count - exception.WriteErrors.Count;
+        }
+        catch (Exception exception) when (skipDuplicates && session is { IsInTransaction: true }
+                                          && MongoDuplicateKeys.From(exception) is { } duplicate)
+        {
+            // The keys were free when they were read inside the session; one was taken by the time of the insert.
+            throw new DuplicateKeyException(
+                "The store refused the write: a key or a unique key it holds was taken after the batch was checked inside the " +
+                "transaction, and MongoDB aborted the transaction on it (it aborts on any write error).",
+                duplicate.ConstraintName, exception);
         }
         catch (Exception exception) when (MongoDuplicateKeys.From(exception) is { } duplicate)
         {
