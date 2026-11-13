@@ -23,11 +23,30 @@ public static class CosmosQueryableExtensions
     /// <returns>The shaped query.</returns>
     public static IQueryable<TEntity> ApplyQueryOptions<TEntity>(this IQueryable<TEntity> source,
         QueryOptions<TEntity>? options)
+        where TEntity : class =>
+        source.ApplyQueryOptions(options, nullsPlaced: false);
+
+    /// <summary>
+    ///     Shapes the query; the repository passes <paramref name="nullsPlaced" /> when it places nulls itself (two
+    ///     queries split on whether the first key is null). Anyone else asking for a placement against Cosmos DB's order
+    ///     is refused: a <c>ORDER BY</c> cannot say it.
+    /// </summary>
+    internal static IQueryable<TEntity> ApplyQueryOptions<TEntity>(this IQueryable<TEntity> source,
+        QueryOptions<TEntity>? options, bool nullsPlaced)
         where TEntity : class
     {
         if (options is null)
         {
             return source;
+        }
+
+        if (!nullsPlaced && options.Sortings.Any(sort =>
+                !eQuantic.Core.Data.Query.ReadShapes.IsNullsSmallest(options.NullsOrderOf(sort),
+                    sort.Direction == SortDirection.Descending)))
+        {
+            throw new NotSupportedException(
+                "Cosmos DB sorts nulls and undefined as the smallest value, and an ORDER BY cannot place them otherwise; " +
+                "read through the repository, which splits the read on whether the key is null.");
         }
 
         var query = source;

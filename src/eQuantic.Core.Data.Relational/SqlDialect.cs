@@ -46,6 +46,23 @@ public abstract class SqlDialect
     /// <summary>Whether a limited query must carry an ORDER BY (SQL Server's <c>OFFSET/FETCH</c>); the key is used when unsorted.</summary>
     public virtual bool RequiresOrderByForLimit => false;
 
+    /// <summary>
+    ///     One <c>ORDER BY</c> term. With a placement of nulls, the base dialect orders on whether the column is null
+    ///     first (<c>CASE WHEN col IS NULL THEN 0 ELSE 1 END, col ASC</c>), which every engine understands; a dialect
+    ///     with its own syntax (<c>NULLS FIRST</c>) overrides it.
+    /// </summary>
+    /// <param name="column">The quoted column (or a qualified one).</param>
+    /// <param name="descending">Whether the sort is descending.</param>
+    /// <param name="nulls">Where the rows whose column is null go.</param>
+    public virtual string OrderTerm(string column, bool descending, eQuantic.Core.Data.Repository.Options.NullsOrder nulls)
+    {
+        var term = $"{column} {(descending ? "DESC" : "ASC")}";
+        return nulls == eQuantic.Core.Data.Repository.Options.NullsOrder.Default
+            ? term
+            : $"CASE WHEN {column} IS NULL THEN {(nulls == eQuantic.Core.Data.Repository.Options.NullsOrder.First ? 0 : 1)} " +
+              $"ELSE {(nulls == eQuantic.Core.Data.Repository.Options.NullsOrder.First ? 1 : 0)} END, {term}";
+    }
+
     /// <summary>The literal for an always-false predicate (an empty <c>IN</c>); some dialects have no <c>FALSE</c>.</summary>
     public virtual string FalseLiteral => "FALSE";
 

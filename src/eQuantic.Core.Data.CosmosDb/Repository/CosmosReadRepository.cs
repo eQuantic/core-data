@@ -26,7 +26,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     IContinuationReadRepository<TEntity>,
     IStreamingReadRepository<TEntity>,
     IAggregateReadRepository<TEntity>,
-    IGroupedReadRepository<TEntity>
+    IGroupedReadRepository<TEntity>,
+    IDistinctReadRepository<TEntity>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>The unit of work backing this repository.</summary>
@@ -58,33 +59,32 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     // ---------------------------------------------------------------- synchronous reads
 
     /// <inheritdoc />
-    public TEntity? Get(TKey id, QueryOptions<TEntity>? options = null) =>
-        Query(options, IdPredicate(id)).AsEnumerable().FirstOrDefault();
+    public TEntity? Get(TKey id, QueryOptions<TEntity>? options = null) => GetAsync(id, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public IEnumerable<TEntity> GetAll(QueryOptions<TEntity>? options = null) => Query(options).ToList();
+    public IEnumerable<TEntity> GetAll(QueryOptions<TEntity>? options = null) => GetAllAsync(options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public IEnumerable<TEntity> GetFiltered(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null) =>
-        Query(options, NotNull(filter)).ToList();
+        GetFilteredAsync(filter, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public IEnumerable<TEntity> AllMatching(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null) =>
-        Query(options, NotNull(specification).SatisfiedBy()).ToList();
+        AllMatchingAsync(specification, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public IEnumerable<TResult> GetMapped<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null) =>
-        Query(options).Select(NotNull(map)).ToList();
+        GetMappedAsync(map, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public TEntity? GetFirst(QueryOptions<TEntity> options) => Query(options).AsEnumerable().FirstOrDefault();
+    public TEntity? GetFirst(QueryOptions<TEntity> options) => GetFirstAsync(options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public TResult? GetFirstMapped<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options) =>
-        Query(options).Select(NotNull(map)).AsEnumerable().FirstOrDefault();
+        GetFirstMappedAsync(map, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public TEntity? GetSingle(QueryOptions<TEntity> options) => Query(options).AsEnumerable().SingleOrDefault();
+    public TEntity? GetSingle(QueryOptions<TEntity> options) => GetSingleAsync(options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public PagedResult<TEntity> GetPaged(PageRequest page, QueryOptions<TEntity>? options = null) =>
@@ -98,82 +98,94 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     public long Count(QueryOptions<TEntity>? options = null) => CountAsync(options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public bool Any(QueryOptions<TEntity>? options = null) => Query(options).AsEnumerable().Any();
+    public bool Any(QueryOptions<TEntity>? options = null) => AnyAsync(options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     public bool All(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null) =>
-        !Query(options, Negate(NotNull(predicate))).AsEnumerable().Any();
+        AllAsync(predicate, options).GetAwaiter().GetResult();
 
     /// <inheritdoc />
-    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     /// <inheritdoc />
-    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Query(options).Select(NotNull(selector)).AsEnumerable().Sum();
+    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Select(NotNull(selector)).AsEnumerable().Sum();
 
     // ---------------------------------------------------------------- asynchronous reads
 
     /// <inheritdoc />
     public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options, IdPredicate(id)).Take(1), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        (await ReadAsync(options, IdPredicate(id), 1, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options), cancellationToken).ConfigureAwait(false);
+        await ReadAsync(options, null, null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options, NotNull(filter)), cancellationToken).ConfigureAwait(false);
+        await ReadAsync(options, NotNull(filter), null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options, NotNull(specification).SatisfiedBy()), cancellationToken).ConfigureAwait(false);
+        await ReadAsync(options, NotNull(specification).SatisfiedBy(), null, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await MaterializeAsync(Query(options).Select(NotNull(map)), cancellationToken).ConfigureAwait(false);
+    /// <remarks>
+    ///     A relation count in the map (<c>x.Versions.Count(v =&gt; v.DeletedAt == null)</c>) runs as a grouped count over
+    ///     the related container (<c>SELECT fk, COUNT(1) … GROUP BY fk</c>) for the parents read; the parents are then
+    ///     read whole and the map runs in memory over them and their counts.
+    /// </remarks>
+    public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, null);
+        return await MappedAsync(NotNull(map), options, offset, limit, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Take(1), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        (await ReadAsync(options, null, 1, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
 
     /// <inheritdoc />
-    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Select(NotNull(map)).Take(1), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+    public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default)
+    {
+        var (offset, limit) = ReadShapes.Window(options, 1);
+        return (await MappedAsync(NotNull(map), options, offset, limit, cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+    }
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Take(2), cancellationToken).ConfigureAwait(false)).SingleOrDefault();
+        (await ReadAsync(options, null, 2, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
 
     /// <inheritdoc />
     public async Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         NotNull(page);
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var items = await MaterializeAsync(Ordered(Query(options), options).Skip(page.Skip).Take(page.Take), cancellationToken).ConfigureAwait(false);
+        var items = await ReadWindowAsync(options, null, page.Skip, page.Take, cancellationToken).ConfigureAwait(false);
         return new PagedResult<TEntity>(items, total, page.PageIndex, page.PageSize);
     }
 
@@ -181,81 +193,85 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     public async Task<PagedResult<TResult>> GetPagedAsync<TResult>(PageRequest page, Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         NotNull(page);
+        ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var total = await CountAsync(options, cancellationToken).ConfigureAwait(false);
-        var items = await MaterializeAsync(Ordered(Query(options), options).Skip(page.Skip).Take(page.Take).Select(NotNull(map)), cancellationToken).ConfigureAwait(false);
+        var items = await MappedAsync(NotNull(map), options, page.Skip, page.Take, cancellationToken).ConfigureAwait(false);
         return new PagedResult<TResult>(items, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
     public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).CountAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "CountAsync").CountAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options).Take(1), cancellationToken).ConfigureAwait(false)).Count > 0;
+        (await MaterializeAsync(Whole(options, "AnyAsync").Take(1), cancellationToken).ConfigureAwait(false)).Count > 0;
 
     /// <inheritdoc />
-    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        (await MaterializeAsync(Query(options, Negate(NotNull(predicate))).Take(1), cancellationToken).ConfigureAwait(false)).Count == 0;
+    public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
+    {
+        ReadShapes.RefuseRowWindow(options, "AllAsync");
+        return (await MaterializeAsync(Query(options, Negate(NotNull(predicate))).Take(1), cancellationToken).ConfigureAwait(false)).Count == 0;
+    }
 
     /// <inheritdoc />
     public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "SumAsync").Select(NotNull(selector)).SumAsync(cancellationToken).ConfigureAwait(false);
 
     // ---------------------------------------------------------------- min / max / average
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE MIN(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
     public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).MinAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "MinAsync").Select(NotNull(selector)).MinAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE MAX(...)</c>; a partition-key-pinning filter scopes the aggregate to one partition.</remarks>
     public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Query(options).Select(NotNull(selector)).MaxAsync(cancellationToken).ConfigureAwait(false);
+        await Whole(options, "MaxAsync").Select(NotNull(selector)).MaxAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>Pushes down as <c>VALUE AVG(...)</c> over the numeric member; an empty match yields <c>0</c>.</remarks>
     public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         // The SDK's AverageAsync overloads are per numeric type; dispatch on the selected member's type.
-        var selected = Query(options).Select(NotNull(selector));
+        var selected = Whole(options, "AverageAsync").Select(NotNull(selector));
         return selected switch
         {
             IQueryable<int> value => await value.AverageAsync(cancellationToken).ConfigureAwait(false),
@@ -313,11 +329,8 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
             throw new ArgumentOutOfRangeException(nameof(pageSize), pageSize, "The page size must be at least 1.");
         }
 
-        if (options is { IncludePaths.Count: > 0 })
-        {
-            throw new NotSupportedException(
-                "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
-        }
+        ReadShapes.RefuseRowWindow(options, "GetPageAsync");
+        RefuseSplitNulls(options, "GetPageAsync");
 
         var global = GlobalFilter(options);
         var requestOptions = new QueryRequestOptions { MaxItemCount = pageSize };
@@ -343,7 +356,13 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         }
 
         var response = await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
-        return new ContinuedResult<TEntity>(response.ToList(), response.ContinuationToken);
+        var items = response.ToList();
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            await CosmosInclude.ApplyAsync(UnitOfWork, items, options.IncludePaths, options.IncludeShapes, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new ContinuedResult<TEntity>(items, response.ContinuationToken);
     }
 
     // ---------------------------------------------------------------- streaming
@@ -352,6 +371,14 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     public async IAsyncEnumerable<TEntity> GetStreamAsync(QueryOptions<TEntity>? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException("Include does not compose with streaming yet; use GetAllAsync or page explicitly.");
+        }
+
+        ReadShapes.RefuseRowWindow(options, "GetStreamAsync");
+        RefuseSplitNulls(options, "GetStreamAsync");
+
         // Streams through the FeedIterator: one response page in memory at a time.
         using var iterator = Query(options).ToFeedIterator();
         while (iterator.HasMoreResults)
@@ -371,7 +398,20 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         var notes = new List<string>();
         if (options is { IncludePaths.Count: > 0 })
         {
-            notes.Add("Include is not supported: Cosmos documents are self-contained (execution throws NotSupportedException).");
+            notes.Add($"Each include ({string.Join(", ", options.IncludePaths)}) runs as one second query over the related container " +
+                      "(IN over the parents' keys); a shape's filter joins its WHERE, and its order and limit apply per parent as the rows are " +
+                      "stitched, so every row the filter keeps travels.");
+        }
+
+        if (options is not null && SplitAt(ReadShapes.Sorts(options)) >= 0)
+        {
+            notes.Add("Nulls placed against Cosmos DB's order (nulls and undefined sort as the smallest value) read as two queries, " +
+                      "the rows whose key is null and the rest, concatenated in the order asked.");
+        }
+
+        if (options is { SkipCount: not null } or { TakeCount: not null })
+        {
+            notes.Add("Skip/Take run as OFFSET/LIMIT; no count runs.");
         }
 
         // Build the shaped queryable directly (not via Query) so an explain never throws on shaping issues.
@@ -383,7 +423,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
         var shaped = Container
             .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true)
-            .ApplyQueryOptions(options);
+            .ApplyQueryOptions(options, nullsPlaced: true);
         var definition = (global is null ? shaped : shaped.Where(global)).ToQueryDefinition();
 
         var partitionKey = CosmosPartitionKeyInference.Infer(_partitionKeyPath, global, options?.Filter, options?.Specification?.SatisfiedBy());
@@ -394,6 +434,188 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         return new QueryPlan("CosmosDb", definition.QueryText,
             definition.GetQueryParameters().Select(parameter => (object?)parameter.Value).ToList(), residual: null,
             serverSideFiltering: false, clientEvaluation: false, partitionScoped: partitionKey is not null, notes);
+    }
+
+    // ---------------------------------------------------------------- distinct values
+
+    /// <inheritdoc />
+    /// <remarks>Runs as <c>SELECT DISTINCT VALUE …</c> under the read's <c>WHERE</c>: only the distinct values travel.</remarks>
+    public async Task<IReadOnlyList<TResult>> GetDistinctAsync<TResult>(Expression<Func<TEntity, TResult>> selector,
+        Expression<Func<TEntity, bool>>? filter = null, QueryOptions<TEntity>? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        NotNull(selector);
+        ReadShapes.RefuseForDistinct(options);
+        return await MaterializeAsync(Query(options, filter).Select(selector).Distinct(), cancellationToken).ConfigureAwait(false);
+    }
+
+    // ---------------------------------------------------------------- read shapes
+
+    /// <summary>An entity read honouring the options' <c>Skip</c>/<c>Take</c> within the read's own limit, includes loaded.</summary>
+    private Task<List<TEntity>> ReadAsync(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter, int? limit,
+        CancellationToken cancellationToken)
+    {
+        var (offset, effective) = ReadShapes.Window(options, limit);
+        return ReadWindowAsync(options, extraFilter, offset, effective, cancellationToken);
+    }
+
+    private async Task<List<TEntity>> ReadWindowAsync(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
+        int? offset, int? limit, CancellationToken cancellationToken)
+    {
+        var entities = await SegmentsAsync(options, extraFilter, offset, limit, query => query, cancellationToken).ConfigureAwait(false);
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            await CosmosInclude.ApplyAsync(UnitOfWork, entities, options.IncludePaths, options.IncludeShapes, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return entities;
+    }
+
+    /// <summary>
+    ///     A mapped read: the SDK's projection, or — when the map counts relations — the parents read whole, their counts
+    ///     grouped on the server, and the map run in memory over both.
+    /// </summary>
+    private async Task<List<TResult>> MappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options,
+        int? offset, int? limit, CancellationToken cancellationToken)
+    {
+        if (options is { IncludePaths.Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Include applies to entity reads; project after including, or drop the includes from the mapped read.");
+        }
+
+        if (RelationCountInterpreter.Interpret(map, property => CosmosInclude.IsRelation(UnitOfWork, typeof(TEntity), property)) is { } counted)
+        {
+            var entities = await SegmentsAsync(options, null, offset, limit, query => query, cancellationToken).ConfigureAwait(false);
+            var counts = await CosmosInclude.CountAsync(UnitOfWork, entities, counted.Counts, cancellationToken).ConfigureAwait(false);
+            var project = counted.Projection.Compile();
+            return entities.Select((entity, index) => project(entity, counts[index])).ToList();
+        }
+
+        return await SegmentsAsync(options, null, offset, limit, query => query.Select(map), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    ///     Runs the read with its window. Cosmos DB orders nulls and undefined as the smallest value and orders by property
+    ///     paths alone, so a placement against that order on the first sort reads as two queries — the rows whose key is
+    ///     null, and the rest — concatenated in the order asked, the window carried across them (a count of the first
+    ///     part runs only when the skip passes it whole).
+    /// </summary>
+    private async Task<List<TResult>> SegmentsAsync<TResult>(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
+        int? offset, int? limit, Func<IQueryable<TEntity>, IQueryable<TResult>> project, CancellationToken cancellationToken)
+    {
+        var sorts = ReadShapes.Sorts(options);
+        var split = SplitAt(sorts);
+        if (split < 0)
+        {
+            return await MaterializeAsync(project(Window(Query(options, extraFilter), options, offset, limit)), cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (split > 0)
+        {
+            throw SplitRefusal("a later sort");
+        }
+
+        var first = sorts[0];
+        var isNull = IsNull(first.Key);
+        var isValue = Expression.Lambda<Func<TEntity, bool>>(Expression.Not(isNull.Body), isNull.Parameters);
+        var segments = first.Nulls == NullsOrder.First ? new[] { isNull, isValue } : [isValue, isNull];
+
+        var results = new List<TResult>();
+        var skip = offset ?? 0;
+        var remaining = limit;
+        for (var index = 0; index < segments.Length && remaining is not 0; index++)
+        {
+            var segment = And(extraFilter, segments[index]);
+            var rows = await MaterializeAsync(project(Window(Query(options, segment), options, skip > 0 ? skip : null, remaining)),
+                cancellationToken).ConfigureAwait(false);
+            results.AddRange(rows);
+            remaining -= rows.Count;
+
+            if (skip > 0 && index + 1 < segments.Length)
+            {
+                // The window began inside this part when it returned rows; otherwise the skip passes it whole.
+                skip = rows.Count > 0
+                    ? 0
+                    : Math.Max(0, skip - await Query(options, segment).CountAsync(cancellationToken).ConfigureAwait(false));
+            }
+        }
+
+        return results;
+    }
+
+    private IQueryable<TEntity> Window(IQueryable<TEntity> query, QueryOptions<TEntity>? options, int? offset, int? limit)
+    {
+        if (offset is not null)
+        {
+            query = Ordered(query, options).Skip(offset.Value);
+        }
+
+        return limit is null ? query : query.Take(limit.Value);
+    }
+
+    /// <summary>The first sort placing nulls against Cosmos DB's order, or -1.</summary>
+    private static int SplitAt(IReadOnlyList<MemorySort> sorts)
+    {
+        for (var index = 0; index < sorts.Count; index++)
+        {
+            if (!ReadShapes.IsNullsSmallest(sorts[index].Nulls, sorts[index].Descending))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Refuses a placement of nulls on a read that cannot split in two (paging by continuation, streaming).</summary>
+    private static void RefuseSplitNulls(QueryOptions<TEntity>? options, string read)
+    {
+        if (SplitAt(ReadShapes.Sorts(options)) >= 0)
+        {
+            throw SplitRefusal(read);
+        }
+    }
+
+    private static NotSupportedException SplitRefusal(string where) =>
+        new($"Cosmos DB sorts nulls and undefined as the smallest value and orders by property paths alone, so a placement " +
+            $"against that order cannot apply to {where}: it reads as two queries split on whether the key is null, which " +
+            "works for the first sort of an entity or mapped read. Make it the first sort, or order the rows client-side.");
+
+    /// <summary><c>x =&gt; !IS_DEFINED(x.Key) || IS_NULL(x.Key)</c>.</summary>
+    private static Expression<Func<TEntity, bool>> IsNull(LambdaExpression key)
+    {
+        var parameter = Expression.Parameter(typeof(TEntity), "x");
+        var member = new ParameterSwap(key.Parameters[0], parameter).Visit(key.Body);
+        var boxed = Expression.Convert(member, typeof(object));
+        var defined = Expression.Call(typeof(CosmosLinqExtensions), nameof(CosmosLinqExtensions.IsDefined), null, boxed);
+        var isNull = Expression.Call(typeof(CosmosLinqExtensions), nameof(CosmosLinqExtensions.IsNull), null, boxed);
+        return Expression.Lambda<Func<TEntity, bool>>(Expression.OrElse(Expression.Not(defined), isNull), parameter);
+    }
+
+    private static Expression<Func<TEntity, bool>> And(Expression<Func<TEntity, bool>>? left, Expression<Func<TEntity, bool>> right)
+    {
+        if (left is null)
+        {
+            return right;
+        }
+
+        var body = new ParameterSwap(right.Parameters[0], left.Parameters[0]).Visit(right.Body);
+        return Expression.Lambda<Func<TEntity, bool>>(Expression.AndAlso(left.Body, body), left.Parameters);
+    }
+
+    /// <summary>The shaped query for a read over every matching row, which refuses the options' <c>Skip</c>/<c>Take</c>.</summary>
+    private IQueryable<TEntity> Whole(QueryOptions<TEntity>? options, string read)
+    {
+        ReadShapes.RefuseRowWindow(options, read);
+        return Query(options);
+    }
+
+    private sealed class ParameterSwap(ParameterExpression from, Expression to) : ExpressionVisitor
+    {
+        protected override Expression VisitParameter(ParameterExpression node) => node == from ? to : node;
     }
 
     // ---------------------------------------------------------------- dispose
@@ -419,16 +641,10 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
     /// <returns>The shaped query.</returns>
     protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null)
     {
-        if (options is { IncludePaths.Count: > 0 })
-        {
-            throw new NotSupportedException(
-                "Cosmos documents are self-contained; there are no navigations to include — embed related data or query it explicitly.");
-        }
-
         var global = GlobalFilter(options);
         var query = Container
             .GetItemLinqQueryable<TEntity>(allowSynchronousQueryExecution: true, requestOptions: RequestOptions(options, extraFilter, global))
-            .ApplyQueryOptions(options);
+            .ApplyQueryOptions(options, nullsPlaced: true);
         if (global is not null)
         {
             query = query.Where(global);

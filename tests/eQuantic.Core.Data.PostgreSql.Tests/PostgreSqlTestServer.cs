@@ -116,7 +116,7 @@ public sealed class PostgreSqlTestDatabase : IDisposable
     public PostgreSqlTestDatabase(string connectionString, Action<IServiceCollection>? configure)
     {
         var services = new ServiceCollection();
-        services.AddPostgreSqlDatabase(connectionString, TestSchema.Configure);
+        services.AddPostgreSqlDatabase(connectionString, model => TestSchema.Configure(ReadShapesSchema.Configure(model)));
         services.AddPostgreSqlRepositories();
         services.AddPostgreSqlMigrations(typeof(TestSchema).Assembly);
         configure?.Invoke(services);

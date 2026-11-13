@@ -19,6 +19,7 @@ public sealed class MariaDbTests
     private ServiceProvider? _provider;
     private IServiceScope? _scope;
     private Exception? _startupError;
+    private readonly CommandCapture _commands = new();
 
     [OneTimeSetUp]
     public async Task StartAsync()
@@ -29,9 +30,10 @@ public sealed class MariaDbTests
             await _container.StartAsync();
 
             var services = new ServiceCollection();
-            services.AddMariaDbDatabase(_container.GetConnectionString(), TestSchema.ConfigureMariaDb);
+            services.AddMariaDbDatabase(_container.GetConnectionString(), model => TestSchema.ConfigureMariaDb(ReadShapesSchema.Configure(model)));
             services.AddMySqlRepositories();
             services.AddMySqlMigrations(typeof(MariaDbTests).Assembly);
+            _commands.Register(services);
             _provider = services.BuildServiceProvider();
             _scope = _provider.CreateScope();
             await _scope.ServiceProvider.GetRequiredService<IMigrationRunner>().RunAsync();
@@ -140,4 +142,21 @@ public sealed class MariaDbTests
         Assert.That(first.IssuedAt, Is.Not.EqualTo(default(DateTime)));
         Assert.That((await repo.GetAsync(second.Id))!.Number, Is.EqualTo(second.Number), "each value went to its own member");
     }
+
+    private ShapeStore Shapes => new(type => _scope!.ServiceProvider.GetRequiredService(type), Commit, _commands);
+
+    [Test]
+    public Task An_include_is_filtered_ordered_and_limited_per_parent() => ReadShapeScenarios.TheLastThreeNewestFirst(Shapes);
+
+    [Test]
+    public Task A_relation_is_counted_not_loaded() => ReadShapeScenarios.CountedNotLoaded(Shapes);
+
+    [Test]
+    public Task Nulls_are_ordered_first_or_last() => ReadShapeScenarios.NullsFirstOrLast(Shapes);
+
+    [Test]
+    public Task A_page_is_read_without_its_total() => ReadShapeScenarios.TakeTenWithoutTotal(Shapes);
+
+    [Test]
+    public Task Distinct_values_of_two_members() => ReadShapeScenarios.DistinctOfTwoMembers(Shapes);
 }
