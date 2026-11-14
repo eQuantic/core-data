@@ -159,6 +159,19 @@ public sealed class MariaDbTests
             "labels in an ENUM, JSON as LONGTEXT, a sequence's default and the clock's must read as the dialect wrote them");
     }
 
+    [Test]
+    public async Task Members_added_as_store_generated_are_filled_in_the_rows_already_there()
+    {
+        // A table of its own in the fixture's database, which the shared model does not map. As root: MariaDB 10.10
+        // refuses the ALTER that fills a column defaulting to a sequence's next value ("ALTER command denied … for
+        // table stamps_number_seq") to a user holding ALL PRIVILEGES on the database, and runs it for root.
+        var root = new MySqlConnector.MySqlConnectionStringBuilder(_container!.GetConnectionString()) { UserID = "root" }
+            .ConnectionString;
+        var services = new ServiceCollection();
+        services.AddMariaDbDatabase(root, StoreGeneratedAdditionScenario.Configure);
+        await StoreGeneratedAdditionScenario.RunAsync(root, services);
+    }
+
     private ShapeStore Shapes => new(type => _scope!.ServiceProvider.GetRequiredService(type), Commit, _commands);
 
     [Test]

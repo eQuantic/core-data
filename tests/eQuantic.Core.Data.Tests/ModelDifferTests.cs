@@ -272,6 +272,82 @@ public sealed class ModelDifferTests
         Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True);
     }
 
+    // ---- labels, keys and additions the store assigns ----------------------------------------------
+
+    private static readonly LabelSnapshot[] Stages =
+        [new("Queued", 0, "queued"), new("Running", 1, "running"), new("Done", 2, "done")];
+
+    private static FieldSnapshot Labelled(params LabelSnapshot[] labels) =>
+        new("State", "state", "labels:Shop.OrderState") { Labels = labels };
+
+    [Test]
+    public void A_label_added_to_an_enum_stored_as_labels_is_a_change_of_labels()
+    {
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled([.. Stages, new LabelSnapshot("Failed", 3, "failed")])));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeLabels));
+        Assert.That(change.From, Is.EqualTo("queued, running, done"));
+        Assert.That(change.To, Is.EqualTo("queued, running, done, failed"));
+        Assert.That(change.StoredType, Is.EqualTo("labels:Shop.OrderState"));
+        Assert.That(change.LabelsAfter, Has.Count.EqualTo(4));
+    }
+
+    [Test]
+    public void A_member_renamed_in_code_with_its_label_kept_is_no_change()
+    {
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled(new("Pending", 0, "queued"), Stages[1], Stages[2])));
+
+        Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True, "the store holds the same labels");
+    }
+
+    [Test]
+    public void An_enum_whose_labels_were_not_recorded_compares_clean()
+    {
+        // A snapshot written before labels were recorded: the same label enum, and no labels.
+        var before = Snapshot(Entity(new FieldSnapshot("State", "state", "labels:Shop.OrderState")));
+        var after = Snapshot(Entity(Labelled(Stages)));
+
+        Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True,
+            "no labels recorded is not known, never every label removed");
+    }
+
+    [Test]
+    public void A_key_the_store_starts_numbering_is_a_key_generation_change()
+    {
+        var before = Snapshot(new EntitySnapshot(Order, "orders", [Field("Id", "id", "System.Int64")]) { Keys = ["Id"] });
+        var after = Snapshot(new EntitySnapshot(Order, "orders", [Field("Id", "id", "System.Int64")])
+        {
+            Keys = ["Id"],
+            KeyIsGenerated = true,
+        });
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeKeyGeneration));
+        Assert.That(change.Member, Is.EqualTo("Id"));
+        Assert.That(change.From, Is.Null);
+        Assert.That(change.To, Is.EqualTo("sequence"));
+        Assert.That(ModelDiffer.Compare(after, before).Changes.Single().To, Is.Null, "and the other way round");
+    }
+
+    [Test]
+    public void A_member_added_as_store_generated_asks_for_no_value()
+    {
+        var before = Snapshot(Entity(Field("Id", "id", "System.Guid")));
+        var after = Snapshot(Entity(Field("Id", "id", "System.Guid"),
+            new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" }));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.AddField));
+        Assert.That(change.NeedsValue, Is.False, "the store assigns it; the migration says where it does not fill what is there");
+        Assert.That(change.Generated, Is.EqualTo("sequence"));
+    }
+
     // ---- collections -------------------------------------------------------------------------------
 
     [Test]

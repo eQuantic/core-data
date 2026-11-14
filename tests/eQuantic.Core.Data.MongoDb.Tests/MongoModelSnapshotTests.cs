@@ -152,6 +152,13 @@ public sealed class MongoModelSnapshotTests
         Assert.That(entity.Field("History")!.StoredType, Is.EqualTo("labels:" + typeof(Priority).FullName + "[]"),
             "an array's elements go through the enum's serializer too");
         Assert.That(entity.Field("Packing")!.StoredType, Is.EqualTo("labels:" + typeof(Packing).FullName));
+        Assert.That(entity.Field("Priority")!.Labels, Is.EqualTo(new[]
+        {
+            new LabelSnapshot("Low", 0, "Low"),
+            new LabelSnapshot("High", 1, "urgent"),
+        }), "each label with the member it stands for and its number");
+        Assert.That(entity.Field("History")!.Labels, Has.Count.EqualTo(2));
+        Assert.That(entity.Field("Carrier")!.Labels, Is.Empty);
     }
 
     [Test]

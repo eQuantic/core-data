@@ -15,8 +15,10 @@ namespace eQuantic.Core.Data.Evolution;
 ///     <para>
 ///         Where those two part ways, the file is written so that <b>the solution does not build</b>. A member
 ///         added without saying what existing records hold, and a change no store operation can express, both emit
-///         a <c>#error</c> naming the decision. So do an enum switched between its numbers and its labels and a
-///         member whose generation by the store changed: each says what the step must do on that store. The alternative — a comment — is a change that runs, appears to
+///         a <c>#error</c> naming the decision. So do an enum switched between its numbers and its labels, an enum
+///         whose labels changed where the store holds them, a member or key whose generation by the store changed, and
+///         a store-generated member added where the store does not fill the records already there: each says what the
+///         step must do on that store. The alternative — a comment — is a change that runs, appears to
 ///         succeed, and quietly leaves the data wrong.
 ///     </para>
 /// </summary>
@@ -71,10 +73,11 @@ public static class MigrationWriter
         text.AppendLine("    {");
 
         var body = new StringBuilder();
+        var decided = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entity in difference.Changes.Select(change => change.EntityType).Distinct(StringComparer.Ordinal))
         {
             WriteEntity(body, difference.Provider, entity,
-                difference.Changes.Where(change => change.EntityType == entity).ToList());
+                difference.Changes.Where(change => change.EntityType == entity).ToList(), decided);
         }
 
         text.Append(body.Length == 0
@@ -86,7 +89,8 @@ public static class MigrationWriter
         return text.ToString();
     }
 
-    private static void WriteEntity(StringBuilder text, string provider, string entityType, IReadOnlyList<ModelChange> changes)
+    private static void WriteEntity(StringBuilder text, string provider, string entityType, IReadOnlyList<ModelChange> changes,
+        HashSet<string> decided)
     {
         // A dropped entity is the one case with no type left to name: the class it stood for is gone from the
         // model, and the store has no operation that removes a collection. It is written out and handed over.
@@ -96,7 +100,7 @@ public static class MigrationWriter
 
         foreach (var change in changes.Except(undroppable))
         {
-            Render(change, provider, entityType, steps, decisions);
+            Render(change, provider, entityType, steps, decisions, decided);
         }
 
         if (steps.Count > 0)
@@ -127,10 +131,21 @@ public static class MigrationWriter
     }
 
     private static void Render(ModelChange change, string provider, string entityType, List<string> steps,
-        List<string> decisions)
+        List<string> decisions, HashSet<string> decided)
     {
         switch (change.Kind)
         {
+            // Before the other additions: the store assigns it, so no value is asked for, and where the store does
+            // not fill the records already there (a counter or a clock the provider applies on insert), that is said.
+            case ModelChangeKind.AddField when change.Generated is not null:
+                steps.Add($".AddField(x => x.{change.Member})");
+                if (MigrationDecisions.AddedGenerated(provider, entityType, change) is { } unfilled)
+                {
+                    decisions.Add(unfilled);
+                }
+
+                break;
+
             case ModelChangeKind.AddCollection:
                 steps.Add(".EnsureCollection()");
                 break;
@@ -197,6 +212,24 @@ public static class MigrationWriter
             // (a sequence) has to start above what is already stored, which only a person can check.
             case ModelChangeKind.ChangeGeneration:
                 decisions.Add(MigrationDecisions.Generation(provider, entityType, change));
+                break;
+
+            // An enum type is one object on PostgreSQL however many columns use it, so its step is said once.
+            case ModelChangeKind.ChangeLabels
+                when string.Equals(provider, "postgresql", StringComparison.OrdinalIgnoreCase) &&
+                     !decided.Add("labels|" + change.StoredType):
+                break;
+
+            case ModelChangeKind.ChangeLabels:
+                if (MigrationDecisions.LabelSet(provider, entityType, change) is { } relabel)
+                {
+                    decisions.Add(relabel);
+                }
+
+                break;
+
+            case ModelChangeKind.ChangeKeyGeneration:
+                decisions.Add(MigrationDecisions.KeyGeneration(provider, entityType, change));
                 break;
 
             case ModelChangeKind.DropCollection:

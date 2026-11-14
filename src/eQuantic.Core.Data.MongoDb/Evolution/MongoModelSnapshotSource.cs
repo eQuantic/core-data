@@ -54,7 +54,8 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
 
     private static FieldSnapshot Describe(BsonMemberMap member, IReadOnlyList<MongoGeneratedMember> generated)
     {
-        return new FieldSnapshot(member.MemberName, member.ElementName, StoredTypeOf(member))
+        var (storedType, labels) = StoredTypeOf(member);
+        return new FieldSnapshot(member.MemberName, member.ElementName, storedType)
         {
             // A document may always be missing a field, whatever the member's CLR type says — that is the
             // condition a migration exists to fix, not one the model can rule out.
@@ -64,6 +65,7 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
             Generated = generated.FirstOrDefault(candidate => candidate.Property.Name == member.MemberName) is { } store
                 ? StoredForm.Generated(store.Value)
                 : null,
+            Labels = labels is null ? [] : LabelSnapshot.Of(labels),
         };
     }
 
@@ -71,7 +73,7 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
     ///     The member's CLR type, or the labels of the enum its serializer writes as labels: the member's own (a
     ///     nullable one unwrapped), or its array's elements.
     /// </summary>
-    private static string StoredTypeOf(BsonMemberMap member)
+    private static (string StoredType, Type? Labels) StoredTypeOf(BsonMemberMap member)
     {
         var serializer = member.GetSerializer();
 
@@ -80,16 +82,16 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
         {
             if (array.TryGetItemSerializationInfo(out var item) && LabelEnumOf(item.Serializer, item.NominalType) is { } element)
             {
-                return StoredForm.LabelCollection(element);
+                return (StoredForm.LabelCollection(element), element);
             }
         }
         else if (LabelEnumOf(serializer, member.MemberType) is { } single)
         {
-            return StoredForm.Labels(single);
+            return (StoredForm.Labels(single), single);
         }
 
         var stored = member.MemberType;
-        return (Nullable.GetUnderlyingType(stored) ?? stored).FullName ?? stored.Name;
+        return ((Nullable.GetUnderlyingType(stored) ?? stored).FullName ?? stored.Name, null);
     }
 
     /// <summary>The enum a serializer of <paramref name="valueType" /> writes as its labels, or <c>null</c>.</summary>

@@ -140,6 +140,9 @@ public sealed class CosmosModelSnapshotTests
             "the converter is the type's, so a list's elements are labels too");
         Assert.That(numbers.Field("Severity")!.StoredType, Is.EqualTo("labels:" + typeof(Severity).FullName),
             "[EnumType] on an enum the model never declares");
+        Assert.That(labels.Field("Stage")!.Labels.Select(label => label.Label), Is.EqualTo(new[] { "Open", "Closed" }));
+        Assert.That(labels.Field("History")!.Labels, Has.Count.EqualTo(2));
+        Assert.That(numbers.Field("Stage")!.Labels, Is.Empty);
     }
 
     [Test]

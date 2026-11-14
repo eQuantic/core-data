@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -105,6 +106,37 @@ public sealed record FieldSnapshot(string Member, string Name, string StoredType
     ///     every member, which is what every member was then.
     /// </summary>
     public string? Generated { get; init; }
+
+    /// <summary>
+    ///     The labels of the enum the member stores as labels, in the enum's order: empty for any other member, and in a
+    ///     snapshot written before labels were recorded, which a comparison then reads as "not known" rather than as
+    ///     an enum that lost every label.
+    /// </summary>
+    public IReadOnlyList<LabelSnapshot> Labels { get; init; } = [];
+}
+
+/// <summary>
+///     One label of an enum stored as its labels: the member it stands for, the member's number, and the label the
+///     store holds for it. The member and its number are how a comparison tells a label renamed from one removed while
+///     another is added.
+/// </summary>
+/// <param name="Member">The enum member's name.</param>
+/// <param name="Value">The enum member's number.</param>
+/// <param name="Label">The label the store holds for it (its <c>[StoredAs]</c> name, or its own).</param>
+public sealed record LabelSnapshot(string Member, long Value, string Label)
+{
+    /// <summary>The labels of <paramref name="enumType" />, in its declaration order.</summary>
+    /// <param name="enumType">An enum stored as its labels.</param>
+    public static IReadOnlyList<LabelSnapshot> Of(Type enumType) =>
+        Modeling.EnumLabels.Of(enumType)
+            .Select(label => new LabelSnapshot(label.Key, Number(enumType, label.Key), label.Value))
+            .ToList();
+
+    private static long Number(Type enumType, string member)
+    {
+        var raw = enumType.GetField(member)!.GetRawConstantValue()!;
+        return raw is ulong large ? unchecked((long)large) : Convert.ToInt64(raw, System.Globalization.CultureInfo.InvariantCulture);
+    }
 }
 
 /// <summary>An ordered-read member and its direction.</summary>

@@ -37,6 +37,19 @@ public enum ModelChangeKind
     ///     side (<c>sequence</c>, <c>clock</c>, <c>default …</c>), <c>null</c> where the application writes it.
     /// </summary>
     ChangeGeneration,
+
+    /// <summary>
+    ///     The same member, storing the same enum as its labels, whose labels changed: one added, renamed, removed or
+    ///     moved. <see cref="ModelChange.LabelsBefore" /> and <see cref="ModelChange.LabelsAfter" /> carry both lists.
+    /// </summary>
+    ChangeLabels,
+
+    /// <summary>
+    ///     The same entity and key, whose key the store now numbers, or no longer does (<c>KeyIsGenerated</c>).
+    ///     <see cref="ModelChange.From" /> and <see cref="ModelChange.To" /> are <c>sequence</c> where the store numbers
+    ///     it and <c>null</c> where the application gives it.
+    /// </summary>
+    ChangeKeyGeneration,
 }
 
 /// <summary>
@@ -75,6 +88,22 @@ public sealed record ModelChange(ModelChangeKind Kind, string EntityType)
     ///     member turns the pair into a rename that keeps it.
     /// </summary>
     public string? AmbiguousRenameHint { get; init; }
+
+    /// <summary>
+    ///     What the store assigns the member the change adds (<c>sequence</c>, <c>clock</c>, <c>default …</c>), or
+    ///     <c>null</c> when the application writes it. A store that fills the rows already there itself needs no value
+    ///     for them; one that does not is told so by the migration.
+    /// </summary>
+    public string? Generated { get; init; }
+
+    /// <summary>The member's stored type, where the change depends on it (the enum whose labels changed).</summary>
+    public string? StoredType { get; init; }
+
+    /// <summary>The enum's labels as they were, for a change of its labels.</summary>
+    public IReadOnlyList<LabelSnapshot> LabelsBefore { get; init; } = [];
+
+    /// <summary>The enum's labels as they are, for a change of its labels.</summary>
+    public IReadOnlyList<LabelSnapshot> LabelsAfter { get; init; } = [];
 }
 
 /// <summary>

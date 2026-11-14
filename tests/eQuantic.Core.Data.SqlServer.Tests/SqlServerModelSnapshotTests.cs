@@ -71,6 +71,8 @@ public sealed class SqlServerModelSnapshotTests
         Assert.That(Describe().Entities.Single().Field("Stage")!.StoredType, Is.EqualTo(typeof(Stage).FullName));
         Assert.That(Describe(labels: true).Entities.Single().Field("Stage")!.StoredType,
             Is.EqualTo("labels:" + typeof(Stage).FullName));
+        Assert.That(Describe(labels: true).Entities.Single().Field("Stage")!.Labels.Select(label => label.Label),
+            Is.EqualTo(new[] { "Draft", "Published" }), "the labels the CHECK holds the column to");
     }
 
     [Test]

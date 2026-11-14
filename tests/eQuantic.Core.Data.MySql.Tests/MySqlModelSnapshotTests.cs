@@ -85,6 +85,8 @@ public sealed class MySqlModelSnapshotTests
             Is.EqualTo(typeof(Stage).FullName));
         Assert.That(Describe(system, labels: true).Entities.Single().Field("Stage")!.StoredType,
             Is.EqualTo("labels:" + typeof(Stage).FullName));
+        Assert.That(Describe(system, labels: true).Entities.Single().Field("Stage")!.Labels.Select(label => label.Label),
+            Is.EqualTo(new[] { "Draft", "Published" }), "the labels the ENUM(...) lists, in its order");
     }
 
     [TestCaseSource(nameof(Systems))]

@@ -60,6 +60,7 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
     {
         var stored = column.StoredType;
         var underlying = Nullable.GetUnderlyingType(stored);
+        var labels = LabelEnumOf(column);
         return new FieldSnapshot(column.Property.Name, column.Name, StoredTypeOf(column))
         {
             Length = column.Length,
@@ -71,6 +72,7 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
             PreviousNames = column.PreviousNames,
             DefaultLiteral = CSharpLiteral.Render(column.DefaultValue),
             Generated = GeneratedOf(column),
+            Labels = labels is null ? [] : LabelSnapshot.Of(labels),
         };
     }
 
@@ -81,14 +83,20 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
     private string StoredTypeOf(RelationalColumn column)
     {
         var stored = Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType;
-        if (column.Converter is null && RelationalNativeEnum.EnumOf(stored) is { } enumType &&
-            _dialect.NativeEnumOf(enumType) is not null)
+        if (LabelEnumOf(column) is { } enumType)
         {
             return stored.IsEnum ? StoredForm.Labels(enumType) : StoredForm.LabelCollection(enumType);
         }
 
         return stored.FullName ?? stored.Name;
     }
+
+    /// <summary>The enum the dialect stores the column as labels of (alone, or an array's elements), or <c>null</c>.</summary>
+    private Type? LabelEnumOf(RelationalColumn column) =>
+        column.Converter is null && RelationalNativeEnum.EnumOf(column.StoredType) is { } enumType &&
+        _dialect.NativeEnumOf(enumType) is not null
+            ? enumType
+            : null;
 
     /// <summary>What the store assigns the column on insert, or <c>null</c> when the application writes it.</summary>
     private static string? GeneratedOf(RelationalColumn column) =>

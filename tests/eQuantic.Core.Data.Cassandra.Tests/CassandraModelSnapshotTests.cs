@@ -129,6 +129,9 @@ public sealed class CassandraModelSnapshotTests
         Assert.That(DescribeSamples(labels: true).Entities.Single().Field("Grade")!.StoredType,
             Is.EqualTo("labels:" + typeof(Grade).FullName),
             "text holding labels is not text holding anything else");
+        Assert.That(DescribeSamples(labels: true).Entities.Single().Field("Grade")!.Labels.Select(label => label.Label),
+            Is.EqualTo(new[] { "Raw", "Calibrated" }));
+        Assert.That(DescribeSamples().Entities.Single().Field("Grade")!.Labels, Is.Empty);
     }
 
     [Test]

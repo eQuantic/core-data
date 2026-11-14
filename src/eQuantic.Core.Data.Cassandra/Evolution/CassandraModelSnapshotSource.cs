@@ -60,11 +60,12 @@ public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelS
     {
         var member = MemberVocabulary.Find(configuration.EntityType, column.Member);
         var clr = Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType;
+        var labels = clr.IsEnum && column.CqlType == "text";
         // The CQL type, not the CLR one: it is what the cluster holds, and a conversion between two CLR types
         // that land on the same CQL type is not a change to the store. An enum's labels are the exception: text
         // holding labels is not text holding anything else.
         return new FieldSnapshot(column.Member, column.Name,
-            clr.IsEnum && column.CqlType == "text" ? StoredForm.Labels(clr) : column.CqlType)
+            labels ? StoredForm.Labels(clr) : column.CqlType)
         {
             Nullable = true,
             PreviousNames = MemberVocabulary.PreviousNames(member),
@@ -73,6 +74,7 @@ public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelS
                 .FirstOrDefault(generated => CassandraEntityConfiguration.Same(generated.Column, column.Name)) is { } store
                 ? StoredForm.Generated(store.Value)
                 : null,
+            Labels = labels ? LabelSnapshot.Of(clr) : [],
         };
     }
 }

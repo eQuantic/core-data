@@ -138,6 +138,15 @@ public static class ModelSnapshotWriter
             facets.Add($"Generated = {Literal(generated)}");
         }
 
+        if (field.Labels.Count > 0)
+        {
+            // Also written only when there are some, for the same reason: a model with no enum stored as its labels
+            // keeps its file.
+            var labels = field.Labels.Select(label =>
+                $"new LabelSnapshot({Literal(label.Member)}, {label.Value.ToString(CultureInfo.InvariantCulture)}, {Literal(label.Label)})");
+            facets.Add($"Labels = [{string.Join(", ", labels)}]");
+        }
+
         return facets.Count == 0 ? text.ToString() : text.Append(" { ").Append(string.Join(", ", facets)).Append(" }").ToString();
     }
 

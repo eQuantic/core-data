@@ -54,7 +54,8 @@ public sealed class CosmosModelSnapshotSource(CosmosModel model) : IModelSnapsho
 
     private FieldSnapshot Describe(CosmosEntityConfiguration configuration, PropertyInfo member)
     {
-        return new FieldSnapshot(member.Name, CosmosNaming.StoredName(member), StoredTypeOf(member.PropertyType))
+        var (storedType, labels) = StoredTypeOf(member.PropertyType);
+        return new FieldSnapshot(member.Name, CosmosNaming.StoredName(member), storedType)
         {
             // As with any document store, a property may simply be absent from what is already written.
             Nullable = true,
@@ -64,6 +65,7 @@ public sealed class CosmosModelSnapshotSource(CosmosModel model) : IModelSnapsho
                 is { } generated
                 ? StoredForm.Generated(generated.Value)
                 : null,
+            Labels = labels is null ? [] : LabelSnapshot.Of(labels),
         };
     }
 
@@ -71,20 +73,20 @@ public sealed class CosmosModelSnapshotSource(CosmosModel model) : IModelSnapsho
     ///     The member's CLR type, or the labels of the enum the serializer writes as labels: its converter is the
     ///     type's, so it applies to the member alone (a nullable one unwrapped) and to a collection's elements.
     /// </summary>
-    private string StoredTypeOf(Type memberType)
+    private (string StoredType, Type? Labels) StoredTypeOf(Type memberType)
     {
         var stored = Nullable.GetUnderlyingType(memberType) ?? memberType;
         if (IsLabelEnum(stored))
         {
-            return StoredForm.Labels(stored);
+            return (StoredForm.Labels(stored), stored);
         }
 
         if (stored != typeof(string) && ElementOf(stored) is { } element && IsLabelEnum(element))
         {
-            return StoredForm.LabelCollection(element);
+            return (StoredForm.LabelCollection(element), element);
         }
 
-        return stored.FullName ?? memberType.Name;
+        return (stored.FullName ?? memberType.Name, null);
     }
 
     /// <summary>Whether the serializer writes the enum as its labels: declared on the model, or annotated.</summary>

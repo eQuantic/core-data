@@ -95,8 +95,11 @@ public sealed class ModelSnapshotRoundTripTests
                 new FieldSnapshot("Id", "id", "System.Guid"),
                 new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" },
                 new FieldSnapshot("Stamp", "stamp", "System.DateTimeOffset") { Generated = "clock" },
-                new FieldSnapshot("State", "state", "labels:Shop.OrderState"),
-            ]) { Keys = ["Id"] },
+                new FieldSnapshot("State", "state", "labels:Shop.OrderState")
+                {
+                    Labels = [new("Queued", 0, "queued"), new("InProgress", 1, "in_progress"), new("Large", -3000000000, "large")],
+                },
+            ]) { Keys = ["Id"], KeyIsGenerated = true },
         ]);
         var written = ModelSnapshotWriter.Write(model, "Shop.Migrations");
 
@@ -106,6 +109,8 @@ public sealed class ModelSnapshotRoundTripTests
         Assert.That(read.For("Shop.Order")!.Field("Number")!.Generated, Is.EqualTo("sequence"));
         Assert.That(read.For("Shop.Order")!.Field("At")!.Generated, Is.EqualTo("default now()"));
         Assert.That(read.For("Shop.Order")!.Field("State")!.StoredType, Is.EqualTo("labels:Shop.OrderState"));
+        Assert.That(read.For("Shop.Order")!.Field("State")!.Labels,
+            Is.EqualTo(model.For("Shop.Order")!.Field("State")!.Labels), "every label, its member and its number");
         Assert.That(ModelSnapshotWriter.Write(read, "Shop.Migrations"), Is.EqualTo(written),
             "written again, it is the same file");
     }

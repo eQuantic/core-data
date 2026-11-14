@@ -90,7 +90,10 @@ These trigger it:
 | A member that appeared while another disappeared, undeclared | generating drop-and-add loses the data (see below) |
 | Dropping a collection | it deletes everything in it, and a model diff cannot tell whether that data is finished with |
 | An enum switched between its numbers and its labels | a type conversion writes the number `1` as the text `"1"`, never as its label (see below) |
+| A label added, renamed, removed or moved in an enum stored as labels, where the store holds them | an enum type, an `ENUM(…)` or a `CHECK` lists the labels, and stored rows hold the old ones (see below) |
 | A member that becomes store-generated, changes what the store assigns, or stops being so | no operation makes a store start assigning a member, and a sequence has to start above what is already stored (see below) |
+| A key the store starts or stops numbering | an identity cannot be added to or taken off a column the same way on every engine (see below) |
+| A store-generated member added on MongoDB, Cosmos DB or Cassandra | the provider fills new inserts only, so the records already there need values, and a counter has to start above them |
 | A type change no store operation performs | `ConvertField` covers strings, numbers, booleans, dates and identifiers; anything else is yours to write |
 
 ### Renames keep the data — if you say so
@@ -172,12 +175,22 @@ new FieldSnapshot("History", "history", "labels:Shop.OrderState[]"),  // an arra
 new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" },
 new FieldSnapshot("StampedAt", "stamped_at", "System.DateTime") { Generated = "clock" },
 new FieldSnapshot("IssuedAt", "issued_at", "System.DateTime") { Generated = "default now()" },  // relational SQL default
+new FieldSnapshot("State", "state", "labels:Shop.OrderState")
+{
+    Labels = [new LabelSnapshot("Queued", 0, "queued"), new LabelSnapshot("InProgress", 1, "in_progress")],
+},
 ```
+
+`Labels` records each label with the member it stands for and that member's number, in the enum's order:
+how a comparison tells a renamed label (the same member, or the same number once the member's name moved)
+from one removed while another is added. `Generated` and `Labels` are written only when there is one, so
+a model without them writes the file it always wrote.
 
 An enum stored as its number keeps the spelling it always had: its CLR type on the relational stores,
 MongoDB and Cosmos DB, its integral CQL type on Cassandra. A snapshot committed before these were
-recorded has no `Generated` anywhere, which is what every member was then, so it still compiles and
-an unchanged model still compares clean against it.
+recorded has no `Generated` anywhere, which is what every member was then, and no `Labels`, which a
+comparison reads as "not known" rather than as every label removed: it still compiles, and an
+unchanged model still compares clean against it.
 
 Neither change is ever generated as a step. Switching an enum between its numbers and its labels is
 reported as a conversion and written as a `#error` that says what the step must do on that store,
@@ -208,6 +221,37 @@ as its own change, `ChangeGeneration`, and handed back the same way:
 
 A sequence that starts below what is stored hands out numbers already taken, and only a look at the
 data says where it has to start — which is why this is a decision and not a step.
+
+A **key** the store starts or stops numbering (`Key(x => x.Id, generated: true)`) is its own change,
+`ChangeKeyGeneration`: PostgreSQL adds or drops the identity (starting above the largest key), MySQL and
+MariaDB modify the key column with or without `AUTO_INCREMENT`, and SQL Server, which cannot put an
+`IDENTITY` on an existing column or take one off, rebuilds the table and copies the rows across under
+`IDENTITY_INSERT`.
+
+A store-generated member **added** asks for no value: on every relational engine the store fills the
+rows already in the table itself (an identity or `AUTO_INCREMENT` numbers them, and a `NOT NULL`
+column added with a sequence's, a clock's or a declared default takes it in every row), so the
+generated `AddField` is all there is. One catch, measured on MariaDB 10.10: the `ALTER` that fills a
+column defaulting to a sequence's next value is refused ("ALTER command denied … for table
+`<table>_<column>_seq`") to a user holding every privilege on the database, and runs for root; run
+that migration as a user with global privileges. MongoDB, Cosmos DB and Cassandra assign it on insert only: the
+documents or rows already there lack it, so the migration hands back a decision to give them values,
+and, for a sequence, to start its counter above the largest of them.
+
+### When an enum's labels change
+
+The labels of an enum stored as its labels are in the store's schema on the relational engines and
+only in the data elsewhere, so a label added, renamed, removed or moved is a change of its own,
+`ChangeLabels`, and its `#error` names the exact step:
+
+| Store | Added | Renamed | Removed or moved |
+|---|---|---|---|
+| PostgreSQL | `ALTER TYPE … ADD VALUE 'paused' AFTER 'queued'` (not usable in the transaction that adds it) | `ALTER TYPE … RENAME VALUE 'old' TO 'new'`: the rows follow | a new type with the new labels, the rows holding a removed label rewritten, every column moved to it `USING` its text, the old type dropped and the new one renamed |
+| MySQL · MariaDB | `MODIFY COLUMN … ENUM(…)` with the full new list; every stored value whose label is still listed is kept | through a list holding both, the rows rewritten, then the new list | the rows rewritten first: a stored label the list lacks becomes `''` |
+| SQL Server | the `CHECK` replaced (and the column widened if a label outgrew it) | the `CHECK` dropped, the rows rewritten, the new `CHECK` added | the same; a move alone changes nothing |
+| MongoDB · Cosmos DB · Cassandra | nothing: no line is written | every stored `'old'` rewritten as `'new'` | every record holding a removed label rewritten (the labels' reader refuses it); a move needs nothing |
+
+On PostgreSQL the type is one object however many columns use it, so its step is said once.
 
 ### Refusals
 

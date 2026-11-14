@@ -18,8 +18,10 @@ namespace eQuantic.Core.Data.Evolution;
 ///         Two changes leave the member's CLR type alone and still change what the store holds: an enum switched
 ///         between its numbers and its labels, which the snapshot spells apart and this reports as a conversion,
 ///         and a member that becomes store-generated, changes what the store assigns, or stops being so, reported
-///         as <see cref="ModelChangeKind.ChangeGeneration" />. Neither is ever generated as a step; the migration
-///         says what the step must do.
+///         as <see cref="ModelChangeKind.ChangeGeneration" />. So do an enum whose labels changed
+///         (<see cref="ModelChangeKind.ChangeLabels" />, compared only where both versions recorded them) and a key
+///         the store starts or stops numbering (<see cref="ModelChangeKind.ChangeKeyGeneration" />). None is ever
+///         generated as a step; the migration says what the step must do.
 ///     </para>
 /// </summary>
 public static class ModelDiffer
@@ -75,6 +77,18 @@ public static class ModelDiffer
 
         RefuseImpossible(before, after, provider, refusals);
 
+        // A key the store starts or stops numbering: the same key, assigned by someone else. (A key that moved is
+        // refused above, and the refusal says what to do.)
+        if (before.KeyIsGenerated != after.KeyIsGenerated && before.Keys.SequenceEqual(after.Keys, StringComparer.Ordinal))
+        {
+            changes.Add(new ModelChange(ModelChangeKind.ChangeKeyGeneration, after.EntityType)
+            {
+                Member = string.Join(", ", after.Keys),
+                From = before.KeyIsGenerated ? StoredForm.Sequence : null,
+                To = after.KeyIsGenerated ? StoredForm.Sequence : null,
+            });
+        }
+
         // Members present in both are matched by their CLR name; the stored name may still have moved.
         var carried = new HashSet<string>(StringComparer.Ordinal);
         foreach (var field in after.Fields)
@@ -110,8 +124,10 @@ public static class ModelDiffer
                 To = field.Name,
                 DefaultLiteral = field.DefaultLiteral,
                 // A nullable member is allowed to be absent — null is a real answer for it. Everything else
-                // would land on default(T) in every existing record, which is a value nobody chose.
-                NeedsValue = field.DefaultLiteral is null && !field.Nullable,
+                // would land on default(T) in every existing record, which is a value nobody chose. A member the store
+                // assigns is the store's to fill: the migration says so where the store does not fill what is there.
+                NeedsValue = field.DefaultLiteral is null && !field.Nullable && field.Generated is null,
+                Generated = field.Generated,
             });
         }
 
@@ -171,6 +187,24 @@ public static class ModelDiffer
                 Member = after.Member,
                 From = Facets(before),
                 To = Facets(after),
+            });
+        }
+
+        // The same enum's labels, changed. A snapshot written before labels were recorded has none, which is "not
+        // known", never "every label removed": it compares as it did. A conversion above already covers a member
+        // that moved to or from labels.
+        if (string.Equals(before.StoredType, after.StoredType, StringComparison.Ordinal) &&
+            before.Labels.Count > 0 && after.Labels.Count > 0 &&
+            !before.Labels.Select(label => label.Label).SequenceEqual(after.Labels.Select(label => label.Label), StringComparer.Ordinal))
+        {
+            changes.Add(new ModelChange(ModelChangeKind.ChangeLabels, entityType)
+            {
+                Member = after.Member,
+                From = string.Join(", ", before.Labels.Select(label => label.Label)),
+                To = string.Join(", ", after.Labels.Select(label => label.Label)),
+                StoredType = after.StoredType,
+                LabelsBefore = before.Labels,
+                LabelsAfter = after.Labels,
             });
         }
 

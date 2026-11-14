@@ -108,6 +108,9 @@ internal static class AddMigrationCommand
         ModelChangeKind.ChangeGeneration =>
             $"store-generated {change.Member}: {change.From ?? "written by the application"} to " +
             $"{change.To ?? "written by the application"} — needs a step",
+        ModelChangeKind.ChangeLabels => $"relabel {change.Member} from ({change.From}) to ({change.To})",
+        ModelChangeKind.ChangeKeyGeneration =>
+            $"key {change.Member}: {(change.To is null ? "given by the application" : "numbered by the store")} — needs a step",
         _ => change.Kind.ToString(),
     };
 
