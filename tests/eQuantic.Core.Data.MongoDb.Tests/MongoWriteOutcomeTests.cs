@@ -465,6 +465,39 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task An_upsert_that_names_the_id_as_its_target_inserts_then_updates_keeping_the_creation_stamp()
+    {
+        var id = Guid.NewGuid().ToString("N");
+        using (var scope = NewScope())
+        {
+            var inserted = await Resolve<IUpsertRepository<Secret, string>>(scope)
+                .UpsertAsync(new Secret { Id = id, WorkspaceId = "w", Name = "token", Value = "a" }, x => x.Id);
+            Assert.That(inserted.Id, Is.EqualTo(id));
+        }
+
+        Secret created;
+        using (var read = NewScope())
+        {
+            created = (await Repo<Secret>(read).GetAsync(id))!;
+            Assert.That((created.Value, created.UpdatedAt), Is.EqualTo(("a", (DateTime?)null)));
+            Assert.That(created.CreatedAt, Is.Not.EqualTo(default(DateTime)));
+        }
+
+        await Task.Delay(20);
+        Secret updated;
+        using (var scope = NewScope())
+        {
+            updated = await Resolve<IUpsertRepository<Secret, string>>(scope)
+                .UpsertAsync(new Secret { Id = id, WorkspaceId = "w", Name = "token", Value = "b" }, x => x.Id);
+        }
+
+        Assert.That(updated.Value, Is.EqualTo("b"));
+        Assert.That(updated.CreatedAt, Is.EqualTo(created.CreatedAt), "the update keeps the stored creation stamp");
+        Assert.That(updated.UpdatedAt, Is.GreaterThan(created.CreatedAt), "and stamps the update");
+        Assert.That(await _db.Database.GetCollection<BsonDocument>("Secret").CountDocumentsAsync(new BsonDocument("_id", id)), Is.EqualTo(1L));
+    }
+
+    [Test]
     public async Task A_unique_index_other_than_the_key_is_named_on_every_write_path()
     {
         var owner = new UserAccount { Email = "owner@example.test", Name = "owner" };
