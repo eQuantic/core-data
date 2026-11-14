@@ -96,7 +96,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         }
 
         var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
-        var where = WhereClause(scoped);
+        var where = SqlFilter.Of(_queryable.Where(scoped));
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
         var deleted = await ForEachItemAsync(matches, item => DeleteMatchingAsync(item, where, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
@@ -104,7 +104,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     }
 
     /// <summary>Deletes an item under the <c>_etag</c> of a read that still finds it matching; 1 when it did, 0 when not.</summary>
-    private async Task<int> DeleteMatchingAsync(TEntity item, string where, CancellationToken cancellationToken)
+    private async Task<int> DeleteMatchingAsync(TEntity item, SqlFilter where, CancellationToken cancellationToken)
     {
         var id = _configuration.GetId(item);
         var partitionKey = _configuration.GetPartitionKey(item);
@@ -189,11 +189,12 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
 
         // A text test that ignores case is never a patch's condition: the store's condition evaluator answers it with 412
-        // (the vNext emulator does), which reads as "no longer matches" and patches nothing, silently. Such a filter
-        // patches each item under the _etag of a read that finds it matching.
-        var condition = CosmosPredicates.TestsTextIgnoringCase(scoped) ? null : "FROM root WHERE " + WhereClause(scoped);
+        // (the vNext emulator does), which reads as "no longer matches" and patches nothing, silently. Nor is a filter the
+        // SDK translates with a JOIN (a test over an embedded array), which the evaluator refuses. Such a filter patches
+        // each item under the _etag of a read that finds it matching.
+        var where = SqlFilter.Of(_queryable.Where(scoped));
+        var condition = CosmosPredicates.TestsTextIgnoringCase(scoped) || !where.OverRootAlone ? null : "FROM root WHERE " + where.Predicate;
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
-        var where = WhereClause(scoped);
         var patched = await ForEachItemAsync(matches, item => PatchMatchingAsync(item, patch, condition, where, cancellationToken),
             cancellationToken).ConfigureAwait(false);
         return patched.Where(item => item is not null).Select(item => item!).ToList();
@@ -205,7 +206,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     ///     (a filter the condition evaluator cannot be trusted with), under the <c>_etag</c> of a read that finds it matching. A
     ///     unique key the patch would take is a <see cref="DuplicateKeyException" />, by either path.
     /// </summary>
-    private async Task<TEntity?> PatchMatchingAsync(TEntity item, IReadOnlyList<PatchOperation> patch, string? condition, string where,
+    private async Task<TEntity?> PatchMatchingAsync(TEntity item, IReadOnlyList<PatchOperation> patch, string? condition, SqlFilter where,
         CancellationToken cancellationToken)
     {
         var id = _configuration.GetId(item);
@@ -244,7 +245,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     ///     Patches an item under the <c>_etag</c> of a read that finds it still matching the filter, reading again after a
     ///     concurrent change: the same compare-and-set as a patch under the filter, in two round trips.
     /// </summary>
-    private async Task<TEntity?> PatchUnderETagAsync(string id, PartitionKey partitionKey, IReadOnlyList<PatchOperation> patch, string where,
+    private async Task<TEntity?> PatchUnderETagAsync(string id, PartitionKey partitionKey, IReadOnlyList<PatchOperation> patch, SqlFilter where,
         CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < ConditionalAttempts; attempt++)
@@ -452,9 +453,10 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     }
 
     /// <summary>The <c>_etag</c> of the item when it still matches the filter, or <c>null</c>.</summary>
-    private async Task<string?> MatchingETagAsync(string id, PartitionKey partitionKey, string where, CancellationToken cancellationToken)
+    private async Task<string?> MatchingETagAsync(string id, PartitionKey partitionKey, SqlFilter where, CancellationToken cancellationToken)
     {
-        var query = new QueryDefinition($"SELECT VALUE root._etag FROM root WHERE root.id = @eqId AND ({where})").WithParameter("@eqId", id);
+        var query = new QueryDefinition($"SELECT VALUE root._etag {where.From} WHERE root.id = @eqId AND ({where.Predicate})")
+            .WithParameter("@eqId", id);
         using var iterator = _container.GetItemQueryIterator<string>(query, requestOptions: new QueryRequestOptions { PartitionKey = partitionKey });
         while (iterator.HasMoreResults)
         {
@@ -468,14 +470,67 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     }
 
     /// <summary>
-    ///     The predicate the SDK's LINQ translation renders for the filter, over the alias <c>root</c> — the condition a
-    ///     patch is applied under, and the one a delete re-checks.
+    ///     A filter as the SDK's LINQ translation renders it over the alias <c>root</c>, split at the query's own
+    ///     <c>WHERE</c>: what comes before it (<c>FROM root</c>, and the <c>JOIN</c>s the SDK writes for a test over an
+    ///     embedded array, whose aliases the predicate reads) and the predicate. The condition a patch is applied under,
+    ///     and the one a delete re-checks.
     /// </summary>
-    private string WhereClause(Expression<Func<TEntity, bool>> filter)
+    private readonly record struct SqlFilter(string From, string Predicate)
     {
-        var text = _queryable.Where(filter).ToQueryDefinition().QueryText;
-        var where = text.IndexOf(" WHERE ", StringComparison.Ordinal);
-        return where < 0 ? "true" : text[(where + " WHERE ".Length)..];
+        private const string Select = "SELECT VALUE root ";
+        private const string Where = " WHERE ";
+
+        /// <summary>Whether the predicate reads the document alone, with no alias a <c>JOIN</c> introduced.</summary>
+        public bool OverRootAlone => From == "FROM root";
+
+        public static SqlFilter Of(IQueryable<TEntity> query)
+        {
+            var text = query.ToQueryDefinition().QueryText;
+            if (!text.StartsWith(Select, StringComparison.Ordinal))
+            {
+                throw new NotSupportedException($"The SDK translated the filter as '{text}', which a set-based write does not recognise.");
+            }
+
+            // The query's own WHERE is the first outside every parenthesis (a JOIN's subquery holds WHEREs of its own)
+            // and outside every string literal (a value may hold the word).
+            var depth = 0;
+            for (var index = Select.Length; index < text.Length; index++)
+            {
+                switch (text[index])
+                {
+                    case '"' or '\'':
+                        index = ClosingQuote(text, index);
+                        break;
+                    case '(':
+                        depth++;
+                        break;
+                    case ')':
+                        depth--;
+                        break;
+                    case ' ' when depth == 0 && string.CompareOrdinal(text, index, Where, 0, Where.Length) == 0:
+                        return new SqlFilter(text[Select.Length..index], text[(index + Where.Length)..]);
+                }
+            }
+
+            return new SqlFilter(text[Select.Length..], "true");
+        }
+
+        private static int ClosingQuote(string text, int opening)
+        {
+            for (var index = opening + 1; index < text.Length; index++)
+            {
+                if (text[index] == '\\')
+                {
+                    index++;
+                }
+                else if (text[index] == text[opening])
+                {
+                    return index;
+                }
+            }
+
+            return text.Length;
+        }
     }
 
     // ---------------------------------------------------------------- inserts skipping duplicates (immediate)

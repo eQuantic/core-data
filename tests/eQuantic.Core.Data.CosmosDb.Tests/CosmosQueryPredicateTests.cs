@@ -130,7 +130,7 @@ public sealed class RelSpace : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
-/// <summary>A company whose name is matched without regard to case.</summary>
+/// <summary>A company whose name is matched without regard to case, with the tags it embeds.</summary>
 public sealed class RelCompany : IEntity<string>
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -140,6 +140,8 @@ public sealed class RelCompany : IEntity<string>
     public string Name { get; set; } = "";
 
     public int Rank { get; set; }
+
+    public List<string> Tags { get; set; } = [];
 
     public string GetKey() => Id;
 
@@ -379,6 +381,25 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
             Is.EqualTo(1L));
         Assert.That((await repo.GetFilteredAsync(x => x.Category == partition)).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Rank),
             Is.EqualTo(new[] { ("Acme Corp", 1), ("Acme.Corp", 4), ("acme_corp", 20) }));
+    }
+
+    [Test]
+    public async Task A_set_based_write_whose_filter_reads_an_embedded_array_writes_the_items_it_matches()
+    {
+        // The SDK translates a test over an embedded array into a JOIN before the WHERE: the write's condition keeps it.
+        await Seed(new RelCompany { Name = "a", Tags = ["x"] }, new RelCompany { Name = "b", Tags = ["y"] },
+            new RelCompany { Name = "c", Tags = ["x", "y"] });
+        using var scope = NewScope();
+        var repo = RepoOf<RelCompany>(scope);
+        var partition = Partition;
+
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Tags.Any(t => t == "x"), x => new RelCompany { Rank = 7 }),
+            Is.EqualTo(2L));
+        Assert.That(await repo.DeleteManyAsync(x => x.Category == partition && x.Tags.Any(t => t == "y") && x.Rank != 7), Is.EqualTo(1L));
+        Assert.That((await repo.GetFilteredAsync(x => x.Category == partition)).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Name),
+            Is.EqualTo(new[] { ("a", 7), ("c", 7) }));
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Tags.Any(t => t == "y") && x.Name.StartsWith("C",
+            StringComparison.OrdinalIgnoreCase), x => new RelCompany { Rank = 8 }), Is.EqualTo(1L), "and under the _etag of a read");
     }
 
     [Test]
