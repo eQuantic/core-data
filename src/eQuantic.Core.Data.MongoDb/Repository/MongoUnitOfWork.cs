@@ -198,23 +198,6 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
         Buffer<TEntity>().Add(VersionedReplace(item, upsert: false), conditional: HasToken<TEntity>());
     }
 
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
-    {
-        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-
-        // A token entity at its initial version is a new document: insert it (a duplicate key surfaces as an
-        // error rather than silently overwriting a concurrent writer's document).
-        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
-            && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
-        {
-            StampInitialVersion(item);
-            Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
-            return;
-        }
-
-        Buffer<TEntity>().Add(VersionedReplace(item, upsert: !HasToken<TEntity>()), conditional: HasToken<TEntity>());
-    }
-
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
     {
         // A soft-delete entity's Remove stamps DeletedAt and stages a replace — the document survives.
