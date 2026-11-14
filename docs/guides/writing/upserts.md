@@ -96,7 +96,7 @@ assigns are not read back onto the entities (read the rows if you need them).
 | SQL Server | one `INSERT` per row in `TRY…CATCH` swallowing only errors 2627/2601 (a duplicate leaves the transaction committable) | **yes** |
 | MySQL / MariaDB | one `INSERT` per row in a transaction, discarding only error 1062 | **yes** |
 | MongoDB | `insertMany`, unordered when skipping (discarding only E11000), ordered otherwise; inside an explicit transaction, the taken keys found first (below) and only the free documents inserted | no: an ordered insert stops at the taken key and the documents before it stay — unless an explicit transaction is open, which makes the call part of it |
-| Cosmos DB | one create per item, concurrently, discarding only 409 | per item: without skipping, the call fails after every create has answered, and the others stay |
+| Cosmos DB | one create per item, 32 at a time, discarding only 409 | per item: without skipping, the call fails after every create has answered, and the others stay |
 | Cassandra | one `INSERT … IF NOT EXISTS` per row, one partition's at a time; every sequence number reserved first, in one compare-and-set | per row, as above |
 
 MongoDB aborts a transaction on **any** write error, a duplicate key included, so inside an explicit
@@ -105,7 +105,8 @@ inside the session: the `_id`s, and the values of every unique index `listIndexe
 outside the session, as MongoDB requires), are looked up among the stored documents — a sparse index
 holding only documents with one of its fields, a partial index only those its
 `partialFilterExpression` matches, a collated index comparing under its collation (the batch's own
-repeats compared with the platform's culture comparison at that strength) — and the documents whose
+repeats compared with the platform's culture comparison at that strength), and a number compared by its
+value whatever its BSON type (`10`, `10.0` and `10.00m` are one key, as they are to the index) — and the documents whose
 keys are taken, or repeat an earlier one of the batch, are left out before anything is written. A
 concurrent writer that takes one of the free keys between the check and the insert makes MongoDB
 answer with its **transient write conflict** (`WriteConflict`, labelled `TransientTransactionError`):
