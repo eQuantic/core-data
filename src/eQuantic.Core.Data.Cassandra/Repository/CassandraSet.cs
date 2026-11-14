@@ -85,7 +85,13 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 cancellationToken).ConfigureAwait(false);
         }
 
-        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
+        var prepared = await PrepareAsync(filter, "DELETE", cancellationToken).ConfigureAwait(false);
+        if (prepared.RowTests.Count > 0)
+        {
+            return await DeleteRowByRowAsync(prepared, cancellationToken).ConfigureAwait(false);
+        }
+
+        filter = prepared.Filter;
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         if (split.Conditions.Count == 0)
         {
@@ -156,7 +162,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
-        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
+        var prepared = await PrepareAsync(filter, "UPDATE", cancellationToken).ConfigureAwait(false);
+        if (prepared.RowTests.Count > 0)
+        {
+            return (await UpdateConditionallyAsync(prepared.Split!, prepared.Filter, Assignments(updateExpression), cancellationToken,
+                prepared).ConfigureAwait(false)).Count;
+        }
+
+        filter = prepared.Filter;
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
         var assignments = Assignments(updateExpression);
         if (split.Conditions.Count == 0 && !NeedsReadOfRow(assignments))
@@ -200,18 +213,181 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     internal async Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken)
     {
-        filter = await Ready(filter, cancellationToken).ConfigureAwait(false);
-        var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
-        return await UpdateConditionallyAsync(split, filter, Assignments(updateExpression), cancellationToken).ConfigureAwait(false);
+        var prepared = await PrepareAsync(filter, "UPDATE", cancellationToken).ConfigureAwait(false);
+        var split = prepared.Split ?? CassandraConditions.Split(_configuration, prepared.Filter, _unitOfWork.GlobalFilter<TEntity>());
+        return await UpdateConditionallyAsync(split, prepared.Filter, Assignments(updateExpression), cancellationToken, prepared)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
-    ///     A set-based write's filter as the planner reads it: normalized, and each test across a relation resolved into
-    ///     the related keys (read first; a write carries no opt-ins, so the related read has to be one the table serves
-    ///     natively) — the write then finds its rows by those keys as by any other.
+    ///     A set-based write's filter prepared: normalized, and each test across a relation resolved into the related keys
+    ///     (read first; a write carries no opt-ins, so the related read has to be one the table serves natively). A resolved
+    ///     test the key restriction or a lightweight transaction's <c>IF</c> can hold (an <c>IN</c> on the key) stays in the
+    ///     filter, and the write finds its rows by it as by any other. One they cannot hold — a negated relation, a
+    ///     <c>NOT IN</c> — is a <b>row test</b>: the rows the rest of the filter finds (under the write's partition) are read, a
+    ///     row whose key the related read returned is left out, and each other row is written by its full key in a lightweight
+    ///     transaction that also holds every column the test read at the value read.
     /// </summary>
-    private Task<Expression<Func<TEntity, bool>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
-        CassandraPredicates.ResolveAsync(filter, _unitOfWork, null, cancellationToken);
+    private async Task<PreparedWrite> PrepareAsync(Expression<Func<TEntity, bool>> filter, string statement, CancellationToken cancellationToken)
+    {
+        var normalized = PredicateNormalizer.Normalize(filter);
+        var parameter = normalized.Parameters[0];
+        var navigations = CassandraPredicates.Navigations(_unitOfWork);
+        var pushed = new List<Expression>();
+        var rowTests = new List<Expression>();
+        foreach (var conjunct in Conjuncts(normalized.Body))
+        {
+            var lambda = Expression.Lambda<Func<TEntity, bool>>(conjunct, parameter);
+            if (RelationPredicates.Find(lambda, navigations).Count == 0)
+            {
+                pushed.Add(conjunct);
+                continue;
+            }
+
+            var resolved = await CassandraPredicates.ResolveAsync(lambda, _unitOfWork, null, cancellationToken).ConfigureAwait(false);
+            (Splits(resolved) ? pushed : rowTests).Add(resolved.Body);
+        }
+
+        var whole = Expression.Lambda<Func<TEntity, bool>>(pushed.Concat(rowTests).Aggregate(Expression.AndAlso), parameter);
+        if (rowTests.Count == 0)
+        {
+            return new PreparedWrite(whole, null, [], []);
+        }
+
+        if (pushed.Count == 0)
+        {
+            throw new NotSupportedException(
+                $"A conditional {statement} reads the rows by their key first, and the filter names none of it: a negated relation " +
+                "leaves rows out of the ones the rest of the filter finds, so the filter has to name the partition key too.");
+        }
+
+        var split = CassandraConditions.Split(_configuration,
+            Expression.Lambda<Func<TEntity, bool>>(pushed.Aggregate(Expression.AndAlso), parameter), _unitOfWork.GlobalFilter<TEntity>());
+        RequireConditionalWrite(split, statement);
+        var held = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        new ColumnReader(parameter, member =>
+        {
+            var column = _configuration.ColumnFor(member);
+            if (!_configuration.IsKey(column) && _configuration.Column(column) is not null)
+            {
+                held.Add(column);
+            }
+        }).Visit(Expression.Lambda(rowTests.Aggregate(Expression.AndAlso), parameter));
+        return new PreparedWrite(whole, split,
+            rowTests.Select(test => Expression.Lambda<Func<TEntity, bool>>(test, parameter).Compile()).ToList(), held.ToList());
+    }
+
+    private bool Splits(Expression<Func<TEntity, bool>> filter)
+    {
+        try
+        {
+            CassandraConditions.Split(_configuration, filter, null);
+            return true;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<Expression> Conjuncts(Expression body) =>
+        body is BinaryExpression { NodeType: ExpressionType.AndAlso } and ? Conjuncts(and.Left).Concat(Conjuncts(and.Right)) : [body];
+
+    /// <summary>
+    ///     The <c>IF</c> clauses holding the columns a row test read at the values the row had (<c>col = null</c> for an unset
+    ///     one), so the row is written only while the test still holds on it.
+    /// </summary>
+    private (List<string> Clauses, List<object?> Values) Held(PreparedWrite? prepared, TEntity current)
+    {
+        var clauses = new List<string>();
+        var values = new List<object?>();
+        foreach (var column in prepared?.Held ?? [])
+        {
+            var stored = CassandraValues.ToStored(_configuration.Column(column), Member(current, _configuration.MemberFor(column)));
+            clauses.Add(stored is null ? $"{column} = null" : $"{column} = ?");
+            if (stored is not null)
+            {
+                values.Add(stored);
+            }
+        }
+
+        return (clauses, values);
+    }
+
+    /// <summary>
+    ///     A delete with row tests: the rows the key restriction finds, the ones a row test leaves out skipped, and each other
+    ///     deleted by its full key <c>IF</c> the filter's conditions and the columns the tests read still hold (<c>IF EXISTS</c>
+    ///     when nothing else is held). A transaction that does not apply reads the row again and decides again.
+    /// </summary>
+    private async Task<long> DeleteRowByRowAsync(PreparedWrite prepared, CancellationToken cancellationToken)
+    {
+        var split = prepared.Split!;
+        var keys = CassandraMapper.PrimaryKey(_configuration);
+        var global = _unitOfWork.GlobalFilter<TEntity>();
+        var matches = (global is null ? prepared.Filter : prepared.Filter.AndAlso(global)).Compile();
+        var rows = await KeyedRowsAsync(split, cancellationToken).ConfigureAwait(false);
+        var deleted = await Task.WhenAll(rows.Select(async row =>
+        {
+            for (var attempt = 1; attempt <= ConditionalAttempts; attempt++)
+            {
+                var current = CassandraMapper.Materialize<TEntity>(_configuration, row);
+                if (!prepared.RowTests.All(test => test(current)))
+                {
+                    return 0L;
+                }
+
+                var (heldClauses, heldValues) = Held(prepared, current);
+                var conditions = split.Conditions.Select(clause => clause.Cql).Concat(heldClauses).ToList();
+                var cql = $"DELETE FROM {_configuration.TableName} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))} " +
+                          (conditions.Count == 0 ? "IF EXISTS" : $"IF {string.Join(" AND ", conditions)}");
+                var (applied, timeout) = await TryConditionalAsync(cql,
+                    [.. KeyValues(row, keys), .. split.Conditions.SelectMany(clause => clause.Values), .. heldValues]).ConfigureAwait(false);
+                if (applied == true)
+                {
+                    return 1L;
+                }
+
+                // Not applied, or its outcome unknown: a serial read decides. A row that is gone was deleted when the
+                // transaction timed out (by this delete, or one with the same effect), and was not this delete's otherwise.
+                var fresh = await ReadRowAsync(row, keys).ConfigureAwait(false);
+                if (fresh is null)
+                {
+                    return timeout is null ? 0L : 1L;
+                }
+
+                if (!matches(CassandraMapper.Materialize<TEntity>(_configuration, fresh)))
+                {
+                    return 0L;
+                }
+
+                row = fresh;
+                await BackoffAsync(attempt).ConfigureAwait(false);
+            }
+
+            throw new InvalidOperationException(
+                $"A row of '{_configuration.TableName}' kept changing while it was being deleted; {ConditionalAttempts} attempts did not settle.");
+        })).ConfigureAwait(false);
+        return deleted.Sum();
+    }
+
+    /// <summary>The filter a write runs: the whole (resolved) filter, its key restriction when row tests apply, the tests and the columns they read.</summary>
+    private sealed record PreparedWrite(Expression<Func<TEntity, bool>> Filter, CassandraConditions? Split,
+        IReadOnlyList<Func<TEntity, bool>> RowTests, IReadOnlyList<string> Held);
+
+    /// <summary>Hands each member of the parameter an expression reads to a callback.</summary>
+    private sealed class ColumnReader(ParameterExpression parameter, Action<string> read) : ExpressionVisitor
+    {
+        protected override Expression VisitMember(MemberExpression node)
+        {
+            if (node.Expression == parameter)
+            {
+                read(node.Member.Name);
+                return node;
+            }
+
+            return base.VisitMember(node);
+        }
+    }
 
     /// <summary>The update's assignments, with the update's lifecycle stamps unless it assigns them.</summary>
     private List<UpdateAssignment> Assignments(Expression<Func<TEntity, TEntity>> updateExpression)
@@ -234,7 +410,8 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         assignment is IncrementAssignment or MultiplyAssignment && !_configuration.IsCounter(_configuration.ColumnFor(assignment.Name)));
 
     private async Task<IReadOnlyList<TEntity>> UpdateConditionallyAsync(CassandraConditions split,
-        Expression<Func<TEntity, bool>> filter, IReadOnlyList<UpdateAssignment> assignments, CancellationToken cancellationToken)
+        Expression<Func<TEntity, bool>> filter, IReadOnlyList<UpdateAssignment> assignments, CancellationToken cancellationToken,
+        PreparedWrite? prepared = null)
     {
         RequireConditionalWrite(split, "UPDATE");
         foreach (var assignment in assignments)
@@ -257,6 +434,12 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             for (var attempt = 1; attempt <= ConditionalAttempts; attempt++)
             {
                 var current = CassandraMapper.Materialize<TEntity>(_configuration, row);
+                if (prepared is not null && !prepared.RowTests.All(test => test(current)))
+                {
+                    // A row a negated relation leaves out (its key among the ones the related read returned).
+                    return null;
+                }
+
                 var next = CassandraMapper.Materialize<TEntity>(_configuration, row);
                 foreach (var assignment in assignments)
                 {
@@ -269,6 +452,9 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 var values = new List<object?>();
                 var conditions = split.Conditions.Select(clause => clause.Cql).ToList();
                 var conditionValues = split.Conditions.SelectMany(clause => clause.Values).ToList();
+                var (heldClauses, heldValues) = Held(prepared, current);
+                conditions.AddRange(heldClauses);
+                conditionValues.AddRange(heldValues);
                 foreach (var assignment in assignments)
                 {
                     var column = _configuration.Column(_configuration.ColumnFor(assignment.Name))!;

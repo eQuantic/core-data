@@ -4,6 +4,7 @@ using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
 using eQuantic.Core.Data.Repository.Write;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace eQuantic.Core.Data.Cassandra.Tests;
 
@@ -162,11 +163,31 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
             .Key(x => x.Id)
             .SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true));
 
+    /// <remarks>
+    ///     These scenarios write the same rows with plain statements (the seed, a keyed update or delete) and with lightweight
+    ///     transactions (a conditional write), one right after the other. Cassandra orders writes by their timestamps: a plain
+    ///     write carries the client's (the driver's default), a lightweight transaction the coordinator's — and this host and
+    ///     the container's VM keep different clocks, by more than the milliseconds between two steps, so a later write could
+    ///     lose to an earlier one. The fixture's session lets the server stamp every write (a timestamp generator answering
+    ///     <see cref="long.MinValue" />), so one clock orders them, as synchronized clocks do in a cluster.
+    /// </remarks>
     [SetUp]
     public async Task CreateKeyspace()
     {
-        _db = new CassandraTestDatabase(CassandraTestServer.Host, CassandraTestServer.Port, "ks_" + Guid.NewGuid().ToString("N"),
-            Model, [typeof(SchemaSetupMigration).Assembly]);
+        var keyspace = "ks_" + Guid.NewGuid().ToString("N");
+        _db = new CassandraTestDatabase(CassandraTestServer.Host, CassandraTestServer.Port, keyspace,
+            Model, [typeof(SchemaSetupMigration).Assembly], services => services.Replace(ServiceDescriptor.Singleton<global::Cassandra.ISession>(_ =>
+            {
+                var cluster = global::Cassandra.Cluster.Builder()
+                    .AddContactPoints(CassandraTestServer.Host)
+                    .WithPort(CassandraTestServer.Port)
+                    .WithTimestampGenerator(new ServerTimestamps())
+                    .Build();
+                var session = cluster.Connect();
+                session.Execute($"CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH replication = {{'class':'SimpleStrategy','replication_factor':1}}");
+                session.ChangeKeyspace(keyspace);
+                return session;
+            })));
         await _db.Resolve<IMigrationExecutor>().ApplyAsync(new MigrationBuilder()
             .For<RelItem>(table => table.EnsureCollection())
             .For<RelMention>(table => table.EnsureCollection())
@@ -181,6 +202,12 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
 
     [TearDown]
     public void DropKeyspace() => _db?.Dispose();
+
+    /// <summary>Lets the server stamp each write: the driver sends no timestamp when the generator answers <see cref="long.MinValue" />.</summary>
+    private sealed class ServerTimestamps : global::Cassandra.ITimestampGenerator
+    {
+        public long Next() => long.MinValue;
+    }
 
     private IServiceScope NewScope() => _db.NewScope();
 
@@ -310,6 +337,39 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         Assert.That(await Titles(space, x => x.Box == null), Is.EqualTo(new[] { "B", "C" }), "C's box id names no box");
         Assert.That(await Titles(space, x => x.Box != null), Is.EqualTo(new[] { "A" }));
         Assert.That(await Titles(space, x => x.Box!.Name == "inbox"), Is.EqualTo(new[] { "A" }));
+    }
+
+    [Test]
+    public async Task A_negated_relation_in_set_based_writes()
+    {
+        var (space, _) = await SeedItemsAsync();
+        using (var scope = NewScope())
+        {
+            var repo = Repo<RelItem>(scope);
+
+            // The rows the space finds, less the ones whose key the related read returns: each written by its full key.
+            Assert.That(await repo.UpdateManyAsync(x => x.Space == space && !x.Runs!.Any(), x => new RelItem { Title = "idle" }),
+                Is.EqualTo(2L), "B and C");
+            var boxless = await ((IReturningUpdateRepository<RelItem, Guid>)repo)
+                .UpdateAndGetAsync(x => x.Space == space && x.Box == null && x.Title == "idle", x => new RelItem { Title = "boxless" });
+            Assert.That(boxless.Select(x => (x.Title, x.BoxId is null)).OrderBy(x => x.Item2),
+                Is.EqualTo(new[] { ("boxless", false), ("boxless", true) }),
+                "B (no box id) and C (a box id naming no box); the transaction holds the box id at the value read");
+            Assert.That(await repo.DeleteManyAsync(x => x.Space == space && !x.Runs!.Any() && x.BoxId == null), Is.EqualTo(1L), "B");
+            Assert.That(await repo.DeleteManyAsync(x => x.Space == space && x.Box == null), Is.EqualTo(1L), "C, B being gone");
+            Assert.That(await repo.DeleteManyAsync(x => x.Space == space && x.Box == null), Is.EqualTo(0L));
+        }
+
+        Assert.That(await Titles(space, _ => true), Is.EqualTo(new[] { "A" }));
+    }
+
+    [Test]
+    public void A_negated_relation_in_a_write_without_the_partition_key_is_refused()
+    {
+        using var scope = NewScope();
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() =>
+            Repo<RelItem>(scope).DeleteManyAsync(x => !x.Runs!.Any()));
+        Assert.That(refusal!.Message, Does.Contain("partition key"));
     }
 
     [Test]

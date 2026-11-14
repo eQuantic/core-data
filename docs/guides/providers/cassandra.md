@@ -127,9 +127,17 @@ labels, the JSON columns and the store-generated columns.
   the same gates, **under the read's own opt-ins** (`SELECT DISTINCT` when the key is its partition
   key) — then `IN` over them where the key serves it; a negated test (`NOT IN`) runs client-side behind
   `.AllowClientEvaluation()`. A set-based write resolves its keys with no opt-ins, so its related read
-  has to be native, and its keys must address the written table's partition; an update restricted to
-  the partition alone updates each row it finds by its full key. See
+  has to be native, and its filter must address the written table's partition; an update restricted to
+  the partition alone updates each row it finds by its full key. A negated test in a write leaves out,
+  of the rows the rest of the filter finds, those whose key the related read returned, and writes each
+  other row by its full key in a lightweight transaction holding the columns the test read. See
   [Relations and text in filters](../querying/predicates.md).
+- **Plain writes and lightweight transactions on the same rows** are ordered by their timestamps: a
+  plain write (a commit, a keyed set-based update or delete) carries the client's clock — the driver's
+  default — and a lightweight transaction (a conditional or row-by-row set-based write, an upsert) the
+  coordinator's. Keep the clocks synchronized, or give the session server-side timestamps (a
+  `WithTimestampGenerator` whose `Next()` answers `long.MinValue`), or a later write can lose to an
+  earlier one.
 - **Text ignoring case** pushes down as `LIKE` on a SASI index declared case-insensitive
   (`SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true)` or
   `[SearchIndex(CaseInsensitive = true)]`, created with a non-tokenizing, `case_sensitive: false`
