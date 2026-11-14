@@ -16,7 +16,9 @@ public sealed class NamedLockOptions
     /// <summary>
     ///     How long a lease lasts without being renewed, on the stores that hold a named lock as a lease (MongoDB,
     ///     Cosmos DB, Cassandra): the longest a holder that dies keeps the others waiting. 30 seconds by default; at
-    ///     least one second (Cassandra's TTL and Cosmos DB's timestamps count whole seconds).
+    ///     least one second (Cassandra's TTL and Cosmos DB's timestamps count whole seconds). A holder counts it from
+    ///     when it <b>sent</b> the write that took or last renewed the lease, and is told it lost the lock
+    ///     (<see cref="INamedLock.Lost" />) a tenth of the lease before that term ends without a confirmed renewal.
     /// </summary>
     public TimeSpan LeaseDuration
     {
@@ -33,8 +35,9 @@ public sealed class NamedLockOptions
     }
 
     /// <summary>
-    ///     How often a held lease is renewed: a third of <see cref="LeaseDuration" /> by default, so two renewals can
-    ///     fail in a row before the lease runs out. It must be shorter than the lease.
+    ///     How often a held lease is renewed: a third of <see cref="LeaseDuration" /> by default, so a renewal can fail
+    ///     and be asked again before the lease runs out. It must be shorter than nine tenths of the lease, the moment a
+    ///     holder whose renewals were not confirmed is told it lost the lock.
     /// </summary>
     public TimeSpan RenewalInterval
     {
@@ -51,9 +54,10 @@ public sealed class NamedLockOptions
     }
 
     /// <summary>
-    ///     The longest pause between two attempts while waiting, on the stores whose attempt answers at once
-    ///     (PostgreSQL's try-locks and the leases): 100 milliseconds by default. Attempts start sooner and back off up
-    ///     to it. The stores that wait on the server (SQL Server, MySQL, MariaDB) wait in slices of this length.
+    ///     The longest pause between two attempts while waiting on PostgreSQL's try-locks: 100 milliseconds by default.
+    ///     Attempts start sooner and back off up to it. A holder waiting for a lease (MongoDB, Cosmos DB, Cassandra),
+    ///     each of whose attempts is a write, backs off up to ten times this. The stores that wait on the server
+    ///     (SQL Server, MySQL, MariaDB) wait in slices of this length.
     /// </summary>
     public TimeSpan PollInterval
     {
@@ -69,14 +73,24 @@ public sealed class NamedLockOptions
         }
     }
 
-    /// <summary>Checks the combination: the renewal must come before the lease runs out.</summary>
-    /// <exception cref="InvalidOperationException">The renewal interval is not shorter than the lease.</exception>
+    /// <summary>
+    ///     Checks the combination: the renewal must come before a holder is told it lost the lock, nine tenths of the
+    ///     lease after its last confirmed write.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The renewal interval is not shorter than nine tenths of the lease.</exception>
     public void Validate()
     {
-        if (RenewalInterval >= LeaseDuration)
+        if (RenewalInterval >= LeaseDuration - LostMargin(LeaseDuration))
         {
             throw new InvalidOperationException(
-                $"A lease of {LeaseDuration} renewed every {RenewalInterval} runs out before its renewal; renew more often than the lease lasts.");
+                $"A lease of {LeaseDuration} renewed every {RenewalInterval} is lost before its renewal; renew more often than nine tenths of the lease.");
         }
     }
+
+    /// <summary>
+    ///     How long before a lease's term ends its holder is told it lost the lock: a tenth of the lease, for the
+    ///     lateness of a timer and the drift of a clock.
+    /// </summary>
+    /// <param name="leaseDuration">The lease's duration.</param>
+    public static TimeSpan LostMargin(TimeSpan leaseDuration) => leaseDuration / 10;
 }

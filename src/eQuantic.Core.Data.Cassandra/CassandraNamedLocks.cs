@@ -20,6 +20,14 @@ namespace eQuantic.Core.Data.Cassandra;
 ///         is the duration rounded up to whole seconds plus that second (<see cref="Ttl" />), so a lease never expires
 ///         before its duration, and at most a second and a fraction after it.
 ///     </para>
+///     <para>
+///         A lightweight transaction whose coordinator times out (a <c>CAS</c> write timeout, or the driver's own
+///         timeout) may or may not have committed. Such an insert is settled by a <c>SERIAL</c> read of the row, which
+///         finishes or forecloses the round it raced: a row that names this owner is written again with
+///         <c>UPDATE … IF owner = ?</c>, so the lease's term counts from a write of the current call, and anything else
+///         is another owner's or nobody's. An insert not applied over a row that names this owner (a write of the same
+///         acquisition whose answer was lost) is settled the same way.
+///     </para>
 /// </summary>
 public static class CassandraNamedLocks
 {
@@ -38,6 +46,9 @@ public static class CassandraNamedLocks
     /// </summary>
     /// <param name="duration">The lease's duration.</param>
     internal static int Ttl(TimeSpan duration) => (int)Math.Max(1, Math.Ceiling(duration.TotalSeconds)) + 1;
+
+    /// <summary>Whether a lightweight transaction that failed so may have committed all the same.</summary>
+    internal static bool OutcomeUnknown(Exception exception) => exception is WriteTimeoutException or OperationTimedOutException;
 
     /// <summary>Creates the leases table once per session (a failed creation is tried again next time).</summary>
     internal static async Task EnsureTableAsync(ISession session)
@@ -60,13 +71,45 @@ public static class CassandraNamedLocks
 internal sealed class CassandraLeaseStore(ISession session, Microsoft.Extensions.Logging.ILogger? logger, bool sensitive)
     : LeaseStore
 {
-    public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration)
+    public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration, CancellationToken cancellationToken)
     {
-        await CassandraNamedLocks.EnsureTableAsync(session).ConfigureAwait(false);
-        var answer = (await CassandraStatements.ExecuteAsync(session,
-            $"INSERT INTO {CassandraNamedLocks.TableName} (name, owner) VALUES (?, ?) IF NOT EXISTS USING TTL ?",
-            [name, owner, CassandraNamedLocks.Ttl(duration)], null, logger, sensitive).ConfigureAwait(false)).First();
-        return answer.GetValue<bool>("[applied]") ? new CassandraLease(session, name, owner, logger, sensitive) : null;
+        await CassandraNamedLocks.EnsureTableAsync(session).WaitAsync(cancellationToken).ConfigureAwait(false);
+        var lease = new CassandraLease(session, name, owner, logger, sensitive);
+        string? holder;
+        try
+        {
+            var answer = (await CassandraStatements.ExecuteAsync(session,
+                $"INSERT INTO {CassandraNamedLocks.TableName} (name, owner) VALUES (?, ?) IF NOT EXISTS USING TTL ?",
+                [name, owner, CassandraNamedLocks.Ttl(duration)], null, logger, sensitive).WaitAsync(cancellationToken).ConfigureAwait(false)).First();
+            if (answer.GetValue<bool>("[applied]"))
+            {
+                return lease;
+            }
+
+            holder = answer.GetValue<string>("owner");
+        }
+        catch (Exception exception) when (CassandraNamedLocks.OutcomeUnknown(exception))
+        {
+            // The coordinator could not tell whether the round committed: a serial read finishes it, and says whose
+            // the row is.
+            holder = await OwnerAsync(name, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Another owner's live row, or none (the next attempt inserts it). This owner's own row is written again, so
+        // the lease's term counts from this call.
+        return holder == owner && await lease.RenewAsync(duration, cancellationToken).ConfigureAwait(false) ? lease : null;
+    }
+
+    public override Task ReleaseAsync(string name, string owner, CancellationToken cancellationToken) =>
+        new CassandraLease(session, name, owner, logger, sensitive).ReleaseAsync(cancellationToken);
+
+    /// <summary>The row's owner as a serial read sees it, which completes any round still in flight; <c>null</c> when there is none.</summary>
+    private async Task<string?> OwnerAsync(string name, CancellationToken cancellationToken)
+    {
+        var rows = await CassandraStatements.ExecuteAsync(session,
+            $"SELECT owner FROM {CassandraNamedLocks.TableName} WHERE name = ?", [name], ConsistencyLevel.Serial, logger, sensitive)
+            .WaitAsync(cancellationToken).ConfigureAwait(false);
+        return rows.FirstOrDefault()?.GetValue<string>("owner");
     }
 }
 
@@ -74,14 +117,16 @@ internal sealed class CassandraLeaseStore(ISession session, Microsoft.Extensions
 internal sealed class CassandraLease(ISession session, string name, string owner,
     Microsoft.Extensions.Logging.ILogger? logger, bool sensitive) : Lease
 {
-    public override async Task<bool> RenewAsync(TimeSpan duration)
+    public override async Task<bool> RenewAsync(TimeSpan duration, CancellationToken cancellationToken)
     {
         var answer = (await CassandraStatements.ExecuteAsync(session,
             $"UPDATE {CassandraNamedLocks.TableName} USING TTL ? SET owner = ? WHERE name = ? IF owner = ?",
-            [CassandraNamedLocks.Ttl(duration), owner, name, owner], null, logger, sensitive).ConfigureAwait(false)).First();
+            [CassandraNamedLocks.Ttl(duration), owner, name, owner], null, logger, sensitive).WaitAsync(cancellationToken)
+            .ConfigureAwait(false)).First();
         return answer.GetValue<bool>("[applied]");
     }
 
-    public override Task ReleaseAsync() => CassandraStatements.ExecuteAsync(session,
-        $"DELETE FROM {CassandraNamedLocks.TableName} WHERE name = ? IF owner = ?", [name, owner], null, logger, sensitive);
+    public override Task ReleaseAsync(CancellationToken cancellationToken) => CassandraStatements.ExecuteAsync(session,
+        $"DELETE FROM {CassandraNamedLocks.TableName} WHERE name = ? IF owner = ?", [name, owner], null, logger, sensitive)
+        .WaitAsync(cancellationToken);
 }

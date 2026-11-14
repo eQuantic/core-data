@@ -17,6 +17,12 @@ namespace eQuantic.Core.Data.CosmosDb;
 ///     replace (which moves <c>_ts</c>) and deletes it the same way on release; another owner's item is never touched.
 ///     Lease writes never join a transactional batch: another holder has to see them while it is pending.
 ///     <para>
+///         A write answered 408 or 503 may or may not have landed, so it is settled by reading the item back: one
+///         that names this owner (that write, or an earlier one of the same acquisition) is replaced once more under
+///         its ETag, so the lease's term counts from a write of the current call, and anything else is another
+///         owner's or nobody's. A 409 on an item that names this owner is settled the same way.
+///     </para>
+///     <para>
 ///         The item's id is the name itself when it is at most 255 characters of printable ASCII without <c>/</c>,
 ///         <c>\</c>, <c>?</c> or <c>#</c> (which an id cannot hold); otherwise <c>~</c> and its SHA-256. The
 ///         <c>name</c> property keeps the name as it was given.
@@ -69,6 +75,14 @@ public static class CosmosNamedLocks
             ["leaseSeconds"] = Math.Ceiling(duration.TotalSeconds),
         })));
 
+    /// <summary>Whether a write answered so may have landed all the same (a timeout, or a service unavailable meanwhile).</summary>
+    internal static bool AnswerLost(HttpStatusCode status) => status is HttpStatusCode.RequestTimeout or HttpStatusCode.ServiceUnavailable;
+
+    /// <summary>The exception a lease call answered with an unexpected status throws.</summary>
+    internal static CosmosException Unexpected(ResponseMessage response) =>
+        new(response.ErrorMessage ?? $"The lease write failed with status {response.StatusCode}.", response.StatusCode, 0,
+            response.Headers.ActivityId, response.Headers.RequestCharge);
+
     /// <summary>A lease item as read: its owner, the server's time of its last write, and its lease.</summary>
     internal static async Task<(string Owner, long WrittenAt, double LeaseSeconds)> ReadAsync(Stream content)
     {
@@ -83,73 +97,107 @@ public static class CosmosNamedLocks
 /// <summary>The leases in a database's <see cref="CosmosNamedLocks.ContainerName" /> container.</summary>
 internal sealed class CosmosLeaseStore(Database database) : LeaseStore
 {
-    public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration)
+    /// <summary>How many times one call reads the item back after a write whose answer was lost, before it gives up.</summary>
+    private const int Settlements = 3;
+
+    public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration, CancellationToken cancellationToken)
     {
         var container = await CosmosNamedLocks.LeasesAsync(database).ConfigureAwait(false);
         var id = CosmosNamedLocks.ItemId(name);
         var partitionKey = new PartitionKey(id);
 
-        using (var created = await container.CreateItemStreamAsync(CosmosNamedLocks.Body(id, name, owner, duration), partitionKey)
-                   .ConfigureAwait(false))
+        using (var created = await container.CreateItemStreamAsync(CosmosNamedLocks.Body(id, name, owner, duration), partitionKey,
+                   cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             if (created.IsSuccessStatusCode)
             {
                 return new CosmosLease(container, id, name, owner, created.Headers.ETag);
             }
 
-            if (created.StatusCode != HttpStatusCode.Conflict)
+            if (created.StatusCode != HttpStatusCode.Conflict && !CosmosNamedLocks.AnswerLost(created.StatusCode))
             {
-                created.EnsureSuccessStatusCode();
+                throw CosmosNamedLocks.Unexpected(created);
             }
         }
 
-        // Another owner's lease is there: it is taken over only once it has expired by the server's clock.
-        using var read = await container.ReadItemStreamAsync(id, partitionKey).ConfigureAwait(false);
-        if (read.StatusCode == HttpStatusCode.NotFound)
+        // An item is there (or the create landed although its answer was lost): the item says whose it is.
+        for (var settlement = 0; settlement < Settlements; settlement++)
         {
-            return null; // Released meanwhile: the next attempt creates it.
+            using var read = await container.ReadItemStreamAsync(id, partitionKey, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (read.StatusCode == HttpStatusCode.NotFound)
+            {
+                return null; // Released meanwhile, or the create never landed: the next attempt creates it.
+            }
+
+            if (!read.IsSuccessStatusCode)
+            {
+                throw CosmosNamedLocks.Unexpected(read);
+            }
+
+            var (current, writtenAt, leaseSeconds) = await CosmosNamedLocks.ReadAsync(read.Content).ConfigureAwait(false);
+            if (current != owner)
+            {
+                // Another owner's lease: taken over only once it has expired by the server's clock. _ts counts whole
+                // seconds, so the write happened before _ts + 1: the lease is surely over past that plus its length.
+                var now = await CosmosSequences.ServerClockAsync(container, partitionKey, cancellationToken).ConfigureAwait(false);
+                var expiresAt = DateTimeOffset.FromUnixTimeSeconds(writtenAt + 1).UtcDateTime.AddSeconds(leaseSeconds);
+                if (now < expiresAt)
+                {
+                    return null;
+                }
+            }
+
+            // Another owner's expired lease is taken over; this owner's own (a write of this acquisition whose answer
+            // was lost) is written again, so its term counts from this call. The item's ETag guards both.
+            using var replaced = await container.ReplaceItemStreamAsync(CosmosNamedLocks.Body(id, name, owner, duration), id,
+                partitionKey, new ItemRequestOptions { IfMatchEtag = read.Headers.ETag }, cancellationToken).ConfigureAwait(false);
+            if (replaced.IsSuccessStatusCode)
+            {
+                return new CosmosLease(container, id, name, owner, replaced.Headers.ETag);
+            }
+
+            if (replaced.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.NotFound)
+            {
+                return null; // Another owner took it over (or it was released) first; the next attempt sees which.
+            }
+
+            if (!CosmosNamedLocks.AnswerLost(replaced.StatusCode))
+            {
+                throw CosmosNamedLocks.Unexpected(replaced);
+            }
         }
 
-        read.EnsureSuccessStatusCode();
-        var (_, writtenAt, leaseSeconds) = await CosmosNamedLocks.ReadAsync(read.Content).ConfigureAwait(false);
-        var now = await CosmosSequences.ServerClockAsync(container, partitionKey, CancellationToken.None).ConfigureAwait(false);
+        throw new CosmosException($"The lease of '{name}' could not be settled: every write's answer was lost.",
+            HttpStatusCode.RequestTimeout, 0, string.Empty, 0);
+    }
 
-        // _ts counts whole seconds, so the write happened before _ts + 1: the lease is surely over past that plus its length.
-        var expiresAt = DateTimeOffset.FromUnixTimeSeconds(writtenAt + 1).UtcDateTime.AddSeconds(leaseSeconds);
-        if (now < expiresAt)
+    public override async Task ReleaseAsync(string name, string owner, CancellationToken cancellationToken)
+    {
+        var container = await CosmosNamedLocks.LeasesAsync(database).ConfigureAwait(false);
+        var id = CosmosNamedLocks.ItemId(name);
+        var lease = new CosmosLease(container, id, name, owner, etag: null);
+        if (await lease.CurrentEtagIfMineAsync(cancellationToken).ConfigureAwait(false) is { } etag)
         {
-            return null;
+            await new CosmosLease(container, id, name, owner, etag).ReleaseAsync(cancellationToken).ConfigureAwait(false);
         }
-
-        using var replaced = await container.ReplaceItemStreamAsync(CosmosNamedLocks.Body(id, name, owner, duration), id,
-            partitionKey, new ItemRequestOptions { IfMatchEtag = read.Headers.ETag }).ConfigureAwait(false);
-        if (replaced.IsSuccessStatusCode)
-        {
-            return new CosmosLease(container, id, name, owner, replaced.Headers.ETag);
-        }
-
-        if (replaced.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.NotFound)
-        {
-            return null; // Another owner took it over (or released it) first.
-        }
-
-        replaced.EnsureSuccessStatusCode();
-        return null;
     }
 }
 
 /// <summary>A lease this process holds, addressed by the ETag of its last write.</summary>
-internal sealed class CosmosLease(Container container, string id, string name, string owner, string etag) : Lease
+internal sealed class CosmosLease(Container container, string id, string name, string owner, string? etag) : Lease
 {
-    private readonly PartitionKey _partitionKey = new(id);
-    private string _etag = etag;
+    private const int Attempts = 3;
 
-    public override async Task<bool> RenewAsync(TimeSpan duration)
+    private readonly PartitionKey _partitionKey = new(id);
+    private string? _etag = etag;
+
+    public override async Task<bool> RenewAsync(TimeSpan duration, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (var attempt = 0; attempt < Attempts; attempt++)
         {
             using var replaced = await container.ReplaceItemStreamAsync(CosmosNamedLocks.Body(id, name, owner, duration), id,
-                _partitionKey, new ItemRequestOptions { IfMatchEtag = _etag }).ConfigureAwait(false);
+                _partitionKey, new ItemRequestOptions { IfMatchEtag = _etag }, cancellationToken).ConfigureAwait(false);
             if (replaced.IsSuccessStatusCode)
             {
                 _etag = replaced.Headers.ETag;
@@ -161,13 +209,15 @@ internal sealed class CosmosLease(Container container, string id, string name, s
                 return false;
             }
 
-            if (replaced.StatusCode != HttpStatusCode.PreconditionFailed)
+            if (replaced.StatusCode != HttpStatusCode.PreconditionFailed && !CosmosNamedLocks.AnswerLost(replaced.StatusCode))
             {
-                throw Unexpected(replaced);
+                throw CosmosNamedLocks.Unexpected(replaced);
             }
 
-            // The ETag moved: a renewal whose answer was lost, or another owner's takeover. Only the item says which.
-            if (await CurrentEtagIfMineAsync().ConfigureAwait(false) is not { } current)
+            // The ETag moved (a renewal of this owner whose answer was lost, or another owner's takeover), or this
+            // renewal's own answer was lost. Only the item says whose it is; this owner's is written once more, so the
+            // new term counts from this call whichever write moved it.
+            if (await CurrentEtagIfMineAsync(cancellationToken).ConfigureAwait(false) is not { } current)
             {
                 return false;
             }
@@ -175,28 +225,29 @@ internal sealed class CosmosLease(Container container, string id, string name, s
             _etag = current;
         }
 
-        return false;
+        throw new CosmosException($"The renewal of the lease '{name}' could not be confirmed.", HttpStatusCode.RequestTimeout,
+            0, string.Empty, 0);
     }
 
-    public override async Task ReleaseAsync()
+    public override async Task ReleaseAsync(CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (var attempt = 0; attempt < Attempts; attempt++)
         {
             using var deleted = await container.DeleteItemStreamAsync(id, _partitionKey,
-                new ItemRequestOptions { IfMatchEtag = _etag }).ConfigureAwait(false);
+                new ItemRequestOptions { IfMatchEtag = _etag }, cancellationToken).ConfigureAwait(false);
             if (deleted.IsSuccessStatusCode || deleted.StatusCode == HttpStatusCode.NotFound)
             {
                 return;
             }
 
-            if (deleted.StatusCode != HttpStatusCode.PreconditionFailed)
+            if (deleted.StatusCode != HttpStatusCode.PreconditionFailed && !CosmosNamedLocks.AnswerLost(deleted.StatusCode))
             {
-                throw Unexpected(deleted);
+                throw CosmosNamedLocks.Unexpected(deleted);
             }
 
-            if (await CurrentEtagIfMineAsync().ConfigureAwait(false) is not { } current)
+            if (await CurrentEtagIfMineAsync(cancellationToken).ConfigureAwait(false) is not { } current)
             {
-                return; // Another owner's now: left alone.
+                return; // Another owner's now, or gone: left alone.
             }
 
             _etag = current;
@@ -204,20 +255,21 @@ internal sealed class CosmosLease(Container container, string id, string name, s
     }
 
     /// <summary>The item's current ETag when it is still this owner's, or <c>null</c>.</summary>
-    private async Task<string?> CurrentEtagIfMineAsync()
+    internal async Task<string?> CurrentEtagIfMineAsync(CancellationToken cancellationToken)
     {
-        using var read = await container.ReadItemStreamAsync(id, _partitionKey).ConfigureAwait(false);
+        using var read = await container.ReadItemStreamAsync(id, _partitionKey, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
         if (read.StatusCode == HttpStatusCode.NotFound)
         {
             return null;
         }
 
-        read.EnsureSuccessStatusCode();
+        if (!read.IsSuccessStatusCode)
+        {
+            throw CosmosNamedLocks.Unexpected(read);
+        }
+
         var (current, _, _) = await CosmosNamedLocks.ReadAsync(read.Content).ConfigureAwait(false);
         return current == owner ? read.Headers.ETag : null;
     }
-
-    private static CosmosException Unexpected(ResponseMessage response) =>
-        new(response.ErrorMessage ?? $"The lease write failed with status {response.StatusCode}.", response.StatusCode, 0,
-            response.Headers.ActivityId, response.Headers.RequestCharge);
 }

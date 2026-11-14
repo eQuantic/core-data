@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using eQuantic.Core.Data.Diagnostics;
@@ -15,12 +16,16 @@ namespace eQuantic.Core.Data.Repository.Locking;
 ///             <b>Waiting.</b> An attempt is repeated until it answers a lock, the timeout passes
 ///             (<see cref="TimeoutException" />) or the token is cancelled (<see cref="OperationCanceledException" />).
 ///             A store that waits on the server is asked in slices of <see cref="NamedLockOptions.PollInterval" />; a
-///             store that answers at once is polled, with a pause that grows to that interval. A lock taken while the
-///             token was being cancelled is released before the cancellation is reported, so none is left behind.
+///             store that answers at once is polled, with a pause that grows to that interval (or to the attempt's
+///             own <see cref="NamedLockAttempt.LongestPause" />). An attempt is told what is left of the timeout. A
+///             lock taken while the token was being cancelled is released before the cancellation is reported, so
+///             none is left behind.
 ///         </item>
 ///         <item>
 ///             <b>Reentrancy.</b> A name the unit of work already holds is held again at once, with no second store
-///             lock: the acquisitions are counted, and the store's lock is released when the last of them ends.
+///             lock: the acquisitions are counted, and the store's lock is released when the last of them ends. A lock
+///             the store stopped guaranteeing (<see cref="NativeLock.Lost" />) is not held: re-acquiring its name lets
+///             it go and takes the name afresh, and the handles that held it end with it.
 ///         </item>
 ///         <item>
 ///             <b>Transactions.</b> An acquisition made inside an explicit transaction ends with the transaction
@@ -84,13 +89,30 @@ public sealed class NamedLockSet
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        Entry? lost = null;
         lock (_gate)
         {
             ThrowIfClosed();
             if (_held.TryGetValue(name, out var held))
             {
-                return held.Hold(inTransaction);
+                if (!held.Native.Lost.IsCancellationRequested)
+                {
+                    return held.Hold(inTransaction);
+                }
+
+                // The store stopped guaranteeing it (a lease not renewed in time, perhaps another holder's by now): it
+                // is not held, so it is not re-entered. Its handles end with it, and the name is taken afresh.
+                _held.Remove(name);
+                held.Ended = true;
+                lost = held;
             }
+        }
+
+        if (lost is not null)
+        {
+            // Deleted only if it is still this unit of work's, so the fresh attempt (another owner) is not kept
+            // waiting by a lease of its own. A cancelled wait leaves the release to finish on its own (it never throws).
+            await ReleaseQuietlyAsync(lost.Native, name).WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
         using var activity = DataActivitySource.Instance.StartActivity($"{_system}.acquire_lock", ActivityKind.Client);
@@ -181,11 +203,10 @@ public sealed class NamedLockSet
             }
         }
 
-        foreach (var entry in released)
-        {
-            // Off the caller's synchronization context: the release is asynchronous all the way down.
-            Task.Run(() => ReleaseQuietlyAsync(entry.Native, entry.Name)).GetAwaiter().GetResult();
-        }
+        // Off the caller's synchronization context (the release is asynchronous all the way down), and all at once:
+        // each release is bounded by its store (a lease waits at most its own length), not by the others.
+        Task.Run(() => Task.WhenAll(released.Select(entry => ReleaseQuietlyAsync(entry.Native, entry.Name))))
+            .GetAwaiter().GetResult();
     }
 
     private async Task<NativeLock> WaitAsync(string name, TimeSpan timeout, NamedLockAttempt attempt,
@@ -193,7 +214,8 @@ public sealed class NamedLockSet
     {
         var infinite = timeout == Timeout.InfiniteTimeSpan;
         var clock = Stopwatch.StartNew();
-        var pause = FirstPause < Options.PollInterval ? FirstPause : Options.PollInterval;
+        var longest = attempt.LongestPause ?? Options.PollInterval;
+        var pause = Min(FirstPause, longest);
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -201,7 +223,17 @@ public sealed class NamedLockSet
             var wait = attempt.WaitsOnStore ? Min(remaining, Options.PollInterval) : TimeSpan.Zero;
             var started = clock.Elapsed;
 
-            var native = await attempt.TryAsync(wait, cancellationToken).ConfigureAwait(false);
+            NativeLock? native;
+            try
+            {
+                native = await attempt.TryAsync(wait, infinite ? Timeout.InfiniteTimeSpan : remaining, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (AttemptTimedOutException cutOff)
+            {
+                throw TimedOut(name, timeout, cutOff);
+            }
+
             if (native is not null)
             {
                 if (cancellationToken.IsCancellationRequested)
@@ -216,8 +248,7 @@ public sealed class NamedLockSet
             var left = infinite ? TimeSpan.MaxValue : timeout - clock.Elapsed;
             if (left <= TimeSpan.Zero)
             {
-                throw new TimeoutException(
-                    $"The named lock '{name}' was not acquired within {Describe(timeout)}: another holder kept it.");
+                throw TimedOut(name, timeout, null);
             }
 
             TimeSpan delay;
@@ -230,7 +261,7 @@ public sealed class NamedLockSet
             else
             {
                 delay = TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2)));
-                pause = Min(pause + pause, Options.PollInterval);
+                pause = Min(pause + pause, longest);
             }
 
             delay = Min(delay, left);
@@ -296,6 +327,11 @@ public sealed class NamedLockSet
             throw new ObjectDisposedException(nameof(NamedLockSet), "The unit of work holding these locks was disposed.");
         }
     }
+
+    private static TimeoutException TimedOut(string name, TimeSpan timeout, Exception? cutOff) =>
+        cutOff is null
+            ? new TimeoutException($"The named lock '{name}' was not acquired within {Describe(timeout)}: another holder kept it.")
+            : new TimeoutException($"The named lock '{name}' was not acquired within {Describe(timeout)}: the store did not answer in time.", cutOff);
 
     private static TimeSpan Min(TimeSpan left, TimeSpan right) => left < right ? left : right;
 

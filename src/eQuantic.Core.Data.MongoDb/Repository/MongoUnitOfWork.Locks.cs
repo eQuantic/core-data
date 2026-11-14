@@ -21,11 +21,11 @@ public abstract partial class MongoUnitOfWork : ILockingUnitOfWork
     public Task<INamedLock> AcquireLockAsync(string name, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        var logger = (ServiceProvider.GetService(typeof(ILoggerFactory)) as ILoggerFactory)?.CreateLogger("eQuantic.Core.Data.mongodb.Command");
         var locks = _namedLocks ??= new NamedLockSet("mongodb",
-            ServiceProvider.GetService(typeof(NamedLockOptions)) as NamedLockOptions,
-            (ServiceProvider.GetService(typeof(ILoggerFactory)) as ILoggerFactory)?.CreateLogger("eQuantic.Core.Data.mongodb.Command"));
+            ServiceProvider.GetService(typeof(NamedLockOptions)) as NamedLockOptions, logger);
         return locks.AcquireAsync(name, timeout, _session is { IsInTransaction: true },
-            () => new LeaseLockAttempt(MongoNamedLocks.Store(Database), name, locks.Options), cancellationToken);
+            () => new LeaseLockAttempt(MongoNamedLocks.Store(Database, logger), name, locks.Options), cancellationToken);
     }
 
     /// <summary>Ends the acquisitions made inside the transaction that just ended, deleting what nothing else holds.</summary>
