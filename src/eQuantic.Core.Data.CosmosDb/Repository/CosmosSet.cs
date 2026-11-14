@@ -84,7 +84,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     /// <remarks>
     ///     Cosmos DB has no delete by query: the matching items are read, and each is deleted under the <c>_etag</c> of a
     ///     read that still finds it matching the filter — a changed item is read again, and one that stopped matching is
-    ///     left alone. The count is the items deleted. A soft-delete entity's delete stamps <c>DeletedAt</c> instead.
+    ///     left alone. At most 32 items are worked on at once. The count is the items
+    ///     deleted. A soft-delete entity's delete stamps <c>DeletedAt</c> instead.
     /// </remarks>
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
@@ -97,39 +98,65 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
         var where = WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
-        var deleted = await Task.WhenAll(matches.Select(async item =>
+        var deleted = await ForEachItemAsync(matches, item => DeleteMatchingAsync(item, where, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+        return deleted.Sum();
+    }
+
+    /// <summary>Deletes an item under the <c>_etag</c> of a read that still finds it matching; 1 when it did, 0 when not.</summary>
+    private async Task<int> DeleteMatchingAsync(TEntity item, string where, CancellationToken cancellationToken)
+    {
+        var id = _configuration.GetId(item);
+        var partitionKey = _configuration.GetPartitionKey(item);
+        for (var attempt = 0; attempt < ConditionalAttempts; attempt++)
         {
-            var id = _configuration.GetId(item);
-            var partitionKey = _configuration.GetPartitionKey(item);
-            for (var attempt = 0; attempt < ConditionalAttempts; attempt++)
+            if (await MatchingETagAsync(id, partitionKey, where, cancellationToken).ConfigureAwait(false) is not { } etag)
             {
-                if (await MatchingETagAsync(id, partitionKey, where, cancellationToken).ConfigureAwait(false) is not { } etag)
-                {
-                    return 0;
-                }
-
-                using var response = await _container.DeleteItemStreamAsync(id, partitionKey,
-                    new ItemRequestOptions { IfMatchEtag = etag }, cancellationToken).ConfigureAwait(false);
-                if (response.IsSuccessStatusCode)
-                {
-                    return 1;
-                }
-
-                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-                {
-                    return 0;
-                }
-
-                if (response.StatusCode != System.Net.HttpStatusCode.PreconditionFailed)
-                {
-                    response.EnsureSuccessStatusCode();
-                }
+                return 0;
             }
 
-            throw new InvalidOperationException(
-                $"The item '{id}' kept changing while it was being deleted; {ConditionalAttempts} attempts did not settle.");
-        })).ConfigureAwait(false);
-        return deleted.Sum();
+            using var response = await _container.DeleteItemStreamAsync(id, partitionKey,
+                new ItemRequestOptions { IfMatchEtag = etag }, cancellationToken).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                return 1;
+            }
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return 0;
+            }
+
+            if (response.StatusCode != System.Net.HttpStatusCode.PreconditionFailed)
+            {
+                response.EnsureSuccessStatusCode();
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"The item '{id}' kept changing while it was being deleted; {ConditionalAttempts} attempts did not settle.");
+    }
+
+    /// <summary>
+    ///     How many items a set-based write works on at once. Each item is a read and a write of its own (Cosmos DB has
+    ///     no write by query), and all the matches at once — tens of thousands of requests — would be throttled (429)
+    ///     past the SDK's retries, leaving a delete or an update half done.
+    /// </summary>
+    internal const int MaxConcurrentItems = 32;
+
+    /// <summary>
+    ///     Runs a write per item, at most <see cref="MaxConcurrentItems" /> at once, and answers each one's result in the
+    ///     items' order. The first failure stops the items not yet started and is thrown once those running have finished
+    ///     (they are not cut off mid-flight).
+    /// </summary>
+    private static async Task<TResult[]> ForEachItemAsync<TResult>(IReadOnlyList<TEntity> items, Func<TEntity, Task<TResult>> write,
+        CancellationToken cancellationToken)
+    {
+        var results = new TResult[items.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, items.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = MaxConcurrentItems, CancellationToken = cancellationToken },
+            async (index, _) => results[index] = await write(items[index]).ConfigureAwait(false)).ConfigureAwait(false);
+        return results;
     }
 
     public long UpdateMany(Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, TEntity>> updateExpression) =>
@@ -140,7 +167,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     ///     (<c>PatchItemRequestOptions.FilterPredicate</c>), so the server applies the patch only while the item still
     ///     matches — a filter on the key and other members is a compare-and-set. The count is the patches applied,
     ///     whether or not they changed the values. An update of more than ten paths patches each item several times in
-    ///     one transactional batch, the first patch under the filter: the item takes all of it or none.
+    ///     one transactional batch, the first patch under the filter: the item takes all of it or none. At most 32 items
+    ///     are patched at once.
     /// </remarks>
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default) =>
@@ -162,10 +190,23 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         var condition = "FROM root WHERE " + WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
         var where = WhereClause(scoped);
-        var patched = await Task.WhenAll(matches.Select(async item =>
+        var patched = await ForEachItemAsync(matches, item => PatchMatchingAsync(item, patch, condition, where, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        return patched.Where(item => item is not null).Select(item => item!).ToList();
+    }
+
+    /// <summary>
+    ///     Patches an item while it still matches the filter, and answers it as the patch left it, or <c>null</c> when it no
+    ///     longer matched (or went away). A unique key the patch would take is a <see cref="DuplicateKeyException" />, by
+    ///     either path.
+    /// </summary>
+    private async Task<TEntity?> PatchMatchingAsync(TEntity item, IReadOnlyList<PatchOperation> patch, string condition, string where,
+        CancellationToken cancellationToken)
+    {
+        var id = _configuration.GetId(item);
+        var partitionKey = _configuration.GetPartitionKey(item);
+        try
         {
-            var id = _configuration.GetId(item);
-            var partitionKey = _configuration.GetPartitionKey(item);
             try
             {
                 return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, condition, ifMatchEtag: null, cancellationToken)
@@ -174,21 +215,21 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
             catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
             {
                 // The store could not evaluate the filter as a patch's condition (a function its condition evaluator does
-                // not take): the item is patched under the _etag of a read that still finds it matching, instead.
-                return await PatchUnderETagAsync(id, partitionKey, patch, where, cancellationToken).ConfigureAwait(false);
+                // not take): the item is patched under the _etag of a read that still finds it matching, below.
             }
-            catch (CosmosException exception) when (exception.StatusCode is System.Net.HttpStatusCode.PreconditionFailed
-                                                        or System.Net.HttpStatusCode.NotFound)
-            {
-                // The item stopped matching the filter (or went away) since it was read: the patch did not apply.
-                return null;
-            }
-            catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Conflict)
-            {
-                throw new DuplicateKeyException(null, exception);
-            }
-        })).ConfigureAwait(false);
-        return patched.Where(item => item is not null).Select(item => item!).ToList();
+
+            return await PatchUnderETagAsync(id, partitionKey, patch, where, cancellationToken).ConfigureAwait(false);
+        }
+        catch (CosmosException exception) when (exception.StatusCode is System.Net.HttpStatusCode.PreconditionFailed
+                                                    or System.Net.HttpStatusCode.NotFound)
+        {
+            // The item stopped matching the filter (or went away) since it was read: the patch did not apply.
+            return null;
+        }
+        catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            throw new DuplicateKeyException(null, exception);
+        }
     }
 
     /// <summary>
@@ -301,7 +342,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
                 if (!assigned)
                 {
                     // The store's values for the insert, once: a retry that ends in the update leaves a gap, never a repeat.
-                    await _unitOfWork.AssignStoreGeneratedAsync([(entity, _configuration, partitionKey)], cancellationToken).ConfigureAwait(false);
+                    await _unitOfWork.AssignStoreGeneratedAsync([(entity, _configuration, partitionKey)], new CosmosServerClock(), cancellationToken)
+                        .ConfigureAwait(false);
                     assigned = true;
                 }
 
@@ -453,7 +495,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
 
         if (_configuration.StoreGenerated.Count > 0)
         {
-            await _unitOfWork.AssignStoreGeneratedAsync(inserts, cancellationToken).ConfigureAwait(false);
+            // One read of the server's clock for this call's inserts, taken now: never one an earlier write read.
+            await _unitOfWork.AssignStoreGeneratedAsync(inserts, new CosmosServerClock(), cancellationToken).ConfigureAwait(false);
         }
 
         var conflicts = new System.Collections.Concurrent.ConcurrentBag<CosmosException>();

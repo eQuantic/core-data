@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using eQuantic.Core.Data.Modeling;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Write;
 using Microsoft.Azure.Cosmos;
 
 namespace eQuantic.Core.Data.CosmosDb.Tests;
@@ -74,6 +75,20 @@ public sealed class Receipt : IEntity<string>
     public int Number { get; set; }
 
     public DateTimeOffset IssuedAt { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
+/// <summary>A stamp the store dates, in a container a test removes to make the read of the server's clock fail.</summary>
+public sealed class ClockStamp : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Category { get; set; } = "";
+
+    public DateTime At { get; set; }
 
     public string GetKey() => Id;
 
@@ -267,6 +282,60 @@ public sealed class CosmosNativeTypesTests : CosmosIntegrationTest
         var loaded = (await repo.GetAsync(receipt.Id))!;
         Assert.That(loaded.Number, Is.EqualTo(receipt.Number));
         Assert.That(loaded.IssuedAt, Is.EqualTo(receipt.IssuedAt));
+    }
+
+    [Test]
+    public async Task Each_immediate_insert_reads_the_servers_clock_when_it_runs()
+    {
+        // One unit of work, three immediate writes far apart: each takes the clock of its own moment, never one an
+        // earlier write of the same unit of work read.
+        var upserts = Resolve<IUpsertRepository<Receipt, string>>();
+        var first = new Receipt { Category = Partition, Note = "first" };
+        Assert.That(await upserts.InsertManyAsync([first]), Is.EqualTo(1L));
+
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        var second = new Receipt { Category = Partition, Note = "second" };
+        Assert.That(await upserts.InsertManyAsync([second]), Is.EqualTo(1L));
+        Assert.That(second.IssuedAt - first.IssuedAt, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(1)),
+            "the second insert read the clock again");
+
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        var third = await upserts.UpsertAsync(new Receipt { Category = Partition, Note = "third" });
+        Assert.That(third.IssuedAt - second.IssuedAt, Is.GreaterThanOrEqualTo(TimeSpan.FromSeconds(1)),
+            "an upsert that inserts reads the clock again too");
+
+        var stored = (await Resolve<IAsyncRepository<Receipt, string>>().GetAsync(second.Id))!;
+        Assert.That(stored.IssuedAt, Is.EqualTo(second.IssuedAt), "the document holds the clock the entity was given");
+    }
+
+    [Test]
+    public async Task A_failed_read_of_the_servers_clock_is_not_kept()
+    {
+        // The clock is read by a query scoped to the entity's container: while the container is not there, the read
+        // fails. Once it is, the same unit of work reads the clock again instead of answering the old failure.
+        var container = Database.GetContainer(CosmosTestServer.ClockProbeContainer);
+        using (await container.DeleteContainerStreamAsync())
+        {
+        }
+
+        var upserts = Resolve<IUpsertRepository<ClockStamp, string>>();
+        var failed = Assert.ThrowsAsync<CosmosException>(() => upserts.InsertManyAsync([new ClockStamp { Category = Partition }]));
+        Assert.That(failed!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.NotFound));
+
+        await Database.CreateContainerIfNotExistsAsync(new ContainerProperties(CosmosTestServer.ClockProbeContainer, "/category"));
+        try
+        {
+            var before = DateTime.UtcNow.AddMinutes(-1);
+            var stamp = new ClockStamp { Category = Partition };
+            Assert.That(await upserts.InsertManyAsync([stamp]), Is.EqualTo(1L));
+            Assert.That(stamp.At, Is.GreaterThan(before), "the insert took the server's clock");
+        }
+        finally
+        {
+            using (await container.DeleteContainerStreamAsync())
+            {
+            }
+        }
     }
 
     [Test]

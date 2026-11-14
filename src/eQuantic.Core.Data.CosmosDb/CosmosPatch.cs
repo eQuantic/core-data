@@ -22,6 +22,10 @@ internal static class CosmosPatch
     /// <summary>The paths Cosmos DB takes in one patch operation.</summary>
     public const int MaxOperations = 10;
 
+    /// <summary>The operations a patch of <paramref name="paths" /> paths takes in a transactional batch (<see cref="AddTo" />).</summary>
+    /// <param name="paths">The paths of the patch.</param>
+    public static int OperationsFor(int paths) => (paths + MaxOperations - 1) / MaxOperations;
+
     /// <summary>
     ///     Adds a patch of any number of paths to a batch, as patches of at most <see cref="MaxOperations" /> paths of the
     ///     same item, in order. The first carries the condition (the filter and the <c>_etag</c>): it is evaluated against

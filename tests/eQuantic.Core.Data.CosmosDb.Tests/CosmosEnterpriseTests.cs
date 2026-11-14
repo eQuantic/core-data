@@ -1,4 +1,3 @@
-using System.Net;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
@@ -35,8 +34,10 @@ public sealed class CosmosEnterpriseTests : CosmosIntegrationTest
 
         second.Quantity = 9;
         await Repo.ModifyAsync(second);
-        Assert.That(async () => await Uow.CommitAsync(),
-            Throws.InstanceOf<CosmosException>().With.Property("StatusCode").EqualTo(HttpStatusCode.PreconditionFailed));
+        var conflict = Assert.ThrowsAsync<ConcurrencyConflictException>(() => Uow.CommitAsync(),
+            "the store's 412 is the conflict every engine reports");
+        Assert.That(conflict!.Expected, Is.EqualTo(1L));
+        Assert.That(conflict.Affected, Is.EqualTo(0L));
 
         Assert.That((await Repo.GetAsync(product.Id))!.Quantity, Is.EqualTo(2), "the first writer's value survives");
     }

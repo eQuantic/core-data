@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -29,8 +28,6 @@ public static class CosmosNamedLocks
 
     private const int MaxIdLength = 255;
 
-    private static readonly ConcurrentDictionary<string, Lazy<Task>> Ensured = new();
-
     /// <summary>The item id a lock's name is held as.</summary>
     /// <param name="name">The lock's name.</param>
     public static string ItemId(string name) =>
@@ -39,25 +36,17 @@ public static class CosmosNamedLocks
     /// <summary>The leases of a database's named locks.</summary>
     internal static LeaseStore Store(Database database) => new CosmosLeaseStore(database);
 
-    /// <summary>The leases' container, created on first use (once per database and process).</summary>
-    internal static async Task<Container> LeasesAsync(Database database)
-    {
-        var key = $"{database.Client.Endpoint}|{database.Id}";
-        var ensure = Ensured.GetOrAdd(key, _ => new Lazy<Task>(() =>
-            database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/id"), cancellationToken: CancellationToken.None)));
-        try
-        {
-            await ensure.Value.ConfigureAwait(false);
-        }
-        catch
-        {
-            // A failed creation is not remembered: the next use tries again.
-            Ensured.TryRemove(new KeyValuePair<string, Lazy<Task>>(key, ensure));
-            throw;
-        }
+    /// <summary>Why the leases cannot live in an account with several write regions.</summary>
+    internal const string Purpose =
+        "A named lock takes its lease in '" + ContainerName + "' with a create and an ETag-guarded replace that each write region " +
+        "checks against its own copy of the lease, so two holders in two regions could both take the lock.";
 
-        return database.GetContainer(ContainerName);
-    }
+    /// <summary>
+    ///     The leases' container, created on first use (once per database and process, and again once it answered that it
+    ///     is gone: <see cref="CosmosSystemContainers" />); an account that accepts writes in several regions is refused.
+    /// </summary>
+    internal static Task<Container> LeasesAsync(Database database) =>
+        CosmosSystemContainers.GetAsync(database, ContainerName, Purpose, CancellationToken.None);
 
     /// <summary>The lease item's body.</summary>
     internal static Stream Body(string id, string name, string owner, TimeSpan duration) =>

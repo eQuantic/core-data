@@ -85,6 +85,14 @@ a fraction past `LeaseDuration`; MongoDB compares milliseconds on the server's c
 margin. Its TTL index sweeps only expired documents and on its own schedule (every 60 s), which never
 expires a lease early; the lease's own `expiresAt <= $$NOW` is what hands it over.
 
+**One write region on Cosmos DB.** A lease's create and ETag-guarded replace are decided by the
+region that applies them. On an account with **multi-region writes**, each region decides on its own
+copy of the lease and the copies converge afterwards (by default, the last writer wins), so two
+holders in two regions could both take the lock. The first use of `_locks` in a process reads the account, and one that
+accepts writes in more than one region is refused with `NotSupportedException`, as the store-generated
+sequences refuse it (see [Cosmos DB](../providers/cosmosdb.md#multi-region-writes)). An account with
+a single write region and any number of read regions is unaffected.
+
 A [custom relational dialect](../architecture/extending.md) declares its mechanism through
 `SqlDialect.NamedLocks` (the statements that take and release a lock, and whether its server waits);
 one that declares none makes `AcquireLockAsync` refuse with `NotSupportedException`, rather than

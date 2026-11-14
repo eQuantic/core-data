@@ -154,6 +154,22 @@ public sealed class UserAccount : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>An account whose e-mail is the container's unique key and whose number the store hands out.</summary>
+public sealed class NumberedAccount : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Category { get; set; } = "";
+
+    public string Email { get; set; } = "";
+
+    public long Number { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
 /// <summary>
 ///     Proves, against the Cosmos DB emulator, upserts (a create or a replace guarded by the <c>_etag</c>), inserts
 ///     skipping duplicates (creates discarding only 409), <c>DuplicateKeyException</c>, set-based writes conditioned on
@@ -570,8 +586,8 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
 
         read.Fill("late", 12);
         await Resolve<IPartialModifyRepository<WideRecord, string>>(stale).ModifyAsync(read, TwelveMembers);
-        var exception = Assert.ThrowsAsync<CosmosException>(() => Commit(stale));
-        Assert.That(exception!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.PreconditionFailed));
+        var conflict = Assert.ThrowsAsync<ConcurrencyConflictException>(() => Commit(stale));
+        Assert.That(conflict!.Affected, Is.EqualTo(0L));
 
         var stored = await ReadWideAsync(record.Id);
         Assert.That(stored.F01, Is.EqualTo("other"));
@@ -693,5 +709,241 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
             Status = "x", F01 = "s1", F02 = "s2", F03 = "s3", F04 = "s4", F05 = "s5", F06 = "s6",
             F07 = "s7", F08 = "s8", F09 = "s9", F10 = "s10", F11 = "s11", F12 = 0,
         }), Is.Empty, "the condition no longer holds");
+    }
+
+    // ---------------------------------------------------------------- refusals and their exceptions
+
+    [Test]
+    public async Task A_unique_key_taken_through_the_etag_fallback_is_a_DuplicateKeyException()
+    {
+        var owner = new UserAccount { Category = Partition, Email = "owner@example.test" };
+        var other = new UserAccount { Category = Partition, Email = "other@example.test" };
+        using (var seed = NewScope())
+        {
+            await RepoOf<UserAccount>(seed).AddRangeAsync([owner, other]);
+            await Commit(seed);
+        }
+
+        // Text compared ignoring case is a filter the store cannot evaluate as a patch's condition (it answers 400):
+        // the item is patched under the _etag of a read that still matches, and that patch takes another's unique key.
+        using var scope = NewScope();
+        var repo = RepoOf<UserAccount>(scope);
+        var exception = Assert.ThrowsAsync<DuplicateKeyException>(() => repo.UpdateManyAsync(
+            x => x.Id == other.Id && x.Email.Equals("OTHER@EXAMPLE.TEST", StringComparison.OrdinalIgnoreCase),
+            x => new UserAccount { Email = owner.Email }));
+        Assert.That(exception!.InnerException, Is.InstanceOf<CosmosException>(), "the SDK's exception is kept");
+        Assert.That((await repo.GetAsync(other.Id))!.Email, Is.EqualTo(other.Email));
+
+        Assert.That(await repo.UpdateManyAsync(
+            x => x.Id == other.Id && x.Email.Equals("OTHER@EXAMPLE.TEST", StringComparison.OrdinalIgnoreCase),
+            x => new UserAccount { Email = "renamed@example.test" }), Is.EqualTo(1L), "the fallback applies an update that takes no key");
+    }
+
+    [Test]
+    public async Task Deleting_many_matches_keeps_a_bounded_number_of_requests_in_flight_and_counts_every_delete()
+    {
+        const int stale = 200;
+        using (var seed = NewScope())
+        {
+            await RepoOf<Job>(seed).AddRangeAsync(Enumerable.Range(0, stale).Select(_ => new Job { Category = Partition, Status = "stale" }));
+            await RepoOf<Job>(seed).AddRangeAsync(Enumerable.Range(0, 3).Select(_ => new Job { Category = Partition, Status = "live" }));
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        long deleted;
+        CosmosTestServer.Requests.Watch(CosmosTestServer.ContainerName);
+        try
+        {
+            deleted = await RepoOf<Job>(scope).DeleteManyAsync(x => x.Category == Partition && x.Status == "stale");
+        }
+        finally
+        {
+            CosmosTestServer.Requests.Stop();
+        }
+
+        Assert.That(deleted, Is.EqualTo((long)stale), "every match deleted, every delete counted");
+        Assert.That(CosmosTestServer.Requests.Peak, Is.InRange(2, Repository.CosmosSet<Job>.MaxConcurrentItems),
+            "the items are deleted several at a time, never all of them at once");
+        var left = (await RepoOf<Job>(scope).GetFilteredAsync(x => x.Category == Partition)).ToList();
+        Assert.That(left.Select(x => x.Status), Is.EqualTo(new[] { "live", "live", "live" }));
+    }
+
+    [Test]
+    public async Task A_transaction_of_more_operations_than_one_batch_takes_is_refused_whole()
+    {
+        // Six modifies of twelve members are two patches each: ninety inserts and six modifies are 96 writes and 102
+        // operations, past the hundred one transactional batch takes.
+        var records = new List<WideRecord>();
+        for (var index = 0; index < 6; index++)
+        {
+            records.Add(await SeedWideAsync());
+        }
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var jobs = Enumerable.Range(0, 90).Select(_ => new Job { Category = Partition, Status = "queued" }).ToList();
+        await RepoOf<Job>(scope).AddRangeAsync(jobs);
+        foreach (var record in records)
+        {
+            var read = (await RepoOf<WideRecord>(scope).GetAsync(record.Id))!;
+            await Resolve<IPartialModifyRepository<WideRecord, string>>(scope).ModifyAsync(read.Fill("tx", 1), TwelveMembers);
+        }
+
+        await unitOfWork.CommitAsync();
+        var exception = Assert.ThrowsAsync<NotSupportedException>(() => unitOfWork.CommitTransactionAsync());
+        Assert.That(exception!.Message, Does.Contain("102 operations").And.Contain("100"));
+
+        var ids = jobs.Select(job => job.Id).ToList();
+        Assert.That(await RepoOf<Job>(scope).GetFilteredAsync(x => ids.Contains(x.Id)), Is.Empty, "nothing was written");
+        foreach (var record in records)
+        {
+            Assert.That((await ReadWideAsync(record.Id)).Members(), Is.EqualTo(new WideRecord().Fill("seed", 0).Members()));
+        }
+
+        Assert.That(await unitOfWork.CommitAsync(), Is.EqualTo(0), "the refused writes are discarded, not left for the next commit");
+    }
+
+    [Test]
+    public async Task A_transaction_across_partitions_is_refused_and_its_writes_discarded()
+    {
+        var here = new Job { Category = Partition, Status = "queued" };
+        var there = new Job { Category = Partition + "-other", Status = "queued" };
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        await RepoOf<Job>(scope).AddRangeAsync([here, there]);
+        await unitOfWork.CommitAsync();
+
+        Assert.ThrowsAsync<NotSupportedException>(() => unitOfWork.CommitTransactionAsync());
+        Assert.That(await unitOfWork.CommitAsync(), Is.EqualTo(0), "the refused writes are not left to run without the transaction");
+        Assert.That(await RepoOf<Job>(scope).GetAsync(here.Id), Is.Null);
+        Assert.That(await RepoOf<Job>(scope).GetAsync(there.Id), Is.Null);
+    }
+
+    [Test]
+    public async Task A_transaction_the_store_refuses_says_why()
+    {
+        var missing = new Page { Category = Partition, Title = "never stored" };
+        var job = new Job { Category = Partition, Status = "queued" };
+
+        // What the store answers for the same refusal, asked directly: its words have to reach the caller.
+        var container = Resolve<Database>(NewScope()).GetContainer(CosmosTestServer.ContainerName);
+        var direct = container.CreateTransactionalBatch(new PartitionKey(Partition));
+        direct.PatchItem(missing.Id, [PatchOperation.Set("/title", "x")]);
+        string reason;
+        using (var answer = await direct.ExecuteAsync())
+        {
+            Assert.That(answer.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.NotFound));
+            reason = answer.ErrorMessage;
+        }
+
+        Assert.That(reason, Is.Not.Null.And.Not.Empty);
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        await RepoOf<Job>(scope).AddAsync(job);
+        await Resolve<IPartialModifyRepository<Page, string>>(scope).ModifyAsync(missing, x => x.Title);
+        await unitOfWork.CommitAsync();
+
+        var exception = Assert.ThrowsAsync<CosmosException>(() => unitOfWork.CommitTransactionAsync());
+        Assert.That(exception!.StatusCode, Is.EqualTo(System.Net.HttpStatusCode.NotFound), "the failing operation's status");
+        Assert.That(exception.Message, Does.Contain(reason), "the store's own reason");
+        Assert.That(await RepoOf<Job>(scope).GetAsync(job.Id), Is.Null, "nothing of the transaction was written");
+    }
+
+    [Test]
+    public async Task A_stale_token_in_a_transaction_is_a_ConcurrencyConflictException_and_writes_nothing()
+    {
+        var product = CosmosProduct.New("Guarded", Partition, 1, 1m);
+        using (var seed = NewScope())
+        {
+            await RepoOf<CosmosProduct>(seed).AddAsync(product);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var stale = (await RepoOf<CosmosProduct>(scope).GetAsync(product.Id))!;
+        using (var other = NewScope())
+        {
+            var current = (await RepoOf<CosmosProduct>(other).GetAsync(product.Id))!;
+            current.Quantity = 2;
+            await RepoOf<CosmosProduct>(other).ModifyAsync(current);
+            await Commit(other);
+        }
+
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        var fresh = CosmosProduct.New("Fresh", Partition, 1, 1m);
+        await unitOfWork.BeginTransactionAsync();
+        stale.Quantity = 9;
+        await RepoOf<CosmosProduct>(scope).ModifyAsync(stale);
+        await RepoOf<CosmosProduct>(scope).AddAsync(fresh);
+        await unitOfWork.CommitAsync();
+
+        var conflict = Assert.ThrowsAsync<ConcurrencyConflictException>(() => unitOfWork.CommitTransactionAsync());
+        Assert.That(conflict!.Expected, Is.EqualTo(2L));
+        Assert.That(conflict.Affected, Is.EqualTo(0L), "the batch is atomic: nothing applied");
+        using var check = NewScope();
+        Assert.That((await RepoOf<CosmosProduct>(check).GetAsync(product.Id))!.Quantity, Is.EqualTo(2), "the other writer's value survives");
+        Assert.That(await RepoOf<CosmosProduct>(check).GetAsync(fresh.Id), Is.Null);
+    }
+
+    [Test]
+    public async Task A_token_guarded_write_of_a_removed_document_is_a_ConcurrencyConflictException()
+    {
+        var product = CosmosProduct.New("Removed", Partition, 1, 1m);
+        using (var seed = NewScope())
+        {
+            await RepoOf<CosmosProduct>(seed).AddAsync(product);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var read = (await RepoOf<CosmosProduct>(scope).GetAsync(product.Id))!;
+        using (var other = NewScope())
+        {
+            await RepoOf<CosmosProduct>(other).RemoveAsync((await RepoOf<CosmosProduct>(other).GetAsync(product.Id))!);
+            await Commit(other);
+        }
+
+        read.Quantity = 5;
+        await RepoOf<CosmosProduct>(scope).ModifyAsync(read);
+        var conflict = Assert.ThrowsAsync<ConcurrencyConflictException>(() => Commit(scope));
+        Assert.That(conflict!.Expected, Is.EqualTo(1L));
+        Assert.That(conflict.Affected, Is.EqualTo(0L));
+        Assert.That(await RepoOf<CosmosProduct>(scope).GetAsync(product.Id), Is.Null, "the removal stands");
+    }
+
+    [Test]
+    public async Task A_modify_that_inserts_onto_a_taken_unique_key_burns_one_number_not_ten()
+    {
+        var first = new NumberedAccount { Category = Partition, Email = "taken@example.test" };
+        using (var seed = NewScope())
+        {
+            await RepoOf<NumberedAccount>(seed).AddAsync(first);
+            await Commit(seed);
+        }
+
+        // A modify of an id nothing holds inserts, and takes the store's number for it. Its create is refused on the
+        // e-mail, another unique key, which no retry can take: it fails at once instead of numbering ten attempts.
+        using (var scope = NewScope())
+        {
+            await RepoOf<NumberedAccount>(scope).ModifyAsync(new NumberedAccount { Category = Partition, Email = first.Email });
+            var exception = Assert.ThrowsAsync<DuplicateKeyException>(() => Commit(scope));
+            Assert.That(exception!.InnerException, Is.InstanceOf<CosmosException>());
+        }
+
+        var next = new NumberedAccount { Category = Partition, Email = "fresh@example.test" };
+        using (var scope = NewScope())
+        {
+            await RepoOf<NumberedAccount>(scope).AddAsync(next);
+            await Commit(scope);
+        }
+
+        Assert.That(next.Number, Is.EqualTo(first.Number + 2), "the refused insert left one gap, as a relational sequence does");
+        using var check = NewScope();
+        Assert.That((await RepoOf<NumberedAccount>(check).GetFilteredAsync(x => x.Category == Partition)).Select(x => x.Email),
+            Is.EquivalentTo(new[] { first.Email, next.Email }));
     }
 }
