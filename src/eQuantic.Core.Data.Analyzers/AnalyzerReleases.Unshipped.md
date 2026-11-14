@@ -16,3 +16,6 @@ EQD008  | eQuantic.Modeling | Warning | [SearchIndex] requires a string member
 EQD009  | eQuantic.Modeling | Warning | [Counter] requires an integral member
 EQD010  | eQuantic.Modeling | Warning | Generated key type is not identity-capable
 EQD011  | eQuantic.Modeling | Warning | Empty storage name
+EQD012  | eQuantic.Modeling | Warning | Store-generated member of a type the store cannot generate
+EQD013  | eQuantic.Modeling | Warning | Store-generated member is a key or a concurrency token
+EQD014  | eQuantic.Modeling | Warning | Enum labels are empty or repeated

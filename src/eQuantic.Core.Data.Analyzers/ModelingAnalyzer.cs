@@ -30,7 +30,10 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
         ModelingDiagnostics.SearchIndexOnNonString,
         ModelingDiagnostics.CounterOnNonIntegral,
         ModelingDiagnostics.GeneratedKeyType,
-        ModelingDiagnostics.EmptyStorageName);
+        ModelingDiagnostics.EmptyStorageName,
+        ModelingDiagnostics.StoreGeneratedType,
+        ModelingDiagnostics.StoreGeneratedRole,
+        ModelingDiagnostics.EnumLabels);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)
@@ -43,6 +46,12 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
     private static void AnalyzeType(SymbolAnalysisContext context)
     {
         var type = (INamedTypeSymbol)context.Symbol;
+        if (type.TypeKind == TypeKind.Enum)
+        {
+            AnalyzeEnum(context, type);
+            return;
+        }
+
         if (type.TypeKind != TypeKind.Class && type.TypeKind != TypeKind.Struct)
         {
             return;
@@ -144,6 +153,22 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
                         context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.InvalidFacet,
                             Location(attribute, property), property.Name, problem));
                         break;
+
+                    case "StoreGeneratedAttribute" when StoreGeneratedProblem(attribute, property) is { } problem:
+                        context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.StoreGeneratedType,
+                            Location(attribute, property), property.Name, problem, property.Type.ToDisplayString()));
+                        break;
+                }
+            }
+
+            // A store-generated member is neither the key nor the concurrency token: each has its own declaration.
+            var generated = property.GetAttributes().FirstOrDefault(attribute => Name(attribute) == "StoreGeneratedAttribute");
+            if (generated is not null)
+            {
+                foreach (var role in new[] { "EntityKey", "ConcurrencyToken" }.Where(mappingAnnotations.Contains))
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.StoreGeneratedRole,
+                        Location(generated, property), property.Name, role));
                 }
             }
 
@@ -157,6 +182,62 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
 
         ReportDuplicateOrders(context, type, partitionOrders, ModelingDiagnostics.DuplicatePartitionKeyOrder);
         ReportDuplicateOrders(context, type, clusteringOrders, ModelingDiagnostics.DuplicateClusteringKeyOrder);
+    }
+
+    /// <summary>An enum stored as its labels: its name, when given, and each member's label must name one member.</summary>
+    private static void AnalyzeEnum(SymbolAnalysisContext context, INamedTypeSymbol type)
+    {
+        var declaration = type.GetAttributes().FirstOrDefault(attribute => Name(attribute) == "EnumTypeAttribute");
+        if (declaration is null)
+        {
+            return;
+        }
+
+        if (Text(declaration, 0) is { } name && string.IsNullOrWhiteSpace(name))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EmptyStorageName,
+                Location(declaration, type), type.Name, "EnumType"));
+        }
+
+        var owners = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var field in type.GetMembers().OfType<IFieldSymbol>().Where(field => field.HasConstantValue))
+        {
+            var storedAs = field.GetAttributes().FirstOrDefault(attribute => Name(attribute) == "StoredAsAttribute");
+            var label = storedAs is null ? field.Name : Text(storedAs, 0) ?? field.Name;
+            var location = storedAs is null ? field.Locations.FirstOrDefault() ?? type.Locations[0] : Location(storedAs, field);
+            if (string.IsNullOrWhiteSpace(label))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EnumLabels, location, type.Name,
+                    $"'{field.Name}' has an empty label"));
+            }
+            else if (owners.TryGetValue(label, out var owner))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EnumLabels, location, type.Name,
+                    $"'{field.Name}' is stored as '{label}', which already names '{owner}'"));
+            }
+            else
+            {
+                owners[label] = field.Name;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Why no store can generate the member in the declared kind, or <c>null</c>: a sequence numbers an
+    ///     int, long or short, the clock stamps a DateTime or DateTimeOffset, and an inferred kind needs one of them.
+    /// </summary>
+    private static string? StoreGeneratedProblem(AttributeData attribute, IPropertySymbol property)
+    {
+        var type = Unwrap(property.Type);
+        var sequence = type.SpecialType is SpecialType.System_Int16 or SpecialType.System_Int32 or SpecialType.System_Int64;
+        var clock = type.SpecialType == SpecialType.System_DateTime || type.ToDisplayString() == "System.DateTimeOffset";
+        return (attribute.ConstructorArguments.Length > 0 ? attribute.ConstructorArguments[0].Value as int? : null) switch
+        {
+            1 when !sequence => "is a sequence, which numbers an int, long or short",
+            2 when !clock => "is the store's clock, which stamps a DateTime or DateTimeOffset",
+            null or 0 when !sequence && !clock => "needs an int, long or short (a sequence) or a DateTime or DateTimeOffset (the clock)",
+            _ => null,
+        };
     }
 
     private static void ReportDuplicateOrders(SymbolAnalysisContext context, INamedTypeSymbol type,

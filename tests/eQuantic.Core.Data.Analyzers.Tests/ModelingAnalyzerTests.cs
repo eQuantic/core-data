@@ -24,8 +24,16 @@ public sealed class ModelingAnalyzerTests
             [AttributeUsage(AttributeTargets.Property)]
             public sealed class EntityKeyAttribute : Attribute { public bool Generated { get; set; } }
 
-            [AttributeUsage(AttributeTargets.Property)]
+            [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
             public sealed class StoredAsAttribute : Attribute { public StoredAsAttribute(string name) { } }
+
+            [AttributeUsage(AttributeTargets.Enum)]
+            public sealed class EnumTypeAttribute : Attribute { public EnumTypeAttribute() { } public EnumTypeAttribute(string name) { } }
+
+            public enum StoreValue { Inferred, Sequence, Clock }
+
+            [AttributeUsage(AttributeTargets.Property)]
+            public sealed class StoreGeneratedAttribute : Attribute { public StoreGeneratedAttribute() { } public StoreGeneratedAttribute(StoreValue value) { } }
 
             [AttributeUsage(AttributeTargets.Property)]
             public sealed class UnmappedAttribute : Attribute { }
@@ -241,4 +249,64 @@ public sealed class ModelingAnalyzerTests
             [ConcurrencyToken] public long? Revision { get; set; }
         }
         """);
+
+    [Test]
+    public Task EQD012_reports_a_store_generated_member_the_store_cannot_generate() => Verify("""
+        using System;
+        using eQuantic.Core.Data.Modeling;
+
+        public sealed class Run
+        {
+            [{|#0:StoreGenerated|}] public string Code { get; set; } = "";
+            [{|#1:StoreGenerated(StoreValue.Sequence)|}] public DateTime At { get; set; }
+            [{|#2:StoreGenerated(StoreValue.Clock)|}] public int Number { get; set; }
+            [StoreGenerated] public long Sequence { get; set; }
+            [StoreGenerated(StoreValue.Clock)] public DateTimeOffset? RecordedAt { get; set; }
+        }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.StoreGeneratedType).WithLocation(0).WithArguments("Code",
+            "needs an int, long or short (a sequence) or a DateTime or DateTimeOffset (the clock)", "string"),
+        new DiagnosticResult(ModelingDiagnostics.StoreGeneratedType).WithLocation(1).WithArguments("At",
+            "is a sequence, which numbers an int, long or short", "System.DateTime"),
+        new DiagnosticResult(ModelingDiagnostics.StoreGeneratedType).WithLocation(2).WithArguments("Number",
+            "is the store's clock, which stamps a DateTime or DateTimeOffset", "int"));
+
+    [Test]
+    public Task EQD013_reports_a_store_generated_key_or_concurrency_token() => Verify("""
+        using eQuantic.Core.Data.Modeling;
+
+        public sealed class Run
+        {
+            [EntityKey, {|#0:StoreGenerated|}] public long Id { get; set; }
+            [ConcurrencyToken, {|#1:StoreGenerated|}] public int Version { get; set; }
+        }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.StoreGeneratedRole).WithLocation(0).WithArguments("Id", "EntityKey"),
+        new DiagnosticResult(ModelingDiagnostics.StoreGeneratedRole).WithLocation(1).WithArguments("Version", "ConcurrencyToken"));
+
+    [Test]
+    public Task EQD014_reports_empty_or_repeated_enum_labels() => Verify("""
+        using eQuantic.Core.Data.Modeling;
+
+        [EnumType]
+        public enum RunState
+        {
+            Queued,
+            [StoredAs("in_progress")] InProgress,
+            [{|#0:StoredAs("in_progress")|}] Running,
+            [{|#1:StoredAs("Queued")|}] Waiting,
+            [{|#2:StoredAs("")|}] Lost,
+        }
+
+        [{|#3:EnumType("")|}]
+        public enum Channel { Email, Sms }
+
+        public enum Plain { [StoredAs("x")] A, [StoredAs("x")] B }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.EnumLabels).WithLocation(0).WithArguments("RunState",
+            "'Running' is stored as 'in_progress', which already names 'InProgress'"),
+        new DiagnosticResult(ModelingDiagnostics.EnumLabels).WithLocation(1).WithArguments("RunState",
+            "'Waiting' is stored as 'Queued', which already names 'Queued'"),
+        new DiagnosticResult(ModelingDiagnostics.EnumLabels).WithLocation(2).WithArguments("RunState", "'Lost' has an empty label"),
+        new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(3).WithArguments("Channel", "EnumType"));
 }

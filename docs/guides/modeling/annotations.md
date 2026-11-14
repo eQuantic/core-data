@@ -1,6 +1,6 @@
 # The annotation vocabulary
 
-Eleven annotations in `eQuantic.Core.Data.Modeling` declare the portable middle layer of the model.
+Thirteen annotations in `eQuantic.Core.Data.Modeling` declare the portable middle layer of the model.
 They are deliberately named apart from `System.ComponentModel.DataAnnotations`, so both can coexist
 without ambiguity. Each provider honours the subset that maps to its store **as the store's native
 mechanism**; annotations outside a store's vocabulary are ignored, never errors.
@@ -17,13 +17,23 @@ mechanism**; annotations outside a store's vocabulary are ignored, never errors.
 | `[ClusteringKey]` (+`Order`, `Descending`) | multi-column index with directions | composite index on the container's policy (2+ members) | real clustering key (rows physically ordered) | compound index with directions |
 | `[ConcurrencyToken]` | versioned `WHERE` + bump; conflicts throw | `_etag` `If-Match` conditional replace | **lightweight transaction** (`IF version = old`, Paxos per write) | conditional replace/delete filtered on the read version |
 | `[Counter]` | — ignored | — ignored | Cassandra `counter` column (increments only) | — ignored |
-| `[SearchIndex]` (+`Mode`) | **GIN trigram** index on PostgreSQL (other dialects: no index, `LIKE` still pushes down) | — ignored (Cosmos indexes every path) | SASI index — `LIKE` pushes down natively | — ignored |
+| `[SearchIndex]` (+`Mode`, `CaseInsensitive`) | **GIN trigram** index on PostgreSQL (other dialects: no index, `LIKE` still pushes down) | — ignored (Cosmos indexes every path) | SASI index — `LIKE` pushes down natively, and case-insensitive matching too when `CaseInsensitive` | — ignored |
 | `[TimeToLive(seconds)]` (class) | — ignored | container default TTL | table `default_time_to_live` | TTL index (per document, from the date member) |
 | `[Facet]` (`Length`, `Precision`, `Scale`) | sized DDL: `varchar(n)` / `nvarchar(n)`, `numeric(p,s)` | — ignored | — ignored | — ignored |
+| `[EnumType]` (enum; `[StoredAs]` on its members) | stored as its **labels**: a PostgreSQL enum type, a MySQL/MariaDB `ENUM(…)`, SQL Server text held to the labels by a `CHECK` | the label as a JSON string (documents **and** queries) | the label as `text` | the label as a BSON string |
+| `[StoreGenerated]` (+`StoreValue`) | the store assigns it on insert: an identity or a sequence object (`Sequence`), a clock default (`Clock`); read back by `RETURNING` / `OUTPUT INSERTED` / the row by its key (MySQL); never written by an update | an atomic `Increment` patch on a counter item; `GetCurrentDateTime()` read once per commit | a sequence advanced by lightweight transactions; `toTimestamp(now())` | an atomic `$inc` on a counter document; the server's `hello` clock read once per commit |
 
 “— ignored” always means *the store has no such concept*, which is the honest interpretation. When
 a store **has** the concept but the declaration is incomplete or invalid there, the model build
 throws with guidance instead.
+
+## Types the vocabulary maps without an annotation
+
+A member of type `JsonDocument`, `JsonElement` or `JsonNode` (and its subtypes) holds **any JSON** (an
+object, an array or a scalar) and every engine stores it in its own JSON form: `jsonb` on PostgreSQL,
+`JSON` on MySQL and MariaDB, text held to being JSON by a `CHECK` on SQL Server, an embedded value on
+MongoDB and Cosmos DB, and text holding the JSON on Cassandra. It comes back equal, and a null stays null.
+No engine leaves such a member out of its mapping.
 
 ## Reading the matrix as semantics, not features
 
@@ -64,7 +74,10 @@ message — instead of at model build:
 | `EQD008` | `[SearchIndex]` on a non-string member |
 | `EQD009` | `[Counter]` on a non-integral member |
 | `EQD010` | `[EntityKey(Generated = true)]` on a type identity cannot generate (non-integral) |
-| `EQD011` | an empty storage name on `[Entity]` / `[StoredAs]` |
+| `EQD011` | an empty storage name on `[Entity]` / `[StoredAs]` / `[EnumType]` |
+| `EQD012` | `[StoreGenerated]` on a member no store generates in that kind (a sequence numbers an `int`, `long` or `short`; the clock stamps a `DateTime` or `DateTimeOffset`) |
+| `EQD013` | `[StoreGenerated]` on the key (declare `[EntityKey(Generated = true)]`) or on the concurrency token |
+| `EQD014` | an `[EnumType]` enum with an empty label, or a label naming two members |
 
 Provider-*relative* rules (what one store supports and another does not) deliberately stay at
 runtime, where the provider is known and the message can be exact. Severity is Warning by default;
@@ -87,6 +100,18 @@ build to refuse.
 - **Hierarchical partition keys.** Up to three `[PartitionKey(Order = …)]` members on a Cosmos
   entity compose a multi-hash key: the container is created with all paths, point writes build the
   multi-value key transparently, and partition inference declines (fans out) rather than guessing.
+- **`[EnumType]` means "the store holds the labels and nothing else".** Each member's label is its
+  `[StoredAs]` name, or its own name. Filters and set-based updates compare and write labels, including
+  the `(int)x.State == 1` shape the compiler produces. An enum without it keeps being stored as its
+  number. On the relational engines the store itself refuses another value; on the document and
+  wide-column engines the label is a plain string, so the guarantee is the provider's. Switching an
+  existing enum from numbers to labels is a data migration, and `eqdata migrations add` says what to
+  write instead of generating it (see [Migrations](../migrations/index.md)).
+- **`[StoreGenerated]` means "the store, not the application, gives this value".** The insert leaves it
+  out and reads it back onto the entity; no update, staged or set-based, ever writes it; a bulk insert
+  leaves it to the store. `Sequence` hands out each number once and they grow; `Clock` is the store's own
+  time at the insert, in UTC, never the client's. The relational builders also take a SQL default
+  (`Generated(x => x.Member, "now()")`) for a schema another tool made.
 - **Composite keys are fluent-only.** An annotation declares one member; a composite key is a
   projection — `Key(x => new { x.OrderId, x.LineNo })` — and lives in the
   [fluent builder](fluent.md).

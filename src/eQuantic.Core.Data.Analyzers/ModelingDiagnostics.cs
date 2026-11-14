@@ -81,4 +81,22 @@ public static class ModelingDiagnostics
         "EQD011",
         "Empty storage name",
         "The storage name on '{0}' is empty; give [{1}] a real name or remove the attribute");
+
+    /// <summary>EQD012 — a store-generated member of a type no store generates in that kind.</summary>
+    public static readonly DiagnosticDescriptor StoreGeneratedType = Rule(
+        "EQD012",
+        "Store-generated member of a type the store cannot generate",
+        "[StoreGenerated] on '{0}' {1}; '{2}' is not one");
+
+    /// <summary>EQD013 — a store-generated member that is also the key or the concurrency token.</summary>
+    public static readonly DiagnosticDescriptor StoreGeneratedRole = Rule(
+        "EQD013",
+        "Store-generated member is a key or a concurrency token",
+        "[StoreGenerated] on '{0}', which is also its type's [{1}]; a key the store generates is [EntityKey(Generated = true)], and a concurrency token is the engine's to bump");
+
+    /// <summary>EQD014 — an enum stored as labels whose labels are empty or name two members.</summary>
+    public static readonly DiagnosticDescriptor EnumLabels = Rule(
+        "EQD014",
+        "Enum labels are empty or repeated",
+        "The enum '{0}' is stored as its labels, and {1}");
 }
