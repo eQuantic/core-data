@@ -63,6 +63,13 @@ the model as it now stands. **Commit them together.** A snapshot that moved past
 generated is worse than no snapshot — the next comparison starts from a state the database was never
 brought to, and the missing change is never mentioned again.
 
+`--output` (`-o`) puts them in another folder inside the project, such as `Data/Migrations`, and its
+segments name their namespace (`Shop.Api.Data.Migrations`). It reads the same on every system: `/` and
+`\` both separate the segments, and a leading, trailing or doubled separator is ignored. A segment that
+cannot be a C# identifier is made one the way an IDE names a class added to that folder (`schema-v2`
+becomes `schema_v2`, `2026` becomes `_2026`, `class` becomes `@class`), and a folder outside the project
+(`..`, a drive) is refused.
+
 Registration stays explicit, as it is for hand-written migrations:
 
 ```csharp

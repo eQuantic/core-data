@@ -25,6 +25,8 @@
 
     <ItemGroup>
         <ProjectReference Include="../../src/eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+        <!-- The eqdata tool's own logic (the folder generated files go in), tested without running the tool. -->
+        <ProjectReference Include="../../src/eQuantic.Core.Data.Tools/eQuantic.Core.Data.Tools.csproj" />
     </ItemGroup>
 
 </Project>

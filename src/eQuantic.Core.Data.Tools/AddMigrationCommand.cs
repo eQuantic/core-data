@@ -17,6 +17,8 @@ internal static class AddMigrationCommand
     /// <param name="options">What was asked for on the command line.</param>
     public static int Run(AddMigrationOptions options)
     {
+        // Read before anything is built: a folder that cannot name a namespace is refused before the wait.
+        var folder = MigrationFolder.Parse(options.Output);
         var project = TargetProject.Open(options.Project, options.Startup, options.Configuration, options.Build);
         var host = DesignTimeHost.Enter(project, options.Arguments);
 
@@ -41,8 +43,8 @@ internal static class AddMigrationCommand
         }
 
         var stamp = DateTime.UtcNow;
-        var directory = Path.Combine(project.Directory, options.Output);
-        var namespaceName = $"{project.RootNamespace}.{options.Output.Replace(Path.DirectorySeparatorChar, '.')}";
+        var directory = folder.PathUnder(project.Directory);
+        var namespaceName = folder.Namespace(project.RootNamespace);
 
         var migrationPath = Path.Combine(directory, $"{stamp:yyyyMMddHHmmss}_{options.Name}.cs");
         if (File.Exists(migrationPath))

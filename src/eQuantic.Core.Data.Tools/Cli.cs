@@ -105,7 +105,8 @@ internal static class Cli
                 carries one to the other, together with the new snapshot. Both files are yours to read and
                 edit before anything runs.
 
-                -o, --output <folder>       Where the files go, relative to the project. Defaults to Migrations.
+                -o, --output <folder>       Where the files go, relative to the project, / or \ between folders;
+                                            they also name the namespace. Defaults to Migrations.
 
               eqdata drift [options]
 
