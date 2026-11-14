@@ -43,7 +43,10 @@ every other provider, through MongoDB's own mechanisms:
   its `[StoredAs]` label (or its name) as a BSON string. It is the member's serializer, so the
   LINQ pipeline, the filter of a set-based write and its `$set` all compare and write labels —
   `x.State == State.InProgress` (which the compiler turns into `(int)x.State == 1`) included. An
-  enum declared neither way keeps its number. The driver's serializers are global and fixed on
+  ordered comparison compares the members' values, as C# does, sent as an `$in` over the labels whose
+  member satisfies it, and an order by such a member sorts on the value each label stands for (an
+  `$addFields` of a `$switch`, then `$sort`), shaped includes included. An enum declared neither way
+  keeps its number. The driver's serializers are global and fixed on
   first use: declare `Enum<TEnum>()` before the first read or write (a late declaration refuses).
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded as the BSON value
   their JSON is: an object as a document, an array as an array, a scalar as the scalar. They come

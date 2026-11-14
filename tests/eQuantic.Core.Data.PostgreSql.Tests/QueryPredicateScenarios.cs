@@ -147,6 +147,45 @@ public sealed class RelNode : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     A priority stored as its labels, whose three orders all differ: the members' values (low, medium, high, urgent), the
+///     labels' text (a_urgent, high, low, medium) and the declaration order (high, low, a_urgent, medium) a PostgreSQL enum
+///     type or a MySQL ENUM keeps.
+/// </summary>
+[Modeling.EnumType]
+public enum RelPriority
+{
+    [Modeling.StoredAs("high")]
+    High = 3,
+
+    [Modeling.StoredAs("low")]
+    Low = 1,
+
+    [Modeling.StoredAs("a_urgent")]
+    Urgent = 4,
+
+    [Modeling.StoredAs("medium")]
+    Medium = 2,
+}
+
+/// <summary>A ticket: a priority stored as its labels, an escalation that may be unset, and an alias that may hold no text.</summary>
+public sealed class RelTicket : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Title { get; set; } = "";
+
+    public RelPriority Priority { get; set; } = RelPriority.Low;
+
+    public RelPriority? Escalation { get; set; }
+
+    public string? Alias { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The query-predicate entities' mapping: the navigations follow the conventions (<c>{Nav}Id</c>, <c>{Owner}Id</c>).</summary>
 internal static class QueryPredicateSchema
 {
@@ -159,6 +198,7 @@ internal static class QueryPredicateSchema
         .Entity<RelRepo>(_ => { })
         .Entity<RelSpace>(_ => { })
         .Entity<RelCompany>(_ => { })
+        .Entity<RelTicket>(_ => { })
         .Entity<RelNode>(entity => entity.Collection(x => x.Children, child => child.ParentId));
 }
 
@@ -176,6 +216,7 @@ public sealed class QueryPredicateMigration : Data.Migration.Migration
         .For<RelRepo>(repo => repo.EnsureCollection())
         .For<RelSpace>(space => space.EnsureCollection())
         .For<RelCompany>(company => company.EnsureCollection())
+        .For<RelTicket>(ticket => ticket.EnsureCollection())
         .For<RelNode>(node => node.EnsureCollection().Index(x => x.ParentId));
 }
 
@@ -202,6 +243,7 @@ internal static class QueryPredicateScenarios
         await Repo<RelSpace>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
         await Repo<RelCompany>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
         await Repo<RelNode>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
+        await Repo<RelTicket>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
     }
 
     private static async Task Seed(Func<IServiceScope> newScope, params object[] entities)
@@ -438,5 +480,85 @@ internal static class QueryPredicateScenarios
         Assert.That(await repo.DeleteManyAsync(x => names.Contains(x.Name)), Is.EqualTo(1L), "c3 was renamed");
         Assert.That((await repo.GetAllAsync()).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Rank),
             Is.EqualTo(new[] { ("listed", 3), ("c1", 11), ("listed", 12) }));
+    }
+
+    /// <summary>The tickets of the value-semantics scenarios: one per priority, escalations and aliases spread across them.</summary>
+    private static Task SeedTicketsAsync(Func<IServiceScope> newScope) => Seed(newScope,
+        new RelTicket { Title = "t1", Priority = RelPriority.Low, Alias = "Alpha" },
+        new RelTicket { Title = "t2", Priority = RelPriority.Medium, Escalation = RelPriority.Low },
+        new RelTicket { Title = "t3", Priority = RelPriority.High, Escalation = RelPriority.Urgent, Alias = "beta" },
+        new RelTicket { Title = "t4", Priority = RelPriority.Urgent, Escalation = RelPriority.Medium, Alias = "ALPHA" });
+
+    private static async Task<string[]> TicketTitles(Func<IServiceScope> newScope, System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter)
+    {
+        using var scope = newScope();
+        return (await Repo<RelTicket>(scope).GetFilteredAsync(filter)).Select(x => x.Title).Order().ToArray();
+    }
+
+    private static async Task<string[]> OrderedTitles(Func<IServiceScope> newScope, QueryOptions<RelTicket> options)
+    {
+        using var scope = newScope();
+        return (await Repo<RelTicket>(scope).GetAllAsync(options)).Select(x => x.Title).ToArray();
+    }
+
+    /// <summary>
+    ///     An enum stored as its labels compares and orders by its members' values, as C# does: never by the labels' text nor
+    ///     by the order the store declared them in. On a nullable member, and under a negation (where a null passes, as in C#).
+    /// </summary>
+    public static async Task LabelsCompareAndOrderByValue(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+        var medium = RelPriority.Medium;
+
+        Assert.That(await TicketTitles(newScope, x => x.Priority >= RelPriority.Medium), Is.EqualTo(new[] { "t2", "t3", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => x.Priority < RelPriority.High), Is.EqualTo(new[] { "t1", "t2" }));
+        Assert.That(await TicketTitles(newScope, x => medium < x.Priority), Is.EqualTo(new[] { "t3", "t4" }), "a captured value, on the left");
+        Assert.That(await TicketTitles(newScope, x => x.Priority == RelPriority.Medium), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(newScope, x => x.Priority != RelPriority.Medium), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => x.Priority > RelPriority.Urgent), Is.Empty, "no member is above the highest");
+        Assert.That(await TicketTitles(newScope, x => x.Escalation >= RelPriority.Medium), Is.EqualTo(new[] { "t3", "t4" }),
+            "a nullable member: null is not >= anything");
+        Assert.That(await TicketTitles(newScope, x => !(x.Escalation >= RelPriority.Medium)), Is.EqualTo(new[] { "t1", "t2" }),
+            "under a negation null passes, as in C#");
+        Assert.That(await TicketTitles(newScope, x => !(x.Priority >= RelPriority.High) && x.Title != ""), Is.EqualTo(new[] { "t1", "t2" }));
+
+        Assert.That(await OrderedTitles(newScope, new QueryOptions<RelTicket>().OrderBy(x => x.Priority)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+        Assert.That(await OrderedTitles(newScope, new QueryOptions<RelTicket>().OrderByDescending(x => x.Priority)),
+            Is.EqualTo(new[] { "t4", "t3", "t2", "t1" }));
+        Assert.That(await OrderedTitles(newScope, new QueryOptions<RelTicket>().OrderByDescending(x => x.Priority).Take(2)),
+            Is.EqualTo(new[] { "t4", "t3" }), "the limit applies after the order");
+        Assert.That(await OrderedTitles(newScope, new QueryOptions<RelTicket>().OrderBy(x => x.Escalation, NullsOrder.First)),
+            Is.EqualTo(new[] { "t1", "t2", "t4", "t3" }));
+
+        using var scope = newScope();
+        var repo = Repo<RelTicket>(scope);
+        Assert.That(await repo.CountAsync(new QueryOptions<RelTicket>().Where(x => x.Priority >= RelPriority.Medium)), Is.EqualTo(3L));
+        Assert.That(await repo.UpdateManyAsync(x => x.Priority >= RelPriority.High, x => new RelTicket { Alias = "hot" }), Is.EqualTo(2L));
+        Assert.That(await TicketTitles(newScope, x => x.Alias == "hot"), Is.EqualTo(new[] { "t3", "t4" }));
+    }
+
+    /// <summary>
+    ///     The negation of a text equality without regard to case keeps the rows whose member is null, as
+    ///     <c>!string.Equals(null, v, comparison)</c> is true in C#, and as <c>x.Alias != v</c> keeps them.
+    /// </summary>
+    public static async Task NegatedTextEqualityKeepsNull(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+
+        Assert.That(await TicketTitles(newScope, x => string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t1", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => !string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(newScope, x => !x.Alias!.Equals("alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(newScope, x => !"alpha".Equals(x.Alias, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower() != "alpha"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(newScope, x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
+    }
+
+    /// <summary>A relation's condition held in a delegate cannot be read: refused, naming the navigation, never dropped.</summary>
+    public static void RelationConditionInADelegateIsRefused(Func<IServiceScope> newScope)
+    {
+        using var scope = newScope();
+        Func<RelMention, bool> live = m => m.DeletedAt == null;
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => Repo<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live)));
+        Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
     }
 }

@@ -404,10 +404,14 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
                       "stitched, so every row the filter keeps travels.");
         }
 
-        if (options is not null && SplitAt(ReadShapes.Sorts(options)) >= 0)
+        if (options is not null && ReadShapes.Sorts(options) is { Count: > 0 } sorts && SplitsRead(sorts[0]))
         {
-            notes.Add("Nulls placed against Cosmos DB's order (nulls and undefined sort as the smallest value) read as two queries, " +
-                      "the rows whose key is null and the rest, concatenated in the order asked.");
+            notes.Add(UnitOfWork.EntityModel.IsLabelEnum(Unconverted(sorts[0].Key).Body.Type)
+                ? "An enum stored as its labels orders by the values of its members, as C# does, where an ORDER BY would order the " +
+                  "labels' text: the read runs one query per member, in the order of their values (and one for the rows whose key is " +
+                  "null, where they go), concatenated."
+                : "Nulls placed against Cosmos DB's order (nulls and undefined sort as the smallest value) read as two queries, " +
+                  "the rows whose key is null and the rest, concatenated in the order asked.");
         }
 
         if (options is { SkipCount: not null } or { TakeCount: not null })
@@ -501,35 +505,26 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
 
     /// <summary>
     ///     Runs the read with its window. Cosmos DB orders nulls and undefined as the smallest value and orders by property
-    ///     paths alone, so a placement against that order on the first sort reads as two queries — the rows whose key is
-    ///     null, and the rest — concatenated in the order asked, the window carried across them (a count of the first
-    ///     part runs only when the skip passes it whole).
+    ///     paths alone, so the first sort reads as several queries, concatenated in the order asked, when an <c>ORDER BY</c>
+    ///     cannot say it: a placement of nulls against that order reads the rows whose key is null and the rest; an enum
+    ///     stored as its labels, which an <c>ORDER BY</c> would order by the labels' text, reads the rows of each member in
+    ///     the order of the members' values (and the rows whose key is null where they go), as C# orders the enum. The window
+    ///     is carried across the parts (a count of a part runs only when the skip passes it whole).
     /// </summary>
     private async Task<List<TResult>> SegmentsAsync<TResult>(QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
         int? offset, int? limit, Func<IQueryable<TEntity>, IQueryable<TResult>> project, CancellationToken cancellationToken)
     {
-        var sorts = ReadShapes.Sorts(options);
-        var split = SplitAt(sorts);
-        if (split < 0)
+        var segments = Segments(ReadShapes.Sorts(options));
+        if (segments is null)
         {
             return await MaterializeAsync(project(Window(Query(options, extraFilter), options, offset, limit)), cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        if (split > 0)
-        {
-            throw SplitRefusal("a later sort");
-        }
-
-        var first = sorts[0];
-        var isNull = IsNull(first.Key);
-        var isValue = Expression.Lambda<Func<TEntity, bool>>(Expression.Not(isNull.Body), isNull.Parameters);
-        var segments = first.Nulls == NullsOrder.First ? new[] { isNull, isValue } : [isValue, isNull];
-
         var results = new List<TResult>();
         var skip = offset ?? 0;
         var remaining = limit;
-        for (var index = 0; index < segments.Length && remaining is not 0; index++)
+        for (var index = 0; index < segments.Count && remaining is not 0; index++)
         {
             var segment = And(extraFilter, segments[index]);
             var rows = await MaterializeAsync(project(Window(Query(options, segment), options, skip > 0 ? skip : null, remaining)),
@@ -537,7 +532,7 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
             results.AddRange(rows);
             remaining -= rows.Count;
 
-            if (skip > 0 && index + 1 < segments.Length)
+            if (skip > 0 && index + 1 < segments.Count)
             {
                 // The window began inside this part when it returned rows; otherwise the skip passes it whole.
                 skip = rows.Count > 0
@@ -550,6 +545,85 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         return results;
     }
 
+    /// <summary>
+    ///     The parts a read with <paramref name="sorts" /> splits into, in the order they are read, or <c>null</c> when one
+    ///     <c>ORDER BY</c> says the order. Only the first sort can split the read; a later one that would need it is refused.
+    /// </summary>
+    private IReadOnlyList<Expression<Func<TEntity, bool>>>? Segments(IReadOnlyList<MemorySort> sorts)
+    {
+        if (sorts.Skip(1).Any(sort => SplitsRead(sort)))
+        {
+            throw SplitRefusal("a later sort");
+        }
+
+        if (sorts.Count == 0 || !SplitsRead(sorts[0]))
+        {
+            return null;
+        }
+
+        var first = sorts[0];
+        var isNull = IsNull(first.Key);
+        var nullsFirst = first.Nulls switch
+        {
+            NullsOrder.First => true,
+            NullsOrder.Last => false,
+            _ => !first.Descending,
+        };
+
+        List<Expression<Func<TEntity, bool>>> values;
+        var keyType = Unconverted(first.Key).Body.Type;
+        if (UnitOfWork.EntityModel.IsLabelEnum(keyType))
+        {
+            var members = EnumOrder.ByValue(keyType).ToList();
+            if (first.Descending)
+            {
+                members.Reverse();
+            }
+
+            values = members.Select(member => IsMember(first.Key, member)).ToList();
+            if (Nullable.GetUnderlyingType(keyType) is null)
+            {
+                // A member that is not nullable is never null: the members' rows are all there is.
+                return values;
+            }
+        }
+        else
+        {
+            values = [Expression.Lambda<Func<TEntity, bool>>(Expression.Not(isNull.Body), isNull.Parameters)];
+        }
+
+        return nullsFirst ? [isNull, .. values] : [.. values, isNull];
+    }
+
+    /// <summary>
+    ///     Whether a sort splits the read: it places nulls against Cosmos DB's order, or its key is an enum stored as its
+    ///     labels.
+    /// </summary>
+    private bool SplitsRead(MemorySort sort) =>
+        !ReadShapes.IsNullsSmallest(sort.Nulls, sort.Descending) || UnitOfWork.EntityModel.IsLabelEnum(Unconverted(sort.Key).Body.Type);
+
+    /// <summary><c>x =&gt; new[] { member }.Contains(x.Key)</c>: the rows holding one member's label.</summary>
+    private static Expression<Func<TEntity, bool>> IsMember(LambdaExpression key, Enum member)
+    {
+        var parameter = Expression.Parameter(typeof(TEntity), "x");
+        var body = new ParameterSwap(key.Parameters[0], parameter).Visit(Unconverted(key).Body);
+        var array = Array.CreateInstance(body.Type, 1);
+        array.SetValue(member, 0);
+        var contains = Expression.Call(typeof(Enumerable), nameof(Enumerable.Contains), [body.Type], Expression.Constant(array), body);
+        return Expression.Lambda<Func<TEntity, bool>>(contains, parameter);
+    }
+
+    private static LambdaExpression Unconverted(LambdaExpression key)
+    {
+        var body = key.Body;
+        while (body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conversion)
+        {
+            body = conversion.Operand;
+        }
+
+        return ReferenceEquals(body, key.Body) ? key : Expression.Lambda(body, key.Parameters);
+    }
+
     private IQueryable<TEntity> Window(IQueryable<TEntity> query, QueryOptions<TEntity>? options, int? offset, int? limit)
     {
         if (offset is not null)
@@ -560,33 +634,21 @@ public abstract class CosmosReadRepository<TEntity, TKey> :
         return limit is null ? query : query.Take(limit.Value);
     }
 
-    /// <summary>The first sort placing nulls against Cosmos DB's order, or -1.</summary>
-    private static int SplitAt(IReadOnlyList<MemorySort> sorts)
+    /// <summary>Refuses a sort that splits the read on a read that cannot split (paging by continuation, streaming).</summary>
+    private void RefuseSplitNulls(QueryOptions<TEntity>? options, string read)
     {
-        for (var index = 0; index < sorts.Count; index++)
-        {
-            if (!ReadShapes.IsNullsSmallest(sorts[index].Nulls, sorts[index].Descending))
-            {
-                return index;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>Refuses a placement of nulls on a read that cannot split in two (paging by continuation, streaming).</summary>
-    private static void RefuseSplitNulls(QueryOptions<TEntity>? options, string read)
-    {
-        if (SplitAt(ReadShapes.Sorts(options)) >= 0)
+        if (ReadShapes.Sorts(options).Any(SplitsRead))
         {
             throw SplitRefusal(read);
         }
     }
 
     private static NotSupportedException SplitRefusal(string where) =>
-        new($"Cosmos DB sorts nulls and undefined as the smallest value and orders by property paths alone, so a placement " +
-            $"against that order cannot apply to {where}: it reads as two queries split on whether the key is null, which " +
-            "works for the first sort of an entity or mapped read. Make it the first sort, or order the rows client-side.");
+        new($"Cosmos DB sorts nulls and undefined as the smallest value, orders by property paths alone, and would order an enum " +
+            $"stored as its labels by the labels' text, so a placement of nulls against that order, or an order by such an enum, " +
+            $"cannot apply to {where}: it reads as one query per part (the rows whose key is null, the rows of each member in " +
+            "the order of their values), which works for the first sort of an entity or mapped read. Make it the first sort, or " +
+            "order the rows client-side.");
 
     /// <summary><c>x =&gt; !IS_DEFINED(x.Key) || IS_NULL(x.Key)</c>.</summary>
     private static Expression<Func<TEntity, bool>> IsNull(LambdaExpression key)

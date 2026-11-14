@@ -163,7 +163,8 @@ public sealed class CosmosTestServer
         .Entity<RelArtifact>(entity => entity.Container("rel_artifacts").PartitionKey(x => x.Category))
         .Entity<RelRepo>(entity => entity.Container("rel_repos").PartitionKey(x => x.Category))
         .Entity<RelSpace>(entity => entity.Container("rel_spaces").PartitionKey(x => x.Category))
-        .Entity<RelCompany>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
+        .Entity<RelCompany>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<RelTicket>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
 
     [OneTimeTearDown]
     public async Task StopAsync()

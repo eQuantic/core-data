@@ -143,7 +143,7 @@ public static class FilterInterpreter
         if (op is ComparisonOperator.Equal or ComparisonOperator.NotEqual
             && (CaseFolded(binary.Left, binary.Right, out var folded) || CaseFolded(binary.Right, binary.Left, out folded)))
         {
-            return op == ComparisonOperator.Equal ? folded : new LogicalFilter(LogicalOperator.Not, [folded]);
+            return op == ComparisonOperator.Equal ? folded : NotText(folded);
         }
 
         if (Path(binary.Left) is { } leftMember)
@@ -180,11 +180,38 @@ public static class FilterInterpreter
 
         if (operand is BinaryNode binary && TryComparison(binary.NodeType, out var op))
         {
-            return Compare(binary, Negated(op));
+            // C# lifts an ordered comparison of a nullable member, and a lifted comparison is false for null: its
+            // negation holds for null, which the reversed comparison alone would not say (null <= v is not true either).
+            var negated = Compare(binary, Negated(op));
+            return op is not (ComparisonOperator.Equal or ComparisonOperator.NotEqual) && Lifted(binary)
+                                                                                     && negated is ComparisonFilter { Value: not null } comparison
+                ? new LogicalFilter(LogicalOperator.Or, [negated, new ComparisonFilter(comparison.Member, ComparisonOperator.Equal, null)])
+                : negated;
         }
 
-        return new LogicalFilter(LogicalOperator.Not, [Visit(operand)]);
+        var visited = Visit(operand);
+        return visited is TextFilter ? NotText(visited) : new LogicalFilter(LogicalOperator.Not, [visited]);
     }
+
+    /// <summary>
+    ///     The negation of a text test: a member that is null fails <c>string.Equals(x.Name, v, comparison)</c> (C# answers
+    ///     false), so it passes the negation, as it passes <c>x.Name != v</c>; the store's NOT alone would drop it.
+    /// </summary>
+    private static QueryFilter NotText(QueryFilter text) =>
+        text is TextFilter { Match: TextMatch.Equals } equality
+            ? new LogicalFilter(LogicalOperator.Or,
+                [new LogicalFilter(LogicalOperator.Not, [text]), new ComparisonFilter(equality.Member, ComparisonOperator.Equal, null)])
+            : new LogicalFilter(LogicalOperator.Not, [text]);
+
+    /// <summary>Whether a comparison is lifted: the compiler typed one of its sides nullable.</summary>
+    private static bool Lifted(BinaryNode binary) => Nullable(binary.Left) || Nullable(binary.Right);
+
+    private static bool Nullable(ExpressionNode node) => node switch
+    {
+        UnaryNode { Type.Name: { } name } => name.StartsWith("System.Nullable", StringComparison.Ordinal),
+        ConstantNode { Type.Name: { } name } => name.StartsWith("System.Nullable", StringComparison.Ordinal),
+        _ => false,
+    };
 
     private static QueryFilter Or(QueryFilter left, QueryFilter right)
     {

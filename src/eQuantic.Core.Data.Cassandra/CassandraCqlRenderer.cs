@@ -33,7 +33,8 @@ internal static class CassandraCqlRenderer
     public static IReadOnlyList<(string Cql, object?[] Values)> InChunks(CassandraEntityConfiguration configuration, InFilter filter)
     {
         var column = Column(configuration, filter.Member);
-        return filter.Values.Chunk(InChunkSize)
+        // Distinct keys: a row is then in one chunk only, so what the chunks count or sum adds up.
+        return filter.Values.Distinct().Chunk(InChunkSize)
             .Select(chunk => ($"{column} IN ({string.Join(", ", chunk.Select(_ => "?"))})",
                 chunk.Select(value => Stored(configuration, column, value)).ToArray()))
             .ToList();
@@ -228,6 +229,21 @@ internal static class CassandraCqlRenderer
         if (filter.Operator is ComparisonOperator.NotEqual)
         {
             throw new NotSupportedException($"Cassandra CQL has no '<>' operator; '{filter.Member} <> ?' is not expressible.");
+        }
+
+        // An enum stored as its labels orders by its members' values, as C# does, while CQL would compare the labels' text:
+        // the comparison is membership in the labels whose member satisfies it, which CQL takes on the primary key only.
+        // Elsewhere, or when no member satisfies it, the clause runs client-side, where C# decides.
+        if (EnumOrder.IsOrdered(filter.Operator) && configuration.Column(column) is { CqlType: "text" } stored
+                                                && (Nullable.GetUnderlyingType(stored.ClrType) ?? stored.ClrType) is { IsEnum: true } labelEnum)
+        {
+            var satisfying = EnumOrder.Satisfying(labelEnum, filter.Operator, filter.Value);
+            if (satisfying.Count == 0)
+            {
+                throw new NotSupportedException($"No member of '{labelEnum.Name}' satisfies the comparison of '{filter.Member}'; it runs client-side.");
+            }
+
+            return In(new InFilter(filter.Member, satisfying.Cast<object?>().ToList()), column, configuration, values, ref requiresFiltering);
         }
 
         if (filter.Operator is ComparisonOperator.Equal)

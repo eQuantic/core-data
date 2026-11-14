@@ -1021,7 +1021,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 var column = _configuration.ColumnFor(sort.KeySelector.GetMemberName())
                              ?? throw new NotSupportedException(
                                  $"'{typeof(TEntity).Name}' has no mapped member '{sort.KeySelector.GetMemberName()}' to order by.");
-                return _dialect.OrderTerm(_dialect.Quote(column.Name), sort.Direction == SortDirection.Descending,
+                return _dialect.OrderTerm(_dialect.SortKey(column, _dialect.Quote(column.Name)), sort.Direction == SortDirection.Descending,
                     options.NullsOrderOf(sort));
             });
             return " ORDER BY " + string.Join(", ", parts);
@@ -1166,7 +1166,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         System.Text.Json.JsonSerializer.Deserialize(token, _configuration.Key.Property.PropertyType);
 
     private static List<Func<TEntity, bool>> Compile(IReadOnlyList<LambdaExpression> residual) =>
-        residual.Select(predicate => ((Expression<Func<TEntity, bool>>)predicate).Compile()).ToList();
+        residual.Select(PredicateNormalizer.CompileResidual<TEntity>).ToList();
 
     /// <summary>The first-segment members the map reads from the entity, or null when it needs the whole entity.</summary>
     private static IReadOnlyCollection<string>? MapColumns(LambdaExpression map)

@@ -187,7 +187,11 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     {
         var patch = WithUpdateStamps(CosmosPatch.Build(updateExpression), updateExpression);
         var scoped = await Ready(filter, cancellationToken).ConfigureAwait(false);
-        var condition = "FROM root WHERE " + WhereClause(scoped);
+
+        // A text test that ignores case is never a patch's condition: the store's condition evaluator answers it with 412
+        // (the vNext emulator does), which reads as "no longer matches" and patches nothing, silently. Such a filter
+        // patches each item under the _etag of a read that finds it matching.
+        var condition = CosmosPredicates.TestsTextIgnoringCase(scoped) ? null : "FROM root WHERE " + WhereClause(scoped);
         var matches = await MaterializeAsync(_queryable.Where(scoped), cancellationToken).ConfigureAwait(false);
         var where = WhereClause(scoped);
         var patched = await ForEachItemAsync(matches, item => PatchMatchingAsync(item, patch, condition, where, cancellationToken),
@@ -197,10 +201,11 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
 
     /// <summary>
     ///     Patches an item while it still matches the filter, and answers it as the patch left it, or <c>null</c> when it no
-    ///     longer matched (or went away). A unique key the patch would take is a <see cref="DuplicateKeyException" />, by
-    ///     either path.
+    ///     longer matched (or went away): under the filter as the patch's condition, or, without a <paramref name="condition" />
+    ///     (a filter the condition evaluator cannot be trusted with), under the <c>_etag</c> of a read that finds it matching. A
+    ///     unique key the patch would take is a <see cref="DuplicateKeyException" />, by either path.
     /// </summary>
-    private async Task<TEntity?> PatchMatchingAsync(TEntity item, IReadOnlyList<PatchOperation> patch, string condition, string where,
+    private async Task<TEntity?> PatchMatchingAsync(TEntity item, IReadOnlyList<PatchOperation> patch, string? condition, string where,
         CancellationToken cancellationToken)
     {
         var id = _configuration.GetId(item);
@@ -209,8 +214,11 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         {
             try
             {
-                return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, condition, ifMatchEtag: null, cancellationToken)
-                    .ConfigureAwait(false);
+                if (condition is not null)
+                {
+                    return await CosmosPatch.ApplyAsync<TEntity>(_container, id, partitionKey, patch, condition, ifMatchEtag: null,
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
             catch (CosmosException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
             {
@@ -418,7 +426,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
 
         var target = Expression.Lambda<Func<TEntity, bool>>(body!, parameter);
         return _container.GetItemLinqQueryable<TEntity>(requestOptions: new QueryRequestOptions { PartitionKey = partitionKey })
-            .Where(conflictFilter is null ? target : CosmosPredicates.Rendered(target.AndAlso(conflictFilter)));
+            .Where(conflictFilter is null ? target : CosmosPredicates.Rendered(target.AndAlso(conflictFilter), _unitOfWork));
     }
 
     private async Task<(TEntity Resource, string ETag)?> QueryTargetAsync(IQueryable<TEntity> query, PartitionKey partitionKey,

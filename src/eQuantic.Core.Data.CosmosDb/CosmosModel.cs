@@ -140,6 +140,17 @@ public sealed class CosmosModel
 
     internal void AddLabelEnum(Type enumType) => _labelEnums.Add(enumType);
 
+    /// <summary>
+    ///     Whether <paramref name="type" /> (nullable unwrapped) is an enum stored as its labels: declared by
+    ///     <c>Enum&lt;TEnum&gt;()</c>, or annotated with <see cref="Data.Modeling.EnumTypeAttribute" />.
+    /// </summary>
+    /// <param name="type">A CLR type.</param>
+    internal bool IsLabelEnum(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsEnum && (_labelEnums.Contains(underlying) || Data.Modeling.EnumTypeAttribute.For(underlying) is not null);
+    }
+
     /// <summary>The registered configurations.</summary>
     public IReadOnlyDictionary<Type, CosmosEntityConfiguration> Configurations => _configurations;
 

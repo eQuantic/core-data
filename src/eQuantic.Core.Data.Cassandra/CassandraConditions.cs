@@ -86,6 +86,13 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
         };
     }
 
+    /// <summary>The enum a member is stored as the labels of, or <c>null</c>.</summary>
+    private static Type? LabelEnum(CassandraEntityConfiguration configuration, string member) =>
+        configuration.Column(configuration.ColumnFor(member)) is { CqlType: "text" } column
+        && (Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType) is { IsEnum: true } enumType
+            ? enumType
+            : null;
+
     private static IEnumerable<QueryFilter> Conjuncts(QueryFilter filter) =>
         filter is LogicalFilter { Operator: LogicalOperator.And } and
             ? and.Operands.SelectMany(Conjuncts)
@@ -104,6 +111,18 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
     {
         switch (filter)
         {
+            // An enum stored as its labels orders by its members' values, as C# does: the condition is membership in the
+            // labels whose member satisfies the comparison, where IF col >= ? would compare the labels' text.
+            case ComparisonFilter { Value: not null } ordered when EnumOrder.IsOrdered(ordered.Operator)
+                                                               && LabelEnum(configuration, ordered.Member) is { } labelEnum:
+            {
+                var satisfying = EnumOrder.Satisfying(labelEnum, ordered.Operator, ordered.Value);
+                return satisfying.Count > 0
+                    ? Condition(configuration, new InFilter(ordered.Member, satisfying.Cast<object?>().ToList()))
+                    : throw new NotSupportedException(
+                        $"No member of '{labelEnum.Name}' satisfies the comparison of '{ordered.Member}', so the write would match no row; drop it.");
+            }
+
             case ComparisonFilter comparison:
             {
                 var column = configuration.ColumnFor(comparison.Member);

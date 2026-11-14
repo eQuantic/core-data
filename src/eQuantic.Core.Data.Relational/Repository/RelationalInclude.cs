@@ -207,8 +207,11 @@ internal static class RelationalInclude
         var bound = shared.Count + (!ranked ? 0 : shape.TakeCount is null ? 1 : 2);
 
         var order = shape.Sortings.Count > 0
-            ? string.Join(", ", shape.Sortings.Select(sort => dialect.OrderTerm(
-                dialect.Quote(SortColumn(configuration, sort.KeySelector).Name), sort.Descending, sort.Nulls)))
+            ? string.Join(", ", shape.Sortings.Select(sort =>
+            {
+                var sorted = SortColumn(configuration, sort.KeySelector);
+                return dialect.OrderTerm(dialect.SortKey(sorted, dialect.Quote(sorted.Name)), sort.Descending, sort.Nulls);
+            }))
             : string.Join(", ", configuration.Keys.Select(key => dialect.Quote(key.Name) + " ASC"));
         var columns = string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)));
         var table = dialect.Quote(configuration.TableName);

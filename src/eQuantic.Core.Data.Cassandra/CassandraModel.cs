@@ -78,7 +78,16 @@ public abstract class CassandraEntityConfiguration
     public IReadOnlyList<string> CounterColumns { get; }
 
     /// <summary>The search-indexed columns — <c>LIKE</c> pushes down on these (a SASI index backs each one).</summary>
-    public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; }
+    public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; private set; }
+
+    /// <summary>The same mapping with other search columns (what the cluster's indexes really match).</summary>
+    /// <param name="searchColumns">The search columns.</param>
+    internal CassandraEntityConfiguration WithSearchColumns(IReadOnlyList<CassandraSearchColumn> searchColumns)
+    {
+        var copy = (CassandraEntityConfiguration)MemberwiseClone();
+        copy.SearchColumns = searchColumns;
+        return copy;
+    }
 
     /// <summary>
     ///     The optimistic-concurrency column (a version counter the entity carries), or <c>null</c>. Writes on a

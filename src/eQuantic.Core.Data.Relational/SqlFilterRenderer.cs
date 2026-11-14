@@ -64,6 +64,13 @@ internal static class SqlFilterRenderer
                 };
             }
 
+            // An enum stored as its labels orders by its members' values, as C# does: the comparison is membership in the
+            // labels whose member satisfies it, never the labels' text (or PostgreSQL's declaration order).
+            if (EnumOrder.IsOrdered(comparison.Operator) && LabelEnum(comparison.Member) is { } labelEnum)
+            {
+                return In(new InFilter(comparison.Member, EnumOrder.Satisfying(labelEnum, comparison.Operator, comparison.Value)));
+            }
+
             // C# != matches NULL rows too; SQL <> filters them out — keep the C# semantics explicit.
             return comparison.Operator == ComparisonOperator.NotEqual
                 ? $"({column} <> {Bind(Stored(comparison.Member, comparison.Value))} OR {column} IS NULL)"
@@ -193,6 +200,12 @@ internal static class SqlFilterRenderer
         RelationalColumn ColumnOf(string member) =>
             configuration.ColumnFor(member)
             ?? throw new NotSupportedException($"'{configuration.EntityType.Name}' has no mapped member '{member}'.");
+
+        // The enum a member is stored as the labels of, or null.
+        Type? LabelEnum(string member) =>
+            configuration.ColumnFor(member) is { Converter: null } column && dialect.NativeEnumOf(column.StoredType) is { } native
+                ? native.EnumType
+                : null;
 
         // A converted member's filter values bind as their stored form — the domain type never reaches the driver.
         object? Stored(string member, object? value)

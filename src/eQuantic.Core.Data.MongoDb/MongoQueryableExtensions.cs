@@ -51,9 +51,10 @@ public static class MongoQueryableExtensions
         if (options.Sortings.Count > 0)
         {
             // MongoDB sorts nulls (and missing fields) as the smallest value; a placement against that order sorts on
-            // whether the field is null first, as aggregation stages LINQ has no word for.
+            // whether the field is null first, and an enum stored as its labels on the value each label stands for, as
+            // aggregation stages LINQ has no word for.
             var sorts = eQuantic.Core.Data.Query.ReadShapes.Sorts(options);
-            query = MongoStages.NaturalNulls(sorts)
+            query = MongoStages.NativeOrder(sorts)
                 ? ApplySortings(query, options.Sortings)
                 : MongoStages.Append(query, MongoStages.Sort<TEntity>(sorts));
         }

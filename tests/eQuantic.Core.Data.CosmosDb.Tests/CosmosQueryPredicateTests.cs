@@ -146,6 +146,46 @@ public sealed class RelCompany : IEntity<string>
 }
 
 /// <summary>
+///     A priority stored as its labels, whose three orders all differ: the members' values (low, medium, high, urgent), the
+///     labels' text (a_urgent, high, low, medium) and the declaration order (high, low, a_urgent, medium).
+/// </summary>
+[Modeling.EnumType]
+public enum RelPriority
+{
+    [Modeling.StoredAs("high")]
+    High = 3,
+
+    [Modeling.StoredAs("low")]
+    Low = 1,
+
+    [Modeling.StoredAs("a_urgent")]
+    Urgent = 4,
+
+    [Modeling.StoredAs("medium")]
+    Medium = 2,
+}
+
+/// <summary>A ticket: a priority stored as its labels, an escalation that may be unset, and an alias that may hold no text.</summary>
+public sealed class RelTicket : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Category { get; set; } = "";
+
+    public string Title { get; set; } = "";
+
+    public RelPriority Priority { get; set; } = RelPriority.Low;
+
+    public RelPriority? Escalation { get; set; }
+
+    public string? Alias { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
+/// <summary>
 ///     The query predicates against the Cosmos DB emulator: a filter across a relation resolves the related keys first (one
 ///     <c>SELECT DISTINCT VALUE</c> over the related container per test — a relation crosses containers, which Cosmos DB
 ///     cannot join) and reads with <c>IN</c>/<c>NOT IN</c> over them, in reads, counts and set-based writes (the patch's
@@ -359,5 +399,109 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
         Assert.That(await repo.DeleteManyAsync(x => x.Category == partition && names.Contains(x.Name)), Is.EqualTo(1L), "c3 was renamed");
         Assert.That((await repo.GetFilteredAsync(x => x.Category == partition)).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Rank),
             Is.EqualTo(new[] { ("listed", 3), ("c1", 11), ("listed", 12) }));
+    }
+
+    private Task SeedTicketsAsync() => Seed(
+        new RelTicket { Title = "t1", Priority = RelPriority.Low, Alias = "Alpha" },
+        new RelTicket { Title = "t2", Priority = RelPriority.Medium, Escalation = RelPriority.Low },
+        new RelTicket { Title = "t3", Priority = RelPriority.High, Escalation = RelPriority.Urgent, Alias = "beta" },
+        new RelTicket { Title = "t4", Priority = RelPriority.Urgent, Escalation = RelPriority.Medium, Alias = "ALPHA" });
+
+    private async Task<string[]> TicketTitles(System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter)
+    {
+        using var scope = NewScope();
+        var partition = Partition;
+        return (await RepoOf<RelTicket>(scope).GetFilteredAsync(filter.AndAlso(x => x.Category == partition)))
+            .Select(x => x.Title).Order().ToArray();
+    }
+
+    private async Task<string[]> OrderedTitles(Func<QueryOptions<RelTicket>, QueryOptions<RelTicket>> order)
+    {
+        using var scope = NewScope();
+        var partition = Partition;
+        return (await RepoOf<RelTicket>(scope).GetAllAsync(order(new QueryOptions<RelTicket>().Where(x => x.Category == partition))))
+            .Select(x => x.Title).ToArray();
+    }
+
+    [Test]
+    public async Task Labels_compare_and_order_by_their_members_values()
+    {
+        await SeedTicketsAsync();
+        var medium = RelPriority.Medium;
+
+        Assert.That(await TicketTitles(x => x.Priority >= RelPriority.Medium), Is.EqualTo(new[] { "t2", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Priority < RelPriority.High), Is.EqualTo(new[] { "t1", "t2" }));
+        Assert.That(await TicketTitles(x => medium < x.Priority), Is.EqualTo(new[] { "t3", "t4" }), "a captured value, on the left");
+        Assert.That(await TicketTitles(x => x.Priority == RelPriority.Medium), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(x => x.Priority != RelPriority.Medium), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Priority > RelPriority.Urgent), Is.Empty, "no member is above the highest");
+        Assert.That(await TicketTitles(x => x.Escalation >= RelPriority.Medium), Is.EqualTo(new[] { "t3", "t4" }),
+            "a nullable member: null is not >= anything");
+        Assert.That(await TicketTitles(x => !(x.Escalation >= RelPriority.Medium)), Is.EqualTo(new[] { "t1", "t2" }),
+            "under a negation null passes, as in C#");
+
+        // An ORDER BY would order the labels' text: the read runs one query per member, in the order of their values.
+        Assert.That(await OrderedTitles(options => options.OrderBy(x => x.Priority)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+        Assert.That(await OrderedTitles(options => options.OrderByDescending(x => x.Priority)), Is.EqualTo(new[] { "t4", "t3", "t2", "t1" }));
+        Assert.That(await OrderedTitles(options => options.OrderByDescending(x => x.Priority).Skip(1).Take(2)), Is.EqualTo(new[] { "t3", "t2" }),
+            "the window is carried across the parts");
+        Assert.That(await OrderedTitles(options => options.OrderBy(x => x.Escalation)), Is.EqualTo(new[] { "t1", "t2", "t4", "t3" }),
+            "a nullable member: its nulls first, as Cosmos DB orders them");
+        Assert.That(await OrderedTitles(options => options.OrderBy(x => x.Escalation, NullsOrder.Last)), Is.EqualTo(new[] { "t2", "t4", "t3", "t1" }));
+
+        using var scope = NewScope();
+        var repo = RepoOf<RelTicket>(scope);
+        var partition = Partition;
+        var later = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.GetAllAsync(new QueryOptions<RelTicket>().Where(x => x.Category == partition).OrderBy(x => x.Title).ThenBy(x => x.Priority)));
+        Assert.That(later!.Message, Does.Contain("labels"), "a later sort cannot split the read");
+        Assert.That(await repo.CountAsync(new QueryOptions<RelTicket>().Where(x => x.Category == partition && x.Priority >= RelPriority.Medium)),
+            Is.EqualTo(3L));
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Priority >= RelPriority.High, x => new RelTicket { Alias = "hot" }),
+            Is.EqualTo(2L));
+        Assert.That(await TicketTitles(x => x.Alias == "hot"), Is.EqualTo(new[] { "t3", "t4" }));
+    }
+
+    [Test]
+    public async Task A_negated_text_equality_keeps_the_rows_whose_member_is_null()
+    {
+        await SeedTicketsAsync();
+
+        Assert.That(await TicketTitles(x => string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t1", "t4" }));
+        Assert.That(await TicketTitles(x => !string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !x.Alias!.Equals("alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !"alpha".Equals(x.Alias, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() != "alpha"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
+    }
+
+    [Test]
+    public async Task A_set_based_update_matching_text_without_regard_to_case_patches_and_counts_its_matches()
+    {
+        await Seed(
+            new RelCompany { Name = "Acme Corp", Rank = 1 },
+            new RelCompany { Name = "ACME Labs", Rank = 2 },
+            new RelCompany { Name = "Globex", Rank = 3 });
+
+        using var scope = NewScope();
+        var repo = RepoOf<RelCompany>(scope);
+        var partition = Partition;
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Name.Contains("acme", StringComparison.OrdinalIgnoreCase),
+            x => new RelCompany { Rank = 10 }), Is.EqualTo(2L), "the patch's condition would answer 412 and patch nothing");
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Name.StartsWith("GLOB", StringComparison.OrdinalIgnoreCase),
+            x => new RelCompany { Rank = 30 }), Is.EqualTo(1L));
+        Assert.That(await repo.UpdateManyAsync(x => x.Category == partition && x.Name.ToLower() == "acme labs",
+            x => new RelCompany { Rank = x.Rank + 1 }), Is.EqualTo(1L));
+        Assert.That((await repo.GetFilteredAsync(x => x.Category == partition)).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Name, StringComparer.Ordinal),
+            Is.EqualTo(new[] { ("ACME Labs", 11), ("Acme Corp", 10), ("Globex", 30) }));
+    }
+
+    [Test]
+    public void A_relation_condition_in_a_delegate_is_refused()
+    {
+        using var scope = NewScope();
+        Func<RelMention, bool> live = m => m.DeletedAt == null;
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => RepoOf<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live)));
+        Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
     }
 }

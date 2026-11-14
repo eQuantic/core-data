@@ -18,6 +18,7 @@ namespace eQuantic.Core.Data.MongoDb;
 internal static class MongoStages
 {
     private const string NullFlag = "__eq_null";
+    private const string RankField = "__eq_rank";
 
     /// <summary>The stored field a member selector names (<c>x =&gt; x.Position</c> → <c>"Position"</c>, or its rename).</summary>
     public static string FieldName<T>(LambdaExpression selector) =>
@@ -42,9 +43,21 @@ internal static class MongoStages
         sorts.All(sort => ReadShapes.IsNullsSmallest(sort.Nulls, sort.Descending));
 
     /// <summary>
+    ///     Whether a plain LINQ order says what the sorts mean: nulls where MongoDB puts them, and no key an enum stored as
+    ///     its labels, which the server would order by the labels' text where C# orders the members' values.
+    /// </summary>
+    public static bool NativeOrder(IReadOnlyList<MemorySort> sorts) =>
+        NaturalNulls(sorts) && !sorts.Any(sort => SortsByLabels(sort.Key));
+
+    /// <summary>Whether a sort key is a member whose enum is stored as its labels.</summary>
+    public static bool SortsByLabels(LambdaExpression key) => MongoModeling.IsLabelEnum(Unconverted(key).Body.Type);
+
+    /// <summary>
     ///     The stages ordering by <paramref name="sorts" />: a plain <c>$sort</c> when nulls go where MongoDB puts them,
     ///     otherwise a flag per such key (<c>{ $in: [{ $type: "$f" }, ["null", "missing"]] }</c>) sorted before the key,
-    ///     then removed.
+    ///     then removed. A key whose enum is stored as its labels sorts by the value of the member each label stands for
+    ///     (<c>{ $switch: { branches: [{ case: { $eq: ["$f", "low"] }, then: 1 }, …], default: null } }</c>), as C# orders
+    ///     the enum, and that rank is removed too.
     /// </summary>
     public static IReadOnlyList<BsonDocument> Sort<T>(IReadOnlyList<MemorySort> sorts)
     {
@@ -54,6 +67,13 @@ internal static class MongoStages
         {
             var sort = sorts[index];
             var field = FieldName<T>(sort.Key);
+            var key = field;
+            if (SortsByLabels(sort.Key))
+            {
+                key = RankField + index;
+                flags.Add(key, Rank(Unconverted(sort.Key).Body.Type, field));
+            }
+
             if (!ReadShapes.IsNullsSmallest(sort.Nulls, sort.Descending))
             {
                 var flag = NullFlag + index;
@@ -68,9 +88,9 @@ internal static class MongoStages
                 order.Add(flag, sort.Nulls == NullsOrder.First ? -1 : 1);
             }
 
-            if (!order.Contains(field))
+            if (!order.Contains(key))
             {
-                order.Add(field, sort.Descending ? -1 : 1);
+                order.Add(key, sort.Descending ? -1 : 1);
             }
         }
 
@@ -86,6 +106,23 @@ internal static class MongoStages
             new BsonDocument("$project", new BsonDocument(flags.Names.Select(name => new BsonElement(name, 0)))),
         ];
     }
+
+    /// <summary>The value of the member each label of <paramref name="enumType" /> stands for, of the field's label; null otherwise.</summary>
+    private static BsonDocument Rank(Type enumType, string field) =>
+        new("$switch", new BsonDocument
+        {
+            {
+                "branches", new BsonArray(EnumOrder.Ranks(Nullable.GetUnderlyingType(enumType) ?? enumType).Select(rank =>
+                    new BsonDocument
+                    {
+                        { "case", new BsonDocument("$eq", new BsonArray { "$" + field, rank.Key }) },
+                        { "then", rank.Value is >= long.MinValue and <= long.MaxValue && decimal.Truncate(rank.Value) == rank.Value
+                            ? new BsonInt64((long)rank.Value)
+                            : new BsonDecimal128(rank.Value) },
+                    }))
+            },
+            { "default", BsonNull.Value },
+        });
 
     /// <summary>Appends raw stages to a LINQ query, keeping its element type (and its serializer).</summary>
     public static IQueryable<T> Append<T>(IQueryable<T> query, IEnumerable<BsonDocument> stages)

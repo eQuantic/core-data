@@ -137,6 +137,51 @@ public sealed class RelCompany : IEntity<Guid>
 }
 
 /// <summary>
+///     A priority stored as its labels, whose three orders all differ: the members' values (low, medium, high, urgent), the
+///     labels' text (a_urgent, high, low, medium) — which a clustering order keeps — and the declaration order.
+/// </summary>
+[Modeling.EnumType]
+public enum RelPriority
+{
+    [Modeling.StoredAs("high")]
+    High = 3,
+
+    [Modeling.StoredAs("low")]
+    Low = 1,
+
+    [Modeling.StoredAs("a_urgent")]
+    Urgent = 4,
+
+    [Modeling.StoredAs("medium")]
+    Medium = 2,
+}
+
+/// <summary>
+///     A ticket of a board, clustered by its priority (stored as labels): an escalation that may be unset, an alias that may
+///     hold no text, and points to add up.
+/// </summary>
+public sealed class RelTicket : IEntity<Guid>
+{
+    public Guid Board { get; set; }
+
+    public RelPriority Priority { get; set; } = RelPriority.Low;
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Title { get; set; } = "";
+
+    public RelPriority? Escalation { get; set; }
+
+    public string? Alias { get; set; }
+
+    public int Points { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>
 ///     The query predicates against a real Cassandra: a filter across a relation resolves the related keys first (a
 ///     relation crosses tables, which CQL cannot join; one read per test, under the read's opt-ins) and reads with
 ///     <c>IN</c> over them — pushed down where the table's key serves it, and the negated forms evaluated client-side
@@ -161,7 +206,8 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
             .PartitionKey(x => x.Directory)
             .ClusteringKey(x => x.Id)
             .Key(x => x.Id)
-            .SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true));
+            .SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true))
+        .Entity<RelTicket>(entity => entity.PartitionKey(x => x.Board).ClusteringKey(x => x.Priority).ClusteringKey(x => x.Id).Key(x => x.Id));
 
     /// <remarks>
     ///     These scenarios write the same rows with plain statements (the seed, a keyed update or delete) and with lightweight
@@ -197,6 +243,7 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
             .For<RelRepo>(table => table.EnsureCollection())
             .For<RelSpace>(table => table.EnsureCollection())
             .For<RelCompany>(table => table.EnsureCollection())
+            .For<RelTicket>(table => table.EnsureCollection())
             .Operations);
     }
 
@@ -510,6 +557,38 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
     }
 
     [Test]
+    public async Task A_match_ignoring_case_pushes_down_only_on_an_index_the_cluster_holds_case_insensitive()
+    {
+        const string directory = "d";
+        await Seed(
+            new RelCompany { Directory = directory, Name = "Acme Corp", Rank = 1 },
+            new RelCompany { Directory = directory, Name = "acme_corp", Rank = 2 },
+            new RelCompany { Directory = directory, Name = "ACME Labs", Rank = 3 });
+
+        // The model declares the index case-insensitive; the cluster holds it case-sensitive, as an index built before the
+        // declaration changed, and not rebuilt, does.
+        var session = _db.Session;
+        var index = session.Execute(new global::Cassandra.SimpleStatement(
+                "SELECT index_name, options FROM system_schema.indexes WHERE keyspace_name = ?", session.Keyspace))
+            .Single(row => row.GetValue<IDictionary<string, string>>("options")["target"] == "name");
+        var table = index.GetValue<string>("index_name")[..^"_name_search".Length];
+        session.Execute($"DROP INDEX {index.GetValue<string>("index_name")}");
+        session.Execute($"CREATE CUSTOM INDEX {index.GetValue<string>("index_name")} ON {table} (name) " +
+                        "USING 'org.apache.cassandra.index.sasi.SASIIndex' WITH OPTIONS = {'mode': 'CONTAINS'}");
+
+        using var scope = NewScope();
+        var repo = Repo<RelCompany>(scope);
+        var clientSide = new QueryOptions<RelCompany>().Where(x => x.Directory == directory).AllowClientEvaluation();
+        Assert.That((await repo.GetFilteredAsync(x => x.Name.Contains("acme", StringComparison.OrdinalIgnoreCase), clientSide))
+                .Select(x => x.Name).OrderBy(x => x, StringComparer.Ordinal),
+            Is.EqualTo(new[] { "ACME Labs", "Acme Corp", "acme_corp" }),
+            "a LIKE on the case-sensitive index would find 'acme_corp' alone; client-side, C# finds every case");
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => repo.GetFilteredAsync(
+            x => x.Name.Contains("acme", StringComparison.OrdinalIgnoreCase), new QueryOptions<RelCompany>().Where(x => x.Directory == directory)));
+        Assert.That(refusal!.Message, Does.Contain("AllowClientEvaluation"), "without the opt-in the match is refused, never pushed down");
+    }
+
+    [Test]
     public async Task An_array_and_a_list_are_tested_with_Contains()
     {
         const string directory = "d";
@@ -539,5 +618,133 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         Assert.That(await repo.DeleteManyAsync(x => directories.Contains(x.Directory) && array.Contains(x.Id)), Is.EqualTo(2L));
         Assert.That((await repo.GetAllAsync()).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Rank),
             Is.EqualTo(new[] { ("listed", 3), ("c4", 4) }));
+    }
+
+    private async Task<Guid> SeedTicketsAsync()
+    {
+        var board = Guid.NewGuid();
+        await Seed(
+            new RelTicket { Board = board, Title = "t1", Priority = RelPriority.Low, Alias = "Alpha", Points = 1 },
+            new RelTicket { Board = board, Title = "t2", Priority = RelPriority.Medium, Escalation = RelPriority.Low, Points = 2 },
+            new RelTicket { Board = board, Title = "t3", Priority = RelPriority.High, Escalation = RelPriority.Urgent, Alias = "beta", Points = 3 },
+            new RelTicket { Board = board, Title = "t4", Priority = RelPriority.Urgent, Escalation = RelPriority.Medium, Alias = "ALPHA", Points = 4 });
+        return board;
+    }
+
+    /// <summary>The tickets of a board a filter keeps, behind the opt-ins (an escalation or an alias test filters outside the key).</summary>
+    private async Task<string[]> TicketTitles(Guid board, System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter)
+    {
+        using var scope = NewScope();
+        var options = new QueryOptions<RelTicket>().Where(x => x.Board == board).AllowFiltering().AllowClientEvaluation();
+        return (await Repo<RelTicket>(scope).GetFilteredAsync(filter, options)).Select(x => x.Title).Order().ToArray();
+    }
+
+    private async Task<string[]> OrderedTitles(Guid board, Func<QueryOptions<RelTicket>, QueryOptions<RelTicket>> order)
+    {
+        using var scope = NewScope();
+        return (await Repo<RelTicket>(scope).GetAllAsync(order(new QueryOptions<RelTicket>().Where(x => x.Board == board).AllowClientEvaluation())))
+            .Select(x => x.Title).ToArray();
+    }
+
+    [Test]
+    public async Task Labels_compare_and_order_by_their_members_values()
+    {
+        var board = await SeedTicketsAsync();
+        var medium = RelPriority.Medium;
+
+        // On the clustering key, an ordered comparison is an IN over the labels whose member satisfies it, pushed down.
+        using (var scope = NewScope())
+        {
+            var plan = ((IExplainableRepository<RelTicket>)Repo<RelTicket>(scope))
+                .Explain(new QueryOptions<RelTicket>().Where(x => x.Board == board && x.Priority >= RelPriority.Medium));
+            Assert.That(plan.Statement, Does.Contain("Priority IN (?, ?, ?)").IgnoreCase, plan.Statement);
+            Assert.That(plan.Residual, Is.Null, "nothing runs client-side");
+        }
+
+        Assert.That(await TicketTitles(board, x => x.Priority >= RelPriority.Medium), Is.EqualTo(new[] { "t2", "t3", "t4" }));
+        Assert.That(await TicketTitles(board, x => x.Priority < RelPriority.High), Is.EqualTo(new[] { "t1", "t2" }));
+        Assert.That(await TicketTitles(board, x => medium < x.Priority), Is.EqualTo(new[] { "t3", "t4" }), "a captured value, on the left");
+        Assert.That(await TicketTitles(board, x => x.Priority == RelPriority.Medium), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(board, x => x.Priority != RelPriority.Medium), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(board, x => x.Priority > RelPriority.Urgent), Is.Empty, "no member is above the highest");
+        Assert.That(await TicketTitles(board, x => x.Escalation >= RelPriority.Medium), Is.EqualTo(new[] { "t3", "t4" }),
+            "a regular column: client-side, where C# decides; null is not >= anything");
+        Assert.That(await TicketTitles(board, x => !(x.Escalation >= RelPriority.Medium)), Is.EqualTo(new[] { "t1", "t2" }),
+            "under a negation null passes, as in C#");
+
+        // The clustering order keeps the labels' text: an order by the member sorts client-side, behind the opt-in.
+        Assert.That(await OrderedTitles(board, options => options.OrderBy(x => x.Priority)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+        Assert.That(await OrderedTitles(board, options => options.OrderByDescending(x => x.Priority)), Is.EqualTo(new[] { "t4", "t3", "t2", "t1" }));
+        Assert.That(await OrderedTitles(board, options => options.OrderByDescending(x => x.Priority).Take(2)), Is.EqualTo(new[] { "t4", "t3" }));
+        Assert.That(await OrderedTitles(board, options => options.OrderBy(x => x.Escalation, NullsOrder.First)),
+            Is.EqualTo(new[] { "t1", "t2", "t4", "t3" }));
+        using (var scope = NewScope())
+        {
+            var refusal = Assert.ThrowsAsync<NotSupportedException>(() => Repo<RelTicket>(scope)
+                .GetAllAsync(new QueryOptions<RelTicket>().Where(x => x.Board == board).OrderBy(x => x.Priority)));
+            Assert.That(refusal!.Message, Does.Contain("labels").And.Contain(".AllowClientEvaluation()"));
+        }
+
+        using var write = NewScope();
+        Assert.That(await Repo<RelTicket>(write).CountAsync(new QueryOptions<RelTicket>().Where(x => x.Board == board && x.Priority >= RelPriority.Medium)),
+            Is.EqualTo(3L));
+        Assert.That(await Repo<RelTicket>(write).UpdateManyAsync(x => x.Board == board && x.Priority >= RelPriority.High, x => new RelTicket { Alias = "hot" }),
+            Is.EqualTo(2L));
+        Assert.That(await TicketTitles(board, x => x.Alias == "hot"), Is.EqualTo(new[] { "t3", "t4" }));
+    }
+
+    [Test]
+    public async Task A_negated_text_equality_keeps_the_rows_whose_member_is_null()
+    {
+        var board = await SeedTicketsAsync();
+
+        Assert.That(await TicketTitles(board, x => string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t1", "t4" }));
+        Assert.That(await TicketTitles(board, x => !string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(board, x => !x.Alias!.Equals("alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(board, x => !"alpha".Equals(x.Alias, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower() != "alpha"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(board, x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
+    }
+
+    [Test]
+    public void A_relation_condition_in_a_delegate_is_refused()
+    {
+        using var scope = NewScope();
+        var space = Guid.NewGuid();
+        Func<RelMention, bool> live = m => m.DeletedAt == null;
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => Repo<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live),
+            new QueryOptions<RelItem>().Where(x => x.Space == space).AllowFiltering().AllowClientEvaluation()));
+        Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
+    }
+
+    [Test]
+    public async Task A_count_a_sum_a_minimum_and_a_maximum_over_an_IN_longer_than_a_statement_binds_run_in_chunks()
+    {
+        var board = await SeedTicketsAsync();
+        var other = Guid.NewGuid();
+        await Seed(new RelTicket { Board = other, Title = "o1", Priority = RelPriority.High, Points = 10 });
+
+        // More boards than one statement binds (65,535), the two real ones among them, one of them twice.
+        var boards = Enumerable.Range(0, 70_000).Select(_ => Guid.NewGuid()).ToList();
+        boards[12_345] = board;
+        boards[69_999] = other;
+        boards.Add(board);
+        var options = new QueryOptions<RelTicket>().Where(x => boards.Contains(x.Board));
+
+        using var scope = NewScope();
+        var repo = Repo<RelTicket>(scope);
+        Assert.That(await repo.CountAsync(options), Is.EqualTo(5L), "each row counted once, a key listed twice included");
+        Assert.That(await repo.SumAsync(x => x.Points, options), Is.EqualTo(20));
+        var aggregates = (IAggregateReadRepository<RelTicket>)repo;
+        Assert.That(await aggregates.MinAsync(x => x.Points, options), Is.EqualTo(1));
+        Assert.That(await aggregates.MaxAsync(x => x.Points, options), Is.EqualTo(10));
+
+        var average = Assert.ThrowsAsync<NotSupportedException>(() => aggregates.AverageAsync(x => x.Points, options));
+        Assert.That(average!.Message, Does.Contain("65,535").And.Contain("AverageAsync"));
+        var group = Assert.ThrowsAsync<NotSupportedException>(() => ((IGroupedReadRepository<RelTicket>)repo)
+            .GroupByAsync(x => x.Board, g => new { Board = g.Key, Points = g.Sum(x => x.Points) }, null, options));
+        Assert.That(group!.Message, Does.Contain("65,535").And.Contain("GroupByAsync"));
+        var page = Assert.ThrowsAsync<NotSupportedException>(() => ((IContinuationReadRepository<RelTicket>)repo).GetPageAsync(10, null, options));
+        Assert.That(page!.Message, Does.Contain("65,535").And.Contain("GetPageAsync"));
     }
 }
