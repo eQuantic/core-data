@@ -23,7 +23,9 @@ await uow.BulkInsertAsync(rows);        // rows: IEnumerable<Product>
 
 It runs **immediately** (like the other set-based writes), joins an open explicit transaction when
 there is one — so a rollback takes the loaded rows with it — and applies the
-[lifecycle stamps](lifecycle.md) exactly as a staged insert would.
+[lifecycle stamps](lifecycle.md) exactly as a staged insert would. A load that a taken key refuses
+writes none of its rows, inside an explicit transaction too: MySQL's loader, which skips a duplicate
+and loads the rest, runs behind a savepoint there and is rolled back to it.
 
 ### The honest limits
 

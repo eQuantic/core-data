@@ -132,7 +132,7 @@ catch (DuplicateKeyException taken) when (taken.ConstraintName == "ix_users_emai
 |---|---|---|
 | PostgreSQL | SQLSTATE `23505` | the constraint or index |
 | SQL Server | errors 2627 and 2601 | parsed from the message |
-| MySQL / MariaDB | error 1062 (a bulk load's duplicate-key warning too: the load is rolled back) | parsed from the message (MySQL's `table.` prefix dropped) |
+| MySQL / MariaDB | error 1062 (a bulk load's duplicate-key warning too: the load is rolled back whole, to a savepoint inside an explicit transaction) | parsed from the message (MySQL's `table.` prefix dropped) |
 | MongoDB | E11000, from a write, a bulk write or a command | the index |
 | Cosmos DB | 409 on a create (a taken id or unique key), in a transactional batch too | none — Cosmos DB does not say |
 | Cassandra | an `INSERT … IF NOT EXISTS` that did not apply | none |
@@ -157,7 +157,7 @@ filter — and every row it updated comes back as stored after it, store-generat
 |---|---|---|
 | PostgreSQL | `UPDATE … RETURNING` | yes |
 | SQL Server | `UPDATE … OUTPUT INSERTED` | yes |
-| MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update) | yes |
+| MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update); the keys spread over as many statements as the dialect's parameter limit needs | yes |
 | MongoDB | the matching ids, then `findOneAndUpdate` per document (filtered on its id *and* the filter), returning it after the update | per document; the set is one unit only inside an explicit transaction |
 | Cosmos DB | a patch per matching item under the filter (`FilterPredicate`), which answers with the item; an update of more than ten paths patches the item several times in one transactional batch, the first patch under the filter | per item |
 | Cassandra | a lightweight transaction per row: `UPDATE … IF EXISTS` (or `IF` the filter's other members), and `IF column = value read` for a value computed from the row; the row returned is the row read with the update's values | per row |

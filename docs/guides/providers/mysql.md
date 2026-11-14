@@ -51,7 +51,9 @@ transaction, discarding only error 1062; `UpdateAndGetAsync` locks the matching 
 reads them back in one transaction (neither engine has `RETURNING` for an `UPDATE`). The data source
 always reports the rows a statement **found** (`UseAffectedRows=false`, whatever the connection string
 says), so `UpdateManyAsync` counts the rows it matched. Error 1062 — and a bulk load's duplicate-key
-warning, which `LOAD DATA LOCAL` would otherwise skip silently — is `DuplicateKeyException`. See
+warning, which `LOAD DATA LOCAL` would otherwise skip silently — is `DuplicateKeyException`, and the
+load is undone whole: its own transaction rolled back, or, inside the caller's, a savepoint the engine
+set before it. See
 [Upserts and write outcomes](../writing/upserts.md).
 
 ## Honest refusals you may meet

@@ -635,6 +635,68 @@ internal static class WriteOutcomeScenarios
         }
     }
 
+    /// <summary>
+    ///     A bulk load of a taken key inside an explicit transaction fails, and none of its rows is written when the
+    ///     transaction commits: the load is whole or not at all there too.
+    /// </summary>
+    public static async Task BulkInsertOfTakenKeyInsideATransaction(Func<IServiceScope> newScope)
+    {
+        var stored = new Job { Status = "queued" };
+        var status = "fresh-" + Guid.NewGuid().ToString("N")[..8];
+        using (var scope = newScope())
+        {
+            await Repo<Job>(scope).AddAsync(stored);
+            await Commit(scope);
+
+            var unitOfWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(scope);
+            await unitOfWork.BeginTransactionAsync();
+            Assert.ThrowsAsync<DuplicateKeyException>(() => unitOfWork.BulkInsertAsync(
+            [
+                new Job { Status = status }, new Job { Status = status }, new Job { Id = stored.Id, Status = "again" },
+                new Job { Status = status },
+            ]));
+            await unitOfWork.CommitTransactionAsync();
+        }
+
+        using var check = newScope();
+        Assert.That(await Repo<Job>(check).GetFilteredAsync(x => x.Status == status), Is.Empty,
+            "the rows loaded before the taken key are not written");
+        Assert.That((await Repo<Job>(check).GetAsync(stored.Id))!.Status, Is.EqualTo("queued"));
+    }
+
+    /// <summary>
+    ///     A returning update and a set-based write by locked keys over more rows than one statement binds: every row is
+    ///     written and handed back, and no statement binds more than the dialect's limit.
+    /// </summary>
+    public static async Task KeysFirstWritesPastTheParameterLimit(Func<IServiceScope> newScope, CommandCapture commands,
+        int maxParameters)
+    {
+        var count = maxParameters + 1;
+        var status = "many-" + Guid.NewGuid().ToString("N")[..8];
+        var root = new RelNode { Name = status };
+        using var scope = newScope();
+        var unitOfWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(scope);
+        await unitOfWork.BulkInsertAsync(Enumerable.Range(0, count).Select(_ => new Job { Status = status }));
+        await unitOfWork.BulkInsertAsync(Enumerable.Range(0, count).Select(_ => new RelNode { Name = status, ParentId = root.Id })
+            .Prepend(root));
+        commands.Clear();
+
+        var returned = await Resolve<IReturningUpdateRepository<Job, Guid>>(scope)
+            .UpdateAndGetAsync(x => x.Status == status, x => new Job { Owner = "chunked" });
+        Assert.That(returned, Has.Count.EqualTo(count), "every row the update wrote comes back");
+        Assert.That(returned.Select(x => x.Owner), Is.All.EqualTo("chunked"));
+
+        var leaves = await Repo<RelNode>(scope).UpdateManyAsync(x => x.Name == status && !x.Children!.Any(), x => new RelNode { Rank = 7 });
+        Assert.That(leaves, Is.EqualTo(count), "a write by locked keys writes every row it locked");
+        Assert.That((await Repo<RelNode>(scope).GetFilteredAsync(x => x.Name == status && x.Rank == 7)).Count(), Is.EqualTo(count));
+
+        var widest = commands.Statements
+            .Select(statement => System.Text.RegularExpressions.Regex.Matches(statement, @"@p(\d+)\b")
+                .Select(match => int.Parse(match.Groups[1].Value) + 1).DefaultIfEmpty(0).Max())
+            .Max();
+        Assert.That(widest, Is.LessThanOrEqualTo(maxParameters), "no statement binds more than the dialect's limit");
+    }
+
     /// <summary>A bulk load of a taken key fails with DuplicateKeyException.</summary>
     public static async Task BulkInsertOfTakenKeyFails(Func<IServiceScope> newScope)
     {

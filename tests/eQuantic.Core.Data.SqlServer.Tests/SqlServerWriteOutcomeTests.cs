@@ -84,4 +84,8 @@ public sealed class SqlServerWriteOutcomeTests : SqlServerIntegrationTest
     [Test]
     public Task Two_concurrent_upserts_in_explicit_transactions_both_succeed() =>
         WriteOutcomeScenarios.UpsertsInExplicitTransactions(NewScope);
+
+    [Test]
+    public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
+        WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
 }

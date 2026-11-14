@@ -131,6 +131,15 @@ public sealed class MariaDbTests
     public Task Two_concurrent_upserts_in_explicit_transactions_both_succeed() =>
         WriteOutcomeScenarios.UpsertsInExplicitTransactions(NewScope);
 
+    [Test]
+    public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
+        WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
+
+    [Test]
+    public Task Keys_first_writes_past_the_parameter_limit_bind_within_it() =>
+        WriteOutcomeScenarios.KeysFirstWritesPastTheParameterLimit(NewScope, _commands,
+            _scope!.ServiceProvider.GetRequiredService<eQuantic.Core.Data.Relational.SqlDialect>().MaxParameters);
+
     // ---------------------------------------------------------------- query predicates (the same scenarios as MySQL)
 
     [Test]

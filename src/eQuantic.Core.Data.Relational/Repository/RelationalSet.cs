@@ -195,19 +195,19 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
                 return [];
             }
 
-            var updateParameters = new List<object?>();
-            var updateSet = SetList(updateExpression, updateParameters, existingRow: null);
-            var byKeys = KeysAndTheRest(keys, filter, updateParameters);
-            await using (var command = await _unitOfWork.CommandAsync(
-                             $"UPDATE {Table} SET {updateSet} WHERE {byKeys}", updateParameters, cancellationToken).ConfigureAwait(false))
+            foreach (var (update, updateParameters) in ByKeys(keys, filter,
+                         setParameters => $"UPDATE {Table} SET {SetList(updateExpression, setParameters, existingRow: null)}"))
             {
-                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                await ExecuteAsync(update, updateParameters, cancellationToken).ConfigureAwait(false);
             }
 
-            var readParameters = new List<object?>();
-            var readWhere = KeysWhere(keys, readParameters);
-            return await ReadAsync($"SELECT {ColumnList} FROM {Table} WHERE {readWhere}", readParameters, cancellationToken)
-                .ConfigureAwait(false);
+            var rows = new List<TEntity>(keys.Count);
+            foreach (var (read, readParameters) in ByKeys(keys, null, _ => $"SELECT {ColumnList} FROM {Table}"))
+            {
+                rows.AddRange(await ReadAsync(read, readParameters, cancellationToken).ConfigureAwait(false));
+            }
+
+            return rows;
         }, cancellationToken)).ConfigureAwait(false);
     }
 
@@ -637,15 +637,13 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         _unitOfWork.AtomicallyAsync(async () =>
         {
             var keys = await LockedKeysAsync(filter, cancellationToken).ConfigureAwait(false);
-            if (keys.Count == 0)
+            long written = 0;
+            foreach (var (sql, parameters) in ByKeys(keys, filter, statement))
             {
-                return 0L;
+                written += await ExecuteAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
             }
 
-            var parameters = new List<object?>();
-            var sql = statement(parameters);
-            return await ExecuteAsync($"{sql} WHERE {KeysAndTheRest(keys, filter, parameters)}", parameters, cancellationToken)
-                .ConfigureAwait(false);
+            return written;
         }, cancellationToken);
 
     /// <summary>The keys of the rows the filter (and the global filter) matches, locked until the transaction ends.</summary>
@@ -669,16 +667,48 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     }
 
     /// <summary>
-    ///     The rows by their keys, and the filter's conjuncts that do not read the written table (the ones that do were
-    ///     evaluated by the locking read, and the store would refuse them in the write).
+    ///     The statements of a write (or a read) by keys, each binding at most the dialect's parameter limit: the
+    ///     statement's own values, rendered once and bound in each, then a share of the keys, then the filter's conjuncts
+    ///     that do not read the written table (the ones that do were evaluated by the locking read, and the store would
+    ///     refuse them in the write).
     /// </summary>
-    private string KeysAndTheRest(IReadOnlyList<object?[]> keys, Expression<Func<TEntity, bool>> filter, List<object?> parameters)
+    /// <param name="keys">The keys of the rows, read from them.</param>
+    /// <param name="filter">The write's filter, or <c>null</c> for the keys alone.</param>
+    /// <param name="statement">The statement before its <c>WHERE</c>, binding its own values first.</param>
+    private IEnumerable<(string Sql, List<object?> Parameters)> ByKeys(IReadOnlyList<object?[]> keys,
+        Expression<Func<TEntity, bool>>? filter, Func<List<object?>, string> statement)
     {
-        var byKeys = KeysWhere(keys, parameters);
+        var head = new List<object?>();
+        var sql = statement(head);
+        var probe = new List<object?>(head);
+        RestOf(filter, probe);
+        var perStatement = Math.Max(1, (_dialect.MaxParameters - probe.Count) / _configuration.Keys.Count);
+
+        foreach (var chunk in keys.Chunk(perStatement))
+        {
+            var parameters = new List<object?>(head);
+            var where = KeysWhere(chunk, parameters);
+            if (RestOf(filter, parameters) is { } rest)
+            {
+                where += " AND " + rest;
+            }
+
+            yield return ($"{sql} WHERE {where}", parameters);
+        }
+    }
+
+    /// <summary>The filter's conjuncts that do not read the written table, rendered; <c>null</c> when none is left.</summary>
+    private string? RestOf(Expression<Func<TEntity, bool>>? filter, List<object?> parameters)
+    {
+        if (filter is null)
+        {
+            return null;
+        }
+
         var relations = _unitOfWork.Relations;
         return relations.Without(filter, _unitOfWork.GlobalFilter<TEntity>(), typeof(TEntity)) is Expression<Func<TEntity, bool>> rest
-            ? $"{byKeys} AND {RelationalSql.Where(_dialect, _configuration, rest, null, parameters, relations)}"
-            : byKeys;
+            ? RelationalSql.Where(_dialect, _configuration, rest, null, parameters, relations)
+            : null;
     }
 
     /// <summary>The predicate matching rows by the key values read from them.</summary>
