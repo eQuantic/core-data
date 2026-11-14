@@ -87,8 +87,10 @@ acknowledging a full-table fetch takes two signatures, deliberately.
   satisfies it (a lightweight transaction's condition too); elsewhere it runs client-side, behind
   `.AllowClientEvaluation()`. A clustering order keeps the labels' text, so a read **ordered by such a
   member** — a clustering key included — sorts client-side by the members' values, behind
-  `.AllowClientEvaluation()`. Any other enum is stored as its number, in the CQL type of its underlying
-  integral type.
+  `.AllowClientEvaluation()`. `MinAsync`/`MaxAsync` read the column under the read's gates and pick by
+  value (CQL's `MIN`/`MAX` would compare the text); a sum, an average and an aggregate of such a member in
+  a group are refused; a group's `HAVING` on such a key compares by value. Any other enum is stored as its
+  number, in the CQL type of its underlying integral type.
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are `text` columns holding their
   JSON; they come back equal, and `null` stays `null`.
 - **Sequence** — Cassandra counters cannot be read atomically after an increment, so a sequence is a

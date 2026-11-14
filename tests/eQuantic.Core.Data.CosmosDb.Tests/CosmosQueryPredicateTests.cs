@@ -504,4 +504,28 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
         var refusal = Assert.ThrowsAsync<NotSupportedException>(() => RepoOf<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live)));
         Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
     }
+
+    [Test]
+    public async Task A_minimum_and_a_maximum_of_labels_answer_by_value()
+    {
+        await SeedTicketsAsync();
+        using var scope = NewScope();
+        var repo = RepoOf<RelTicket>(scope);
+        var aggregates = (IAggregateReadRepository<RelTicket>)repo;
+        var partition = Partition;
+        QueryOptions<RelTicket> Scoped() => new QueryOptions<RelTicket>().Where(x => x.Category == partition);
+
+        Assert.That(await aggregates.MinAsync(x => x.Priority, Scoped()), Is.EqualTo(RelPriority.Low), "not 'a_urgent', the smallest label");
+        Assert.That(await aggregates.MaxAsync(x => x.Priority, Scoped()), Is.EqualTo(RelPriority.Urgent), "not 'medium', the largest label");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation, Scoped()), Is.EqualTo(RelPriority.Low), "a nullable member: nulls are skipped");
+        Assert.That(await aggregates.MaxAsync(x => x.Escalation, Scoped()), Is.EqualTo(RelPriority.Urgent));
+        Assert.That(await aggregates.MaxAsync(x => x.Priority, new QueryOptions<RelTicket>().Where(x => x.Category == partition && x.Priority < RelPriority.High)),
+            Is.EqualTo(RelPriority.Medium), "under a filter");
+        Assert.That(await aggregates.MaxAsync(x => (int)x.Priority, Scoped()), Is.EqualTo(4), "a converted member answers the member's number");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation, new QueryOptions<RelTicket>().Where(x => x.Category == partition && x.Title == "t1")),
+            Is.Null, "no value to take");
+
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => repo.SumAsync(x => (int)x.Priority, Scoped()))!.Message, Does.Contain("labels"));
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => aggregates.AverageAsync(x => x.Priority, Scoped()))!.Message, Does.Contain("labels"));
+    }
 }

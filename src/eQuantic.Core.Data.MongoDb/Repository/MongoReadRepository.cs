@@ -122,34 +122,34 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         !Whole(options, "All", query => query.Where(Negate(NotNull(predicate)))).Any();
 
     /// <inheritdoc />
-    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public int Sum(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public int? Sum(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public long Sum(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public long? Sum(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public double Sum(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public double? Sum(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public float Sum(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public float? Sum(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public decimal Sum(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     /// <inheritdoc />
-    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(NotNull(selector));
+    public decimal? Sum(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null) => Whole(options, "Sum").Sum(Summed(selector, "Sum"));
 
     // ---------------------------------------------------------------- asynchronous reads
 
@@ -232,61 +232,108 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(Summed(selector, "SumAsync"), cancellationToken).ConfigureAwait(false);
 
     // ---------------------------------------------------------------- min / max / average
 
     /// <inheritdoc />
-    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$min</c>) on the server; an empty match yields <c>default</c>.</remarks>
+    /// <remarks>
+    ///     Runs as a single-group aggregation (<c>$group</c> + <c>$min</c>) on the server; an empty match yields <c>default</c>.
+    ///     A member stored as an enum's labels reads the distinct members present (at most the enum's members) and answers
+    ///     the one with the smallest value, as C# does, never the smallest label.
+    /// </remarks>
     public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await AggregateAsync<TResult>(NotNull(selector), nameof(Enumerable.Min), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
+        EnumOrder.LabelEnumOf(NotNull(selector), MongoModeling.IsLabelEnum) is { } labels
+            ? EnumOrder.FromValue<TResult>(labels, EnumOrder.Extreme(await MembersPresentAsync(selector, options, cancellationToken).ConfigureAwait(false), largest: false))
+            : await AggregateAsync<TResult>(selector, nameof(Enumerable.Min), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$max</c>) on the server; an empty match yields <c>default</c>.</remarks>
+    /// <remarks>
+    ///     Runs as a single-group aggregation (<c>$group</c> + <c>$max</c>) on the server; an empty match yields <c>default</c>.
+    ///     A member stored as an enum's labels answers the member with the largest value, as <see cref="MinAsync{TResult}" /> does.
+    /// </remarks>
     public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await AggregateAsync<TResult>(NotNull(selector), nameof(Enumerable.Max), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
+        EnumOrder.LabelEnumOf(NotNull(selector), MongoModeling.IsLabelEnum) is { } labels
+            ? EnumOrder.FromValue<TResult>(labels, EnumOrder.Extreme(await MembersPresentAsync(selector, options, cancellationToken).ConfigureAwait(false), largest: true))
+            : await AggregateAsync<TResult>(selector, nameof(Enumerable.Max), [typeof(TEntity), typeof(TResult)], options, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The distinct members a selector of a member stored as labels reads under the options (at most the enum's members).</summary>
+    private async Task<IReadOnlyList<object?>> MembersPresentAsync(LambdaExpression selector, QueryOptions<TEntity>? options,
+        CancellationToken cancellationToken)
+    {
+        var body = selector.Body;
+        while (body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conversion)
+        {
+            body = conversion.Operand;
+        }
+
+        var query = await WholeAsync(options, "an aggregate", cancellationToken).ConfigureAwait(false);
+        return await ((Task<IReadOnlyList<object?>>)typeof(MongoReadRepository<TEntity, TKey>)
+                .GetMethod(nameof(DistinctOfAsync), BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(body.Type)
+                .Invoke(null, [query, Expression.Lambda(body, selector.Parameters), cancellationToken])!)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<IReadOnlyList<object?>> DistinctOfAsync<TMember>(IQueryable<TEntity> query, LambdaExpression member,
+        CancellationToken cancellationToken) =>
+        (await query.Select((Expression<Func<TEntity, TMember>>)member).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false))
+        .Cast<object?>().ToList();
+
+    /// <summary>A sum's selector, refused over a member stored as an enum's labels (a label has no arithmetic).</summary>
+    private static Expression<Func<TEntity, TSum>> Summed<TSum>(Expression<Func<TEntity, TSum>> selector, string aggregate) =>
+        EnumOrder.LabelEnumOf(NotNull(selector), MongoModeling.IsLabelEnum) is { } labels
+            ? throw EnumOrder.ArithmeticRefusal(labels, aggregate)
+            : selector;
 
     /// <inheritdoc />
-    /// <remarks>Runs as a single-group aggregation (<c>$group</c> + <c>$avg</c>), the member converted to double on the server; an empty match yields <c>0</c>.</remarks>
+    /// <remarks>
+    ///     Runs as a single-group aggregation (<c>$group</c> + <c>$avg</c>), the member converted to double on the server; an
+    ///     empty match yields <c>0</c>. A member stored as an enum's labels is refused: a label has no arithmetic.
+    /// </remarks>
     public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
-        NotNull(selector);
+        if (EnumOrder.LabelEnumOf(NotNull(selector), MongoModeling.IsLabelEnum) is { } labels)
+        {
+            throw EnumOrder.ArithmeticRefusal(labels, "AverageAsync");
+        }
+
         var cast = Expression.Lambda<Func<TEntity, double>>(
             Expression.Convert(selector.Body, typeof(double)), selector.Parameters);
         return await AggregateAsync<double>(cast, nameof(Enumerable.Average), [typeof(TEntity)], options, cancellationToken).ConfigureAwait(false);
@@ -332,15 +379,16 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
         // Interpret first so the contract is uniform across providers: the same shapes, the same rejections.
         var group = GroupInterpreter.Interpret(NotNull(keySelector), NotNull(resultSelector));
-        if (having is not null)
-        {
-            GroupInterpreter.InterpretHaving(having, group.Key);
-        }
+        var predicate = having is null ? null : GroupInterpreter.InterpretHaving(having, group.Key);
+        EnumOrder.RefuseLabelAggregates(group, predicate, member =>
+            MemberType(member) is { } type && MongoModeling.IsLabelEnum(type) ? Nullable.GetUnderlyingType(type) ?? type : null);
 
         var grouped = (await WholeAsync(options, "GroupByAsync", cancellationToken).ConfigureAwait(false)).GroupBy(keySelector);
         if (having is not null)
         {
-            grouped = grouped.Where(having);
+            // A key holding an enum's labels compares by the members' values, as C# does: an $in over the labels whose
+            // member satisfies the comparison, never the labels' text.
+            grouped = grouped.Where(EnumOrder.RewriteComparisons(having, MongoModeling.IsLabelEnum));
         }
 
         return await grouped.Select(resultSelector).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -708,6 +756,28 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     private static Expression<Func<TEntity, bool>> Negate(Expression<Func<TEntity, bool>> predicate) =>
         Expression.Lambda<Func<TEntity, bool>>(Expression.Not(predicate.Body), predicate.Parameters);
+
+    /// <summary>The type of a member path of the entity (<c>Box.Name</c>), or <c>null</c> when there is none.</summary>
+    private static Type? MemberType(string path)
+    {
+        var type = typeof(TEntity);
+        foreach (var segment in path.Split('.'))
+        {
+            var member = (MemberInfo?)type.GetProperty(segment) ?? type.GetField(segment);
+            type = member switch
+            {
+                PropertyInfo property => property.PropertyType,
+                FieldInfo field => field.FieldType,
+                _ => null!,
+            };
+            if (type is null)
+            {
+                return null;
+            }
+        }
+
+        return type;
+    }
 
     private static T NotNull<T>(T value) where T : class =>
         value ?? throw new ArgumentNullException(typeof(T).Name);

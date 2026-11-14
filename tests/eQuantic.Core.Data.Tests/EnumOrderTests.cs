@@ -92,4 +92,36 @@ public sealed class EnumOrderTests
 
         Assert.That(EnumOrder.RewriteComparisons(predicate, _ => false), Is.SameAs(predicate));
     }
+    [Test]
+    public void A_selector_of_a_member_stored_as_labels_names_its_enum_converted_or_not()
+    {
+        Assert.That(EnumOrder.LabelEnumOf((Expression<Func<Ticket, Priority>>)(x => x.Priority), type => type == typeof(Priority)),
+            Is.EqualTo(typeof(Priority)));
+        Assert.That(EnumOrder.LabelEnumOf((Expression<Func<Ticket, int>>)(x => (int)x.Priority), type => type == typeof(Priority)),
+            Is.EqualTo(typeof(Priority)));
+        Assert.That(EnumOrder.LabelEnumOf((Expression<Func<Ticket, Priority?>>)(x => x.Escalation), type => type == typeof(Priority)),
+            Is.EqualTo(typeof(Priority)));
+        Assert.That(EnumOrder.LabelEnumOf((Expression<Func<Ticket, Priority>>)(x => x.Priority), _ => false), Is.Null);
+    }
+
+    [Test]
+    public void A_minimum_or_a_maximum_answers_the_member_or_its_number_by_value()
+    {
+        object?[] present = [Priority.High, null, Priority.Low, Priority.Urgent];
+
+        Assert.That(EnumOrder.FromValue<Priority>(typeof(Priority), EnumOrder.Extreme(present, largest: false)), Is.EqualTo(Priority.Low));
+        Assert.That(EnumOrder.FromValue<Priority?>(typeof(Priority), EnumOrder.Extreme(present, largest: true)), Is.EqualTo(Priority.Urgent));
+        Assert.That(EnumOrder.FromValue<int>(typeof(Priority), EnumOrder.Extreme(present, largest: true)), Is.EqualTo(4));
+        Assert.That(EnumOrder.FromValue<Priority?>(typeof(Priority), EnumOrder.Extreme([null], largest: true)), Is.Null);
+    }
+
+    [Test]
+    public void A_group_aggregating_a_member_stored_as_labels_is_refused()
+    {
+        var group = GroupInterpreter.Interpret<Ticket, Priority, object>(x => x.Priority, g => new { g.Key, Top = g.Max(x => x.Escalation) });
+
+        Assert.That(() => EnumOrder.RefuseLabelAggregates(group, null, member => member == "Escalation" ? typeof(Priority) : null),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("labels"));
+        Assert.That(() => EnumOrder.RefuseLabelAggregates(group, null, _ => null), Throws.Nothing);
+    }
 }

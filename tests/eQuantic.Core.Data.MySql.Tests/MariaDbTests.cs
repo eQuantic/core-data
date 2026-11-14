@@ -190,6 +190,12 @@ public sealed class MariaDbTests
     [Test]
     public void A_relation_condition_in_a_delegate_is_refused() => QueryPredicateScenarios.RelationConditionInADelegateIsRefused(NewScope);
 
+    [Test]
+    public Task A_minimum_and_a_maximum_of_labels_answer_by_value() => QueryPredicateScenarios.LabelAggregatesAnswerByValue(NewScope);
+
+    [Test]
+    public Task A_group_keyed_by_labels_has_by_value() => QueryPredicateScenarios.LabelGroupsKeyAndHaveByValue(NewScope);
+
     // ---------------------------------------------------------------- generated keys
 
     [Test]

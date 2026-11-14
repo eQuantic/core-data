@@ -561,4 +561,49 @@ internal static class QueryPredicateScenarios
         var refusal = Assert.ThrowsAsync<NotSupportedException>(() => Repo<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live)));
         Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
     }
+
+    /// <summary>A minimum and a maximum over a member stored as labels answer by the members' values; a sum and an average are refused.</summary>
+    public static async Task LabelAggregatesAnswerByValue(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+        using var scope = newScope();
+        var repo = Repo<RelTicket>(scope);
+        var aggregates = (IAggregateReadRepository<RelTicket>)repo;
+
+        Assert.That(await aggregates.MinAsync(x => x.Priority), Is.EqualTo(RelPriority.Low), "not 'a_urgent', the smallest label");
+        Assert.That(await aggregates.MaxAsync(x => x.Priority), Is.EqualTo(RelPriority.Urgent), "not 'medium', the largest label");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation), Is.EqualTo(RelPriority.Low), "a nullable member: nulls are skipped");
+        Assert.That(await aggregates.MaxAsync(x => x.Escalation), Is.EqualTo(RelPriority.Urgent));
+        Assert.That(await aggregates.MaxAsync(x => x.Priority, new QueryOptions<RelTicket>().Where(x => x.Priority < RelPriority.High)),
+            Is.EqualTo(RelPriority.Medium), "under a filter");
+        Assert.That(await aggregates.MaxAsync(x => (int)x.Priority), Is.EqualTo(4), "a converted member answers the member's number");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation, new QueryOptions<RelTicket>().Where(x => x.Title == "t1")), Is.Null,
+            "no value to take");
+
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => repo.SumAsync(x => (int)x.Priority))!.Message, Does.Contain("labels"));
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => aggregates.AverageAsync(x => x.Priority))!.Message, Does.Contain("labels"));
+    }
+
+    /// <summary>
+    ///     A group keyed by a member stored as labels holds each member, and its <c>HAVING</c> compares by the members'
+    ///     values; an aggregate of such a member in a group is refused rather than answered by the labels' text.
+    /// </summary>
+    public static async Task LabelGroupsKeyAndHaveByValue(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+        using var scope = newScope();
+        var grouped = (IGroupedReadRepository<RelTicket>)Repo<RelTicket>(scope);
+
+        var groups = await grouped.GroupByAsync(x => x.Priority, g => new { Priority = g.Key, Count = g.Count() });
+        Assert.That(groups.Select(g => (g.Priority, g.Count)).OrderBy(g => g.Priority),
+            Is.EqualTo(new[] { (RelPriority.Low, 1), (RelPriority.Medium, 1), (RelPriority.High, 1), (RelPriority.Urgent, 1) }));
+        Assert.That((await grouped.GroupByAsync(x => x.Priority, g => new { Priority = g.Key, Count = g.Count() }, g => g.Key >= RelPriority.High))
+            .Select(g => g.Priority).Order(), Is.EqualTo(new[] { RelPriority.High, RelPriority.Urgent }));
+        Assert.That((await grouped.GroupByAsync(x => x.Priority, g => new { Priority = g.Key, Count = g.Count() }, g => g.Key == RelPriority.Medium))
+            .Select(g => g.Priority), Is.EqualTo(new[] { RelPriority.Medium }));
+
+        var refused = Assert.ThrowsAsync<NotSupportedException>(() =>
+            grouped.GroupByAsync(x => x.Alias, g => new { Alias = g.Key, Top = g.Max(x => x.Priority) }));
+        Assert.That(refused!.Message, Does.Contain("labels"));
+    }
 }

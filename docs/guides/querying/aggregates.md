@@ -23,6 +23,20 @@ double mean   = await aggregates.AverageAsync(p => p.Quantity, inCategory);
 A computed selector (`p => p.Price * p.Quantity`) aggregates client-side over a narrowed fetch —
 correct first, pushed when provable.
 
+**An enum stored as its labels** (`[EnumType]`, or `Enum<TEnum>()` on the model) aggregates by its
+members' values, as C# does, never by the labels' text. `MinAsync(t => t.Priority)` answers the member
+with the smallest value (`MinAsync(t => (int)t.Priority)` its number), and nulls are skipped:
+
+| Store | How a minimum or a maximum over labels runs |
+|---|---|
+| Relational | `MIN(CASE col WHEN 'low' THEN 1 … END)`, the value mapped back to its member |
+| MongoDB · Cosmos DB | the distinct members present under the filter (at most the enum's members), the extreme picked by value |
+| Cassandra | the column read under the read's gates, the extreme picked by value |
+
+A sum or an average over such a member is **refused** on every store with the reason: a label has no
+arithmetic, and the store would add the text (or, on MySQL, a label's position), never the members'
+values. Read the members and add their values, or store the enum as its number.
+
 ## Typed GROUP BY
 
 One shape on every provider — key selector, result selector over `IGrouping`, optional `HAVING`:
@@ -38,6 +52,13 @@ var byCategory = await repo.GroupByAsync(
 The result selector supports `g.Key`, `g.Count()`, `g.Sum/Min/Max/Average(selector)` — the shapes
 every store can aggregate. The interpreter validates the shape **first**, so the contract (what is
 accepted, what is rejected, with which message) is identical across providers.
+
+A key stored as an enum's labels groups by member, comes back as the member, and a `HAVING` on it
+compares by the members' values (`g => g.Key >= Priority.High` is membership in the labels whose member
+satisfies it). An aggregate over such a member in a group the store computes (`g.Max(t => t.Priority)`,
+a sum, an average) is refused with the reason, since the store would compare or add the labels' text;
+ask `MinAsync`/`MaxAsync` with the group's filter, or group the rows client-side. A group that already
+runs client-side (a residual filter, behind `.AllowClientEvaluation()`) aggregates the members themselves.
 
 Per store:
 

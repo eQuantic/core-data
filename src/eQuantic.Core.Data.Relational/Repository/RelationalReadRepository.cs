@@ -218,32 +218,54 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     // ---------------------------------------------------------------- min / max / average
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     A member stored as an enum's labels answers the member with the smallest value, as C# does: the minimum runs over
+    ///     the value each label stands for (<c>MIN(CASE col WHEN 'low' THEN 1 … END)</c>), never over the labels' text.
+    /// </remarks>
     public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await AggregateAsync(selector, options, cancellationToken,
-            column => $"MIN({_dialect.Quote(column.Name)})",
-            value => (TResult?)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult)),
-            rows => rows.Count == 0 ? default : rows.Min(selector.Compile())).ConfigureAwait(false);
+            column => $"MIN({_dialect.SortKey(column, _dialect.Quote(column.Name))})",
+            Extreme<TResult>,
+            rows => rows.Count == 0 ? default : rows.Min(selector.Compile()), arithmetic: false).ConfigureAwait(false);
 
     /// <inheritdoc />
+    /// <remarks>A member stored as an enum's labels answers the member with the largest value, as <see cref="MinAsync{TResult}" /> does.</remarks>
     public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await AggregateAsync(selector, options, cancellationToken,
-            column => $"MAX({_dialect.Quote(column.Name)})",
-            value => (TResult?)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult)),
-            rows => rows.Count == 0 ? default : rows.Max(selector.Compile())).ConfigureAwait(false);
+            column => $"MAX({_dialect.SortKey(column, _dialect.Quote(column.Name))})",
+            Extreme<TResult>,
+            rows => rows.Count == 0 ? default : rows.Max(selector.Compile()), arithmetic: false).ConfigureAwait(false);
 
     /// <inheritdoc />
+    /// <remarks>A member stored as an enum's labels is refused: a label has no arithmetic.</remarks>
     public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await AggregateAsync(selector, options, cancellationToken,
             column => $"AVG(CAST({_dialect.Quote(column.Name)} AS {_dialect.SqlType(typeof(double))}))",
-            Convert.ToDouble,
-            rows => rows.Count == 0 ? 0d : rows.Average(row => Convert.ToDouble(selector.Compile()(row)))).ConfigureAwait(false);
+            (value, _) => Convert.ToDouble(value),
+            rows => rows.Count == 0 ? 0d : rows.Average(row => Convert.ToDouble(selector.Compile()(row))), arithmetic: true).ConfigureAwait(false);
+
+    /// <summary>A minimum's or a maximum's answer: the member a value stands for when the column holds an enum's labels.</summary>
+    private static TResult? Extreme<TResult>(object value, Type? labelEnum) =>
+        labelEnum is null
+            ? (TResult?)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult))
+            : EnumOrder.FromValue<TResult>(labelEnum, Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>The enum a column holds the labels of, or <c>null</c>.</summary>
+    private Type? LabelEnumOf(RelationalColumn? column) =>
+        column is { Converter: null } && _dialect.NativeEnumOf(column.StoredType) is { } native ? native.EnumType : null;
 
     private async Task<TResult> AggregateAsync<TSelected, TResult>(Expression<Func<TEntity, TSelected>> selector,
         QueryOptions<TEntity>? options, CancellationToken cancellationToken,
-        Func<RelationalColumn, string> aggregate, Func<object, TResult> convert, Func<List<TEntity>, TResult> clientFallback)
+        Func<RelationalColumn, string> aggregate, Func<object, Type?, TResult> convert, Func<List<TEntity>, TResult> clientFallback,
+        bool arithmetic)
     {
         ReadShapes.RefuseRowWindow(options, "an aggregate");
         var column = SumColumn(selector);
+        if (arithmetic && LabelEnumOf(column) is { } labels)
+        {
+            throw EnumOrder.ArithmeticRefusal(labels, "AverageAsync");
+        }
+
         if (column is not null)
         {
             var plan = GatedPlan(options, null);
@@ -255,7 +277,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 {
                     await using var command = await UnitOfWork.CommandAsync(sql, plan.Parameters, cancellationToken).ConfigureAwait(false);
                     var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-                    return result is null or DBNull ? default! : convert(result);
+                    return result is null or DBNull ? default! : convert(result, LabelEnumOf(column));
                 }, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -314,6 +336,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                               ?? throw new NotSupportedException(
                                   $"'{typeof(TEntity).Name}' has no mapped member '{member.Path}' to group by."))
             .ToList();
+        EnumOrder.RefuseLabelAggregates(group, predicate, member => LabelEnumOf(_configuration.ColumnFor(member)));
 
         var select = keys.Select(column => _dialect.Quote(column.Name))
             .Concat(group.Bindings.OfType<GroupAggregateBinding>()
@@ -369,6 +392,31 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
 
         string ComparisonSql(GroupComparison comparison)
         {
+            // A key holding an enum's labels compares by the members' values, as C# does: an ordered comparison is
+            // membership in the labels whose member satisfies it, and an equality binds the member, never its number.
+            if (comparison is { Aggregate: null, Value: { } compared }
+                && LabelEnumOf(_configuration.ColumnFor(comparison.Member!)) is { } labels)
+            {
+                var key = _dialect.Quote(_configuration.ColumnFor(comparison.Member!)!.Name);
+                if (EnumOrder.IsOrdered(comparison.Operator))
+                {
+                    var members = EnumOrder.Satisfying(labels, comparison.Operator, compared);
+                    if (members.Count == 0)
+                    {
+                        return _dialect.FalseLiteral;
+                    }
+
+                    return $"{key} IN ({string.Join(", ", members.Select(member =>
+                    {
+                        plan.Parameters.Add(_dialect.BindValue(member));
+                        return $"@p{plan.Parameters.Count - 1}";
+                    }))})";
+                }
+
+                plan.Parameters.Add(_dialect.BindValue(compared as Enum ?? (Enum)Enum.ToObject(labels, compared)));
+                return $"{key} {ComparisonToken(comparison.Operator)} @p{plan.Parameters.Count - 1}";
+            }
+
             var fragment = comparison.Aggregate is { } aggregate
                 ? AggregateSql(aggregate, comparison.Member)
                 : _dialect.Quote((_configuration.ColumnFor(comparison.Member!)
@@ -1037,6 +1085,11 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     {
         ReadShapes.RefuseRowWindow(options, "SumAsync");
         var column = SumColumn(selector);
+        if (LabelEnumOf(column) is { } labels)
+        {
+            throw EnumOrder.ArithmeticRefusal(labels, "SumAsync");
+        }
+
         if (column is not null)
         {
             var plan = GatedPlan(options, null);

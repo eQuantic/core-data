@@ -229,6 +229,19 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     {
         ReadShapes.RefuseRowWindow(options, "an aggregate");
         var column = SumColumn(selector);
+        if (LabelEnumOfColumn(column) is { } labels)
+        {
+            // A minimum or a maximum of the labels would compare their text: the members are read (that column alone,
+            // under the read's gates) and compared by value, as C# does. An average has no meaning over labels.
+            if (combine is null)
+            {
+                throw EnumOrder.ArithmeticRefusal(labels, "AverageAsync");
+            }
+
+            return clientFallback(await SelectAsync(options, null, cancellationToken, null, [_configuration.MemberFor(column!)])
+                .ConfigureAwait(false));
+        }
+
         if (column is not null)
         {
             var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
@@ -355,6 +368,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         }
 
         RefuseLongIn(plan, "GroupByAsync", "a group's aggregates come from one statement");
+        EnumOrder.RefuseLabelAggregates(group, predicate, member => LabelEnumOfColumn(
+            _configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Member, member))?.Name));
         var keys = group.Key.Select(member => ColumnNamed(member.Path, "group by")).ToList();
         ValidateGroupKeys(keys);
 
@@ -415,7 +430,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
                 cellValues[ordinal] = row.IsNull(keys.Count + ordinal) ? null : row.GetValue<object>(keys.Count + ordinal);
             }
 
-            if (predicate is not null && !EvaluateHaving(predicate, group, cells, keyValues, cellValues))
+            if (predicate is not null && !EvaluateHaving(predicate, group, cells, keyValues, cellValues, member => LabelEnumOfColumn(
+                    _configuration.Columns.FirstOrDefault(column => CassandraEntityConfiguration.Same(column.Member, member))?.Name)))
             {
                 continue;
             }
@@ -520,15 +536,16 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     /// <summary>Evaluates the interpreted HAVING against one grouped row's key and aggregate cells.</summary>
     private static bool EvaluateHaving(GroupPredicate predicate, GroupQuery group,
-        List<(GroupAggregate Aggregate, string? Member)> cells, object?[] keyValues, object?[] cellValues) => predicate switch
+        List<(GroupAggregate Aggregate, string? Member)> cells, object?[] keyValues, object?[] cellValues,
+        Func<string, Type?> labelEnumOf) => predicate switch
     {
         GroupLogical { Operator: LogicalOperator.And } logical =>
-            logical.Operands.All(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues)),
+            logical.Operands.All(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues, labelEnumOf)),
         GroupLogical logical =>
-            logical.Operands.Any(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues)),
+            logical.Operands.Any(operand => EvaluateHaving(operand, group, cells, keyValues, cellValues, labelEnumOf)),
         GroupComparison comparison => CompareHaving(comparison, comparison.Aggregate is { } aggregate
             ? cellValues[CellIndex(cells, aggregate, comparison.Member)]
-            : keyValues[KeyPathOrdinal(group, comparison.Member!)]),
+            : keyValues[KeyPathOrdinal(group, comparison.Member!)], comparison.Aggregate is null ? labelEnumOf(comparison.Member!) : null),
         _ => throw new NotSupportedException($"Unknown group predicate '{predicate.GetType().Name}'."),
     };
 
@@ -545,8 +562,23 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         throw new NotSupportedException($"The key has no member '{path}'.");
     }
 
-    private static bool CompareHaving(GroupComparison comparison, object? value)
+    /// <param name="comparison">The comparison.</param>
+    /// <param name="value">The group's value: a key's, or an aggregate's.</param>
+    /// <param name="labelEnum">
+    ///     The enum a key holds the labels of: the key's label then compares by its member's value, as C# compares the enum,
+    ///     never by its text.
+    /// </param>
+    private static bool CompareHaving(GroupComparison comparison, object? value, Type? labelEnum)
     {
+        if (labelEnum is not null && value is string label && comparison.Value is not null)
+        {
+            value = Convert.ToDecimal(Convert.ChangeType(Modeling.EnumLabels.Parse(labelEnum, label), Enum.GetUnderlyingType(labelEnum),
+                System.Globalization.CultureInfo.InvariantCulture), System.Globalization.CultureInfo.InvariantCulture);
+            comparison = new GroupComparison(null, comparison.Member, comparison.Operator, Convert.ToDecimal(
+                comparison.Value is Enum member ? Convert.ChangeType(member, Enum.GetUnderlyingType(labelEnum), System.Globalization.CultureInfo.InvariantCulture) : comparison.Value,
+                System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         if (comparison.Value is null)
         {
             return comparison.Operator switch
@@ -949,6 +981,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             .FirstOrDefault(member => !_configuration.IsClusteringKey(_configuration.ColumnFor(member)) || StoredAsLabels(member));
 
     /// <summary>Whether a member's enum is stored as its labels (a <c>text</c> column).</summary>
+    /// <summary>The enum a column holds the labels of (a <c>text</c> column of an enum member), or <c>null</c>.</summary>
+    private Type? LabelEnumOfColumn(string? column) =>
+        column is not null && _configuration.Column(column) is { CqlType: "text" } stored
+                           && (Nullable.GetUnderlyingType(stored.ClrType) ?? stored.ClrType) is { IsEnum: true } enumType
+            ? enumType
+            : null;
+
     private bool StoredAsLabels(string member) =>
         _configuration.Column(_configuration.ColumnFor(member)) is { CqlType: "text" } column
         && (Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType).IsEnum;
@@ -1293,6 +1332,11 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     {
         ReadShapes.RefuseRowWindow(options, "SumAsync");
         var column = SumColumn(selector);
+        if (LabelEnumOfColumn(column) is { } labels)
+        {
+            throw EnumOrder.ArithmeticRefusal(labels, "SumAsync");
+        }
+
         if (column is not null)
         {
             var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);

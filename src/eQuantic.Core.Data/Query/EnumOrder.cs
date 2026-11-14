@@ -67,6 +67,103 @@ public static class EnumOrder
     }
 
     /// <summary>
+    ///     The enum a selector reads when its body is a member (or a conversion of one, <c>x =&gt; (int)x.Priority</c>) whose
+    ///     enum the store keeps as its labels; <c>null</c> otherwise.
+    /// </summary>
+    /// <param name="selector">A member selector.</param>
+    /// <param name="isLabelEnum">Whether the store keeps an enum (nullable unwrapped) as its labels.</param>
+    public static Type? LabelEnumOf(LambdaExpression selector, Func<Type, bool> isLabelEnum)
+    {
+        var body = selector.Body;
+        while (body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conversion)
+        {
+            body = conversion.Operand;
+        }
+
+        var type = Nullable.GetUnderlyingType(body.Type) ?? body.Type;
+        return body is MemberExpression && type.IsEnum && isLabelEnum(type) ? type : null;
+    }
+
+    /// <summary>
+    ///     What a minimum or a maximum over a member stored as labels answers, from the member's value: the member itself
+    ///     when the selector reads the enum, its number when it converts it (<c>x =&gt; (int)x.Priority</c>), as C# does;
+    ///     <c>default</c> when there is no value (nothing matched, or every match is null).
+    /// </summary>
+    /// <typeparam name="TResult">What the selector answers.</typeparam>
+    /// <param name="enumType">The enum.</param>
+    /// <param name="value">The member's value, or <c>null</c>.</param>
+    public static TResult? FromValue<TResult>(Type enumType, decimal? value)
+    {
+        if (value is not { } number)
+        {
+            return default;
+        }
+
+        var target = Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult);
+        var underlying = Convert.ChangeType(number, Enum.GetUnderlyingType(enumType), CultureInfo.InvariantCulture);
+        return (TResult)(target.IsEnum
+            ? Enum.ToObject(target, underlying)
+            : Convert.ChangeType(underlying, target, CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    ///     The smallest or the largest value among members read back (an enum's members, nulls skipped), as C# compares them;
+    ///     <c>null</c> when there is none.
+    /// </summary>
+    /// <param name="members">The members present.</param>
+    /// <param name="largest">Whether the largest is asked for.</param>
+    public static decimal? Extreme(IEnumerable<object?> members, bool largest)
+    {
+        var values = members.OfType<Enum>().Select(Number).ToList();
+        return values.Count == 0 ? null : largest ? values.Max() : values.Min();
+    }
+
+    /// <summary>
+    ///     The refusal of an arithmetic aggregate (a sum, an average) over a member stored as labels: the store holds its
+    ///     labels, which have no arithmetic, and summing a label or its position would answer another question.
+    /// </summary>
+    /// <param name="enumType">The enum.</param>
+    /// <param name="aggregate">The aggregate, as the message names it (<c>SumAsync</c>).</param>
+    public static NotSupportedException ArithmeticRefusal(Type enumType, string aggregate) =>
+        new($"{aggregate} over a member of '{enumType.Name}', which the store keeps as its labels: a label has no arithmetic, " +
+            "and the store would sum the text or its position, never the members' values. Read the members and add their " +
+            "values client-side, or store the enum as its number.");
+
+    /// <summary>
+    ///     Refuses an aggregate over a member stored as an enum's labels, in a group's projection or its <c>HAVING</c>, on a
+    ///     group the store computes: the store would sum or average the labels, or take the minimum or the maximum of their
+    ///     text, never of the members' values. A group computed client-side aggregates the members themselves and needs no
+    ///     refusal; <c>MinAsync</c>/<c>MaxAsync</c> answer by value.
+    /// </summary>
+    /// <param name="group">The interpreted group.</param>
+    /// <param name="having">The interpreted <c>HAVING</c>, or <c>null</c>.</param>
+    /// <param name="labelEnumOf">The enum a member path is stored as the labels of, or <c>null</c>.</param>
+    public static void RefuseLabelAggregates(GroupQuery group, GroupPredicate? having, Func<string, Type?> labelEnumOf)
+    {
+        var aggregated = group.Bindings.OfType<GroupAggregateBinding>().Select(binding => (binding.Aggregate, binding.Member))
+            .Concat(having is null ? [] : HavingAggregates(having));
+        foreach (var (aggregate, member) in aggregated)
+        {
+            if (member is not null && labelEnumOf(member) is { } labels)
+            {
+                throw aggregate is GroupAggregate.Sum or GroupAggregate.Average
+                    ? ArithmeticRefusal(labels, $"A grouped {aggregate}")
+                    : new NotSupportedException(
+                        $"A grouped {aggregate} over '{member}', a member of '{labels.Name}' which the store keeps as its labels, would " +
+                        "compare the labels' text, not the members' values. Ask MinAsync/MaxAsync with the group's filter, which answer " +
+                        "by value, or group the rows client-side.");
+            }
+        }
+
+        static IEnumerable<(GroupAggregate Aggregate, string? Member)> HavingAggregates(GroupPredicate node) => node switch
+        {
+            GroupComparison { Aggregate: { } aggregate } comparison => [(aggregate, comparison.Member)],
+            GroupLogical logical => logical.Operands.SelectMany(HavingAggregates),
+            _ => [],
+        };
+    }
+
+    /// <summary>
     ///     The expression with every ordered comparison of a member stored as labels (<c>x.Priority &gt;= Priority.Medium</c>,
     ///     on a nullable member too, and under a negation) rewritten into membership in the members that satisfy it
     ///     (<c>new[] { Priority.Medium, Priority.High }.Contains(x.Priority)</c>), the shape a document store's LINQ translation

@@ -747,4 +747,50 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         var page = Assert.ThrowsAsync<NotSupportedException>(() => ((IContinuationReadRepository<RelTicket>)repo).GetPageAsync(10, null, options));
         Assert.That(page!.Message, Does.Contain("65,535").And.Contain("GetPageAsync"));
     }
+
+    [Test]
+    public async Task A_minimum_and_a_maximum_of_labels_answer_by_value()
+    {
+        var board = await SeedTicketsAsync();
+        using var scope = NewScope();
+        var repo = Repo<RelTicket>(scope);
+        var aggregates = (IAggregateReadRepository<RelTicket>)repo;
+        QueryOptions<RelTicket> Scoped() => new QueryOptions<RelTicket>().Where(x => x.Board == board);
+
+        Assert.That(await aggregates.MinAsync(x => x.Priority, Scoped()), Is.EqualTo(RelPriority.Low), "not 'a_urgent', the smallest label");
+        Assert.That(await aggregates.MaxAsync(x => x.Priority, Scoped()), Is.EqualTo(RelPriority.Urgent), "not 'medium', the largest label");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation, Scoped()), Is.EqualTo(RelPriority.Low), "a nullable member: nulls are skipped");
+        Assert.That(await aggregates.MaxAsync(x => x.Escalation, Scoped()), Is.EqualTo(RelPriority.Urgent));
+        Assert.That(await aggregates.MaxAsync(x => x.Priority, new QueryOptions<RelTicket>().Where(x => x.Board == board && x.Priority < RelPriority.High)),
+            Is.EqualTo(RelPriority.Medium), "under a filter");
+        Assert.That(await aggregates.MaxAsync(x => (int)x.Priority, Scoped()), Is.EqualTo(4), "a converted member answers the member's number");
+        Assert.That(await aggregates.MinAsync(x => x.Escalation, new QueryOptions<RelTicket>().Where(x => x.Board == board && x.Priority == RelPriority.Low)),
+            Is.Null, "no value to take");
+
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => repo.SumAsync(x => (int)x.Priority, Scoped()))!.Message, Does.Contain("labels"));
+        Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => aggregates.AverageAsync(x => x.Priority, Scoped()))!.Message, Does.Contain("labels"));
+    }
+
+    [Test]
+    public async Task A_group_keyed_by_labels_has_by_value()
+    {
+        var board = await SeedTicketsAsync();
+        using var scope = NewScope();
+        var grouped = (IGroupedReadRepository<RelTicket>)Repo<RelTicket>(scope);
+        var options = new QueryOptions<RelTicket>().Where(x => x.Board == board);
+
+        var groups = await grouped.GroupByAsync(x => new { x.Board, x.Priority }, g => new { g.Key.Priority, Count = g.Count() }, null, options);
+        Assert.That(groups.Select(g => (g.Priority, g.Count)).OrderBy(g => g.Priority),
+            Is.EqualTo(new[] { (RelPriority.Low, 1), (RelPriority.Medium, 1), (RelPriority.High, 1), (RelPriority.Urgent, 1) }));
+        Assert.That((await grouped.GroupByAsync(x => new { x.Board, x.Priority }, g => new { g.Key.Priority, Count = g.Count() },
+                g => g.Key.Priority >= RelPriority.High, options)).Select(g => g.Priority).Order(),
+            Is.EqualTo(new[] { RelPriority.High, RelPriority.Urgent }));
+        Assert.That((await grouped.GroupByAsync(x => new { x.Board, x.Priority }, g => new { g.Key.Priority, Count = g.Count() },
+                g => g.Key.Priority == RelPriority.Medium, options)).Select(g => g.Priority),
+            Is.EqualTo(new[] { RelPriority.Medium }));
+
+        var refused = Assert.ThrowsAsync<NotSupportedException>(() =>
+            grouped.GroupByAsync(x => x.Board, g => new { Board = g.Key, Top = g.Max(x => x.Escalation) }, null, options));
+        Assert.That(refused!.Message, Does.Contain("labels"));
+    }
 }
