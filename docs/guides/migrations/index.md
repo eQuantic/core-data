@@ -71,6 +71,10 @@ the type the model declares for that member, facets included (`varchar(n)`, `num
 drift check expects what the operation left behind. `ResizeField` restates an existing column to the
 same type.
 
+An `Update` binds its values the way the unit of work binds them: an enum stored as its labels goes as
+its label, and on PostgreSQL a JSON member or a string-keyed dictionary goes into its `jsonb` column as a
+document.
+
 ## Store honesty in migrations
 
 Operations that a store cannot express refuse with guidance rather than approximating:

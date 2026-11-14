@@ -336,7 +336,12 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
         _ => throw new NotSupportedException($"Cannot convert a relational column to '{type}'."),
     };
 
-    private static async Task ExecuteAsync(DbConnection connection, string sql, IReadOnlyList<object?> parameters, CancellationToken cancellationToken)
+    /// <summary>
+    ///     Runs a statement. The parameters arrive already through the dialect's <see cref="SqlDialect.BindValue" />,
+    ///     and each is typed the way the unit of work types it (<see cref="SqlDialect.ConfigureParameter" />): a JSON
+    ///     member or a dictionary document set by an update has to reach PostgreSQL as <c>jsonb</c>.
+    /// </summary>
+    private async Task ExecuteAsync(DbConnection connection, string sql, IReadOnlyList<object?> parameters, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -345,6 +350,7 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             var parameter = command.CreateParameter();
             parameter.ParameterName = "p" + index;
             parameter.Value = parameters[index] ?? DBNull.Value;
+            _dialect.ConfigureParameter(parameter, parameters[index]);
             command.Parameters.Add(parameter);
         }
 
