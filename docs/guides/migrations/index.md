@@ -66,6 +66,11 @@ The single most used operation derives schema from the model, so schema and mapp
 | Cosmos DB | the container with partition key path(s) — **hierarchical multi-hash included** — default TTL and the model's composite indexes |
 | Cassandra | `CREATE TABLE` with partition/clustering keys, `CLUSTERING ORDER BY`, `default_time_to_live`, plus the model's SASI search indexes |
 
+On a relational store, `AddField` adds the column the way `EnsureCollection()` would have created it:
+the type the model declares for that member, facets included (`varchar(n)`, `numeric(p,s)`), so the
+drift check expects what the operation left behind. `ResizeField` restates an existing column to the
+same type.
+
 ## Store honesty in migrations
 
 Operations that a store cannot express refuse with guidance rather than approximating:

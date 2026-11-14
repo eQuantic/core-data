@@ -73,6 +73,29 @@ public sealed class RelationalSchemaOperationsTests : PostgreSqlIntegrationTest
     }
 
     [Test]
+    public async Task Adding_a_member_creates_the_column_at_the_size_the_model_declares()
+    {
+        using var db = await NewSchemaAsync();
+        // The table as it stood before the two members existed.
+        await using (var connection = await db.Resolve<DbDataSource>().OpenConnectionAsync())
+        {
+            await using var drop = connection.CreateCommand();
+            drop.CommandText = "ALTER TABLE order_lines DROP COLUMN product, DROP COLUMN amount";
+            await drop.ExecuteNonQueryAsync();
+        }
+
+        await ApplyAsync(db, migration => migration.For<OrderLine>(line => line.AddField(x => x.Product).AddField(x => x.Amount)));
+
+        Assert.That(await TypeOfAsync(db, "order_lines", "product"), Is.EqualTo("character varying(200)"),
+            "[Facet(Length = 200)] sizes an added column the way it sizes a created one");
+        Assert.That(await TypeOfAsync(db, "order_lines", "amount"), Is.EqualTo("numeric(18,2)"),
+            "[Facet(Precision = 18, Scale = 2)] too");
+        var source = db.Resolve<IDatabaseSnapshotSource>();
+        Assert.That(DriftComparer.Compare(source.Expect(), await source.ObserveAsync()).Findings, Is.Empty,
+            "the drift check expects the sized type, so an added column has to land on it");
+    }
+
+    [Test]
     public async Task Renaming_a_table_moves_it()
     {
         using var db = await NewSchemaAsync();

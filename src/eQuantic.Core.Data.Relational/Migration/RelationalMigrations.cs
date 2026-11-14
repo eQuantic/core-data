@@ -122,9 +122,11 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
                     var column = Column(configuration, add.Field.GetMemberName());
                     await EnsureEnumTypesAsync(connection, [column], cancellationToken).ConfigureAwait(false);
                     await EnsurePrerequisitesAsync(connection, configuration, [column], cancellationToken).ConfigureAwait(false);
+                    // The column's own type, facets included: the same one CREATE TABLE, a resize and the drift
+                    // check's expectation state, so an added column is sized the way the model declares it.
                     await ExecuteAsync(connection,
                         _dialect.AddColumnSql(_dialect.Quote(configuration.TableName), _dialect.Quote(column.Name),
-                            _dialect.SqlType(column.StoredType) + Constraints(configuration, column)), [], cancellationToken).ConfigureAwait(false);
+                            _dialect.SqlType(column) + Constraints(configuration, column)), [], cancellationToken).ConfigureAwait(false);
                     break;
                 }
 

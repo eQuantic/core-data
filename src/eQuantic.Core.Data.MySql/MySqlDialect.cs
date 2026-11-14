@@ -47,6 +47,17 @@ public class MySqlDialect : SqlDialect
 
     /// <inheritdoc />
     /// <remarks>
+    ///     MySQL and MariaDB keep <c>NUMERIC</c>, <c>DEC</c> and <c>FIXED</c> as <c>DECIMAL</c>: a sized decimal this
+    ///     dialect declares as <c>numeric(18, 2)</c> reads back from the catalogue as <c>decimal(18,2)</c>, the same type.
+    /// </remarks>
+    protected override string Synonym(string baseType) => baseType switch
+    {
+        "numeric" or "dec" or "fixed" => "decimal",
+        _ => baseType,
+    };
+
+    /// <inheritdoc />
+    /// <remarks>
     ///     MySQL and MariaDB take an offset only after a limit, and document the largest unsigned value as the limit that
     ///     means "every row after it".
     /// </remarks>
