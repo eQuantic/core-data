@@ -115,7 +115,9 @@ public static class RelationCountInterpreter
                 && node.Arguments.Count is 1 or 2
                 && Relation(node.Arguments[0]) is { } navigation)
             {
-                var predicate = node.Arguments.Count == 2 ? Lambda(node.Arguments[1]) : null;
+                var predicate = node.Arguments.Count == 2
+                    ? RelationPredicates.Condition(node.Arguments[1], $"{navigation.Name}.{node.Method.Name}")
+                    : null;
                 return Slot(navigation, predicate, node.Type);
             }
 
@@ -157,17 +159,6 @@ public static class RelationCountInterpreter
             return type == typeof(long) ? read : Expression.Convert(read, type);
         }
 
-        private static LambdaExpression Lambda(Expression argument)
-        {
-            while (argument is UnaryExpression { NodeType: ExpressionType.Quote } quote)
-            {
-                argument = quote.Operand;
-            }
-
-            return argument as LambdaExpression
-                   ?? throw new NotSupportedException(
-                       $"A relation count takes its filter as a lambda written in the projection; '{argument}' is not one.");
-        }
     }
 
     /// <summary>Collects the first-segment members a body reads from the entity; false when it uses the entity whole.</summary>

@@ -112,6 +112,12 @@ A relation test compares the related rows with **values**: one that also reads t
 members (`x.Items.Any(i => i.OwnerId == x.Id)`) is refused with the reason, and so is a collection
 navigation used otherwise than through `Any`/`All` (`x.Items.Count > 0`).
 
+The condition is **written inline**: `x.Items.Any(i => i.Done)`. A condition held in a delegate — a
+`Func<Item, bool>` variable, a compiled expression (`expr.Compile()`), a method group — has no body the
+store could run, and dropping it would answer another question (whether any row is related at all), so
+`Any`, `All` and a relation count (`x.Items.Count(f)`) refuse it with a `NotSupportedException` naming
+the navigation (`'Items.Any'`) and saying to write the lambda inline.
+
 ## Text without regard to case
 
 | You write | It matches |

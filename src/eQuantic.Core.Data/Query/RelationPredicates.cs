@@ -352,7 +352,9 @@ public static class RelationPredicates
             }
 
             var all = call.Method.Name == nameof(Enumerable.All);
-            var condition = call.Arguments.Count > 1 ? Lambda(call.Arguments[1]) : null;
+            var condition = call.Arguments.Count > 1
+                ? Condition(call.Arguments[1], $"{first.Navigation.Member.Name}.{call.Method.Name}")
+                : null;
             if (condition is not null && References(condition.Body, root))
             {
                 throw new NotSupportedException(
@@ -587,6 +589,57 @@ public static class RelationPredicates
     // ---------------------------------------------------------------- helpers
 
     private static LambdaExpression? Lambda(Expression expression) => Strip(expression) as LambdaExpression;
+
+    /// <summary>
+    ///     The condition a test of a navigation's rows passes, as an expression the store can run: a lambda written inline,
+    ///     or an <c>Expression&lt;Func&lt;…&gt;&gt;</c> held in a variable, which is read. A delegate (a <c>Func</c> variable, a
+    ///     compiled expression, a method group) has no body to read, and dropping it would answer another question (whether
+    ///     any row is related at all): it is refused, naming the navigation.
+    /// </summary>
+    /// <param name="argument">The condition argument.</param>
+    /// <param name="test">The test, as the message names it (<c>Items.Any</c>).</param>
+    internal static LambdaExpression Condition(Expression argument, string test)
+    {
+        var stripped = Strip(argument);
+        if (stripped is LambdaExpression lambda)
+        {
+            return lambda;
+        }
+
+        if (typeof(LambdaExpression).IsAssignableFrom(stripped.Type) && !ReadsParameter(stripped)
+                                                                     && Evaluate(stripped) is LambdaExpression held)
+        {
+            return held;
+        }
+
+        throw new NotSupportedException(
+            $"'{test}' takes its condition as a delegate ('{argument}': a Func variable, a compiled expression or a method group), " +
+            $"whose body cannot be read, so it cannot run in the store and dropping it would test whether any row is related at all. " +
+            $"Write the lambda inline: x.{test}(item => …).");
+    }
+
+    private static object? Evaluate(Expression expression) =>
+        expression is ConstantExpression constant
+            ? constant.Value
+            : Expression.Lambda<Func<object?>>(Expression.Convert(expression, typeof(object))).Compile(preferInterpretation: true)();
+
+    private static bool ReadsParameter(Expression expression)
+    {
+        var finder = new AnyParameter();
+        finder.Visit(expression);
+        return finder.Found;
+    }
+
+    private sealed class AnyParameter : ExpressionVisitor
+    {
+        public bool Found { get; private set; }
+
+        protected override Expression VisitParameter(ParameterExpression node)
+        {
+            Found = true;
+            return node;
+        }
+    }
 
     private static bool IsNull(Expression expression) => Strip(expression) is ConstantExpression { Value: null };
 

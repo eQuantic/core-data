@@ -178,4 +178,46 @@ public sealed class QueryPredicateInterpretationTests
         Assert.That(exists.Member, Is.EqualTo("Id"));
         Assert.That(((RelationPredicate)exists.Arguments[0]!).Navigation.Target, Is.EqualTo(typeof(Part)));
     }
+
+    private static bool IsDone(Part part) => part.Status == "done";
+
+    [Test]
+    public void A_relation_condition_held_in_a_delegate_is_refused_naming_the_navigation()
+    {
+        Func<Part, bool> variable = p => p.Status == "done";
+        Expression<Func<Part, bool>> held = p => p.Status == "done";
+        Expression<Func<Owner, bool>>[] unreadable =
+        [
+            x => x.Parts!.Any(variable),
+            x => x.Parts!.All(variable),
+            x => x.Parts!.Any(held.Compile()),
+            x => x.Parts!.Any(IsDone),
+        ];
+
+        foreach (var predicate in unreadable)
+        {
+            Assert.That(() => RelationPredicates.Find(predicate, Navigations),
+                Throws.InstanceOf<NotSupportedException>().With.Message.Contains("'Parts.").And.Message.Contains("Write the lambda inline"),
+                predicate.ToString());
+            Assert.That(() => RelationPredicates.Mark(predicate, Navigations), Throws.InstanceOf<NotSupportedException>(),
+                "a store marking the relation refuses it too, rather than test whether any part exists");
+        }
+    }
+
+    [Test]
+    public void A_relation_condition_written_inline_is_read()
+    {
+        var inline = RelationPredicates.Find((Expression<Func<Owner, bool>>)(x => x.Parts!.Any(p => p.Status == "done")), Navigations).Single();
+
+        Assert.That(inline.Condition!.ToString(), Does.Contain("done"));
+    }
+
+    [Test]
+    public void A_relation_count_with_a_condition_held_in_a_delegate_is_refused_naming_the_navigation()
+    {
+        Func<Part, bool> variable = p => p.Status == "done";
+
+        Assert.That(() => RelationCountInterpreter.Interpret<Owner, int>(x => x.Parts!.Count(variable), property => property.Name == nameof(Owner.Parts)),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("'Parts.Count'").And.Message.Contains("Write the lambda inline"));
+    }
 }
