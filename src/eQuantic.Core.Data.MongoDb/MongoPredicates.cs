@@ -198,10 +198,10 @@ internal static class MongoPredicates
         }
 
         private static Expression? Folded(Expression folded, Expression value) =>
-            Folding(folded) is { } folding ? Test(folding.Member, value, TextMatch.Equals, folding.Upper) : null;
+            Folding(folded) is { } folding ? Test(folding.Member, value, TextMatch.Equals, folding.Upper, equalityOperator: true) : null;
 
         /// <summary>The regular expression test of a member against a value, or <c>null</c> when they are not a member and a value.</summary>
-        private static Expression? Test(Expression member, Expression value, TextMatch match, bool? fold)
+        private static Expression? Test(Expression member, Expression value, TextMatch match, bool? fold, bool equalityOperator = false)
         {
             if (!Reads(member) || !Constant<string>(value, out var text))
             {
@@ -210,7 +210,16 @@ internal static class MongoPredicates
 
             if (text is null)
             {
-                return match == TextMatch.Equals && fold is null ? Expression.Equal(member, Expression.Constant(null, typeof(string))) : null;
+                // Read as the engines read a test in memory (PredicateNormalizer.CompileResidual): a member equal to null is
+                // its null test, and so is its folded text compared with == (null folds to null); a folded text's Equals(null)
+                // is false (a null receiver fails a text test, and a text is never null); a match against null is refused,
+                // as C# refuses it, rather than left to the driver.
+                return match switch
+                {
+                    TextMatch.Equals when fold is null || equalityOperator => Expression.Equal(member, Expression.Constant(null, typeof(string))),
+                    TextMatch.Equals => Expression.Constant(false),
+                    _ => throw new NotSupportedException($"A text match of '{member}' needs a string value; '{match}' was given null."),
+                };
             }
 
             if (fold is { } upper && text != (upper ? text.ToUpperInvariant() : text.ToLowerInvariant()))

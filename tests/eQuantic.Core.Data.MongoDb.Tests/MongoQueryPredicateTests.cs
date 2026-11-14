@@ -536,4 +536,25 @@ public sealed class MongoQueryPredicateTests : MongoIntegrationTest
         Assert.That((await unions.UnionAsync(Union().OrderByDescending(row => row.Priority).Take(2))).Select(row => row.Title),
             Is.EqualTo(new[] { "t4", "t3" }));
     }
+
+    [Test]
+    public async Task A_text_test_meets_a_null_as_the_engines_read_it()
+    {
+        await Seed(new RelTicket { Title = "x", Alias = null }, new RelTicket { Title = "y", Alias = "abc" });
+        using var scope = NewScope();
+        var repo = Repo<RelTicket>(scope);
+        string? nothing = null;
+        async Task<string[]> Titles(System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter) =>
+            (await repo.GetFilteredAsync(filter)).Select(x => x.Title).OrderBy(x => x).ToArray();
+
+        Assert.That(await Titles(x => string.Equals(x.Alias, nothing, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "x" }));
+        Assert.That(await Titles(x => x.Alias!.ToLower() == nothing), Is.EqualTo(new[] { "x" }), "null folds to null");
+        Assert.That(await Titles(x => x.Alias!.ToLower() != nothing), Is.EqualTo(new[] { "y" }));
+        Assert.That(await Titles(x => x.Alias!.ToLower().Equals(nothing)), Is.Empty, "a folded text never equals null");
+        Assert.That(await Titles(x => !x.Alias!.ToLower().Equals(nothing)), Is.EqualTo(new[] { "x", "y" }));
+        Assert.That(() => repo.GetFilteredAsync(x => x.Alias!.StartsWith(nothing!, StringComparison.OrdinalIgnoreCase)),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("needs a string value"), "as C# refuses a match against null");
+        Assert.That(() => repo.GetFilteredAsync(x => x.Alias!.ToLower().Contains(nothing!)),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("needs a string value"));
+    }
 }
