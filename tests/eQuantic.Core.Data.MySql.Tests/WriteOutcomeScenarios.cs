@@ -147,6 +147,20 @@ public sealed class Revisioned : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A note whose update stamp the store keeps as its ticks, through a converter.</summary>
+public sealed class TickedNote : IEntity<Guid>, IEntityTimeTrack
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Body { get; set; } = "";
+
+    public DateTime? UpdatedAt { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The write-outcome entities' mapping and migration, shared by every relational suite.</summary>
 internal static class WriteOutcomeSchema
 {
@@ -159,7 +173,8 @@ internal static class WriteOutcomeSchema
         .Entity<UserAccount>(entity => entity.Table("users"))
         .Entity<Sprint>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Runner>(_ => { })
-        .Entity<Revisioned>(entity => entity.ConcurrencyToken(x => x.Version));
+        .Entity<Revisioned>(entity => entity.ConcurrencyToken(x => x.Version))
+        .Entity<TickedNote>(entity => entity.Converts(x => x.UpdatedAt, at => at!.Value.Ticks, ticks => (DateTime?)new DateTime(ticks, DateTimeKind.Utc)));
 
     /// <summary>The tables and their unique indexes; a partial one only where the store has them.</summary>
     public static IMigrationBuilder Migrate(IMigrationBuilder migration, bool partialIndexes) => migration
@@ -182,6 +197,7 @@ internal static class WriteOutcomeSchema
             .Index(x => x.Email, options => options.Unique().Named("ix_users_email")))
         .For<Sprint>(sprint => sprint.EnsureCollection())
         .For<Revisioned>(revisioned => revisioned.EnsureCollection())
+        .For<TickedNote>(note => note.EnsureCollection())
         .For<Runner>(runner =>
         {
             runner.EnsureCollection();
@@ -223,6 +239,28 @@ internal static class WriteOutcomeScenarios
         Assert.That((updated.Note, updated.Version), Is.EqualTo(("second", (int?)1)), "an unset version is followed by 1");
         var again = await upserts.UpsertAsync(new Revisioned { Id = record.Id, Note = "third" }, x => x.Id, x => new Revisioned { Note = "third" });
         Assert.That((again.Note, again.Version), Is.EqualTo(("third", (int?)2)));
+    }
+
+    /// <summary>A set-based update writes the UpdatedAt it stamps through the member's converter, as every other write does.</summary>
+    public static async Task SetBasedUpdateStampsThroughTheConverter(Func<IServiceScope> newScope)
+    {
+        var note = new TickedNote { Body = "draft" };
+        using (var seed = newScope())
+        {
+            await Repo<TickedNote>(seed).AddAsync(note);
+            await Commit(seed);
+        }
+
+        var before = DateTime.UtcNow.AddMinutes(-1);
+        using (var scope = newScope())
+        {
+            Assert.That(await Repo<TickedNote>(scope).UpdateManyAsync(x => x.Id == note.Id, x => new TickedNote { Body = "final" }), Is.EqualTo(1L));
+        }
+
+        using var check = newScope();
+        var stored = (await Repo<TickedNote>(check).GetAsync(note.Id))!;
+        Assert.That(stored.Body, Is.EqualTo("final"));
+        Assert.That(stored.UpdatedAt, Is.InRange(before, DateTime.UtcNow.AddMinutes(1)), "the stamp is stored as its ticks and reads back as the time");
     }
 
     /// <summary>An upsert of an entity whose key no row has inserts it; again with a changed member, it updates that row.</summary>

@@ -32,6 +32,10 @@ public sealed class MySqlWriteOutcomeTests : MySqlIntegrationTest
     public Task An_upsert_advances_a_token_the_row_holds_unset() => WriteOutcomeScenarios.UpsertAdvancesAnUnsetToken(NewScope);
 
     [Test]
+    public Task A_set_based_update_stamps_through_the_member_s_converter() =>
+        WriteOutcomeScenarios.SetBasedUpdateStampsThroughTheConverter(NewScope);
+
+    [Test]
     public Task An_upsert_inserts_then_updates() => WriteOutcomeScenarios.UpsertInsertsThenUpdates(NewScope);
 
     [Test]

@@ -744,7 +744,7 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             && _configuration.ColumnFor(stamp.Name) is { } stampColumn
             && !fragments.Any(fragment => fragment.StartsWith(_dialect.Quote(stampColumn.Name) + " =", StringComparison.Ordinal)))
         {
-            fragments.Add($"{_dialect.Quote(stampColumn.Name)} = {Bind(parameters, stamp.Value)}");
+            fragments.Add($"{_dialect.Quote(stampColumn.Name)} = {Bind(parameters, stampColumn.Store(stamp.Value))}");
         }
 
         return string.Join(", ", fragments);
