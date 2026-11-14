@@ -135,6 +135,13 @@ The attribute works on **all six stores**; the fluent form is relational, where 
 column to hang it on. On a document store the attribute is the only place the answer can live — the
 class *is* the schema — which is also why it does more there than remove a diagnostic.
 
+The declared value is written into the generated file as a C# literal that compiles back to it. An
+enum member is written by name, its type spelt as C# spells it (`Shop.Order.Status.Active` for an enum
+nested in `Order`); a combination of flags, or a number no member has, as a cast of its number
+(`(Shop.Order.Status)42`, `(Shop.Order.Status)(-1)`). A `float` or `double` that is not finite is written
+as the constant that names it (`double.NaN`, `float.PositiveInfinity`). A value with no literal form,
+an enum declared inside a generic type among them, is refused by name, so the step is written by hand.
+
 ### Adding a member on a document store
 
 A collection or container needs no declaration to accept a new field: documents gain one on write.
