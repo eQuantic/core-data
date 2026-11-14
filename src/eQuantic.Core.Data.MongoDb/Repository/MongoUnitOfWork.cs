@@ -293,7 +293,9 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
         {
             var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
             token.SetValue(item, Convert.ChangeType(current + 1, Nullable.GetUnderlyingType(token.PropertyType) ?? token.PropertyType));
-            set[MongoFieldNames.Resolve(typeof(TEntity), token)] = current + 1;
+            // Through the member's serializer like every other element of the $set: an int token stays an int, and a
+            // representation the member declares holds, so the document reads the same as a replace would leave it.
+            set[MongoFieldNames.Resolve(typeof(TEntity), token)] = MongoFieldNames.Serialize(typeof(TEntity), token, token.GetValue(item));
             filter = Builders<TEntity>.Filter.And(filter,
                 Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(MongoFieldNames.Resolve(typeof(TEntity), token)), current));
         }
