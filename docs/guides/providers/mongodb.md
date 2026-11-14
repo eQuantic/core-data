@@ -47,7 +47,10 @@ every other provider, through MongoDB's own mechanisms:
   first use: declare `Enum<TEnum>()` before the first read or write (a late declaration refuses).
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded as the BSON value
   their JSON is: an object as a document, an array as an array, a scalar as the scalar. They come
-  back equal, and `null` stays `null`.
+  back equal, and `null` stays `null`. Names starting with `$` or holding a `.` (a JSON Schema's
+  `$schema`, `$id`, `$ref`) are stored as they are by every write — an insert, a replace, a modify of
+  the members named, an upsert, a set-based update — on MongoDB 5.0 or later; an earlier server
+  refuses such names on any write, an insert included.
 - **Sequence** — an atomic counter: one document per `<collection>.<element>` in `_sequences`,
   advanced by `findOneAndUpdate` with `$inc` (upserted on first use), one `$inc` per counter for a
   whole commit, acknowledged by a majority of the replica set (a `w:1` acknowledgement can be rolled
