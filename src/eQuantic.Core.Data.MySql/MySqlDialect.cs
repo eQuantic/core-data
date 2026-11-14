@@ -14,6 +14,13 @@ namespace eQuantic.Core.Data.MySql;
 public class MySqlDialect : SqlDialect
 {
     /// <inheritdoc />
+    /// <remarks>
+    ///     MySQL refuses an <c>UPDATE</c>/<c>DELETE</c> whose subquery reads the written table (error 1093), and the
+    ///     MariaDB dialect keeps the same mechanism: the matching keys are read first, locked, and written by.
+    /// </remarks>
+    public override bool WritesReadTheirOwnTable => false;
+
+    /// <inheritdoc />
     public override string System => "mysql";
 
     /// <inheritdoc />

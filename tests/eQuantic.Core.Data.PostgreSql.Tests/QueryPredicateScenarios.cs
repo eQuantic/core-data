@@ -129,6 +129,24 @@ public sealed class RelCompany : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A node of a tree: its children are rows of its own table, which a filter across them reads.</summary>
+public sealed class RelNode : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid? ParentId { get; set; }
+
+    public string Name { get; set; } = "";
+
+    public int Rank { get; set; }
+
+    public List<RelNode>? Children { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The query-predicate entities' mapping: the navigations follow the conventions (<c>{Nav}Id</c>, <c>{Owner}Id</c>).</summary>
 internal static class QueryPredicateSchema
 {
@@ -140,7 +158,8 @@ internal static class QueryPredicateSchema
         .Entity<RelArtifact>(_ => { })
         .Entity<RelRepo>(_ => { })
         .Entity<RelSpace>(_ => { })
-        .Entity<RelCompany>(_ => { });
+        .Entity<RelCompany>(_ => { })
+        .Entity<RelNode>(entity => entity.Collection(x => x.Children, child => child.ParentId));
 }
 
 /// <summary>Creates the query-predicate tables.</summary>
@@ -156,7 +175,8 @@ public sealed class QueryPredicateMigration : Data.Migration.Migration
         .For<RelArtifact>(artifact => artifact.EnsureCollection().Index(x => x.RepoId))
         .For<RelRepo>(repo => repo.EnsureCollection())
         .For<RelSpace>(space => space.EnsureCollection())
-        .For<RelCompany>(company => company.EnsureCollection());
+        .For<RelCompany>(company => company.EnsureCollection())
+        .For<RelNode>(node => node.EnsureCollection().Index(x => x.ParentId));
 }
 
 /// <summary>
@@ -181,6 +201,7 @@ internal static class QueryPredicateScenarios
         await Repo<RelRepo>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
         await Repo<RelSpace>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
         await Repo<RelCompany>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
+        await Repo<RelNode>(scope).DeleteManyAsync(x => x.Id != Guid.Empty);
     }
 
     private static async Task Seed(Func<IServiceScope> newScope, params object[] entities)
@@ -285,6 +306,58 @@ internal static class QueryPredicateScenarios
         Assert.That(await Repo<RelItem>(scope).DeleteManyAsync(x => x.Box == null && !x.Runs!.Any()), Is.EqualTo(2L));
         using var check = newScope();
         Assert.That((await Repo<RelItem>(check).GetAllAsync()).Select(x => x.Title), Is.EqualTo(new[] { "A" }));
+    }
+
+    /// <summary>
+    ///     Set-based writes whose relation reads the written table itself (a node filtered by its children): one statement
+    ///     where the store lets an <c>UPDATE</c>/<c>DELETE</c> read its own table, the matching keys read first and locked
+    ///     where it does not (MySQL and MariaDB) — the same rows either way.
+    /// </summary>
+    public static async Task SelfReferencingRelationInSetBasedWrites(Func<IServiceScope> newScope)
+    {
+        var root = new RelNode { Name = "root" };
+        var a = new RelNode { Name = "a", ParentId = root.Id };
+        var b = new RelNode { Name = "b", ParentId = root.Id };
+        await Seed(newScope, root, a, b,
+            new RelNode { Name = "a1", ParentId = a.Id },
+            new RelNode { Name = "b1", ParentId = b.Id });
+
+        using (var scope = newScope())
+        {
+            var repo = Repo<RelNode>(scope);
+            Assert.That(await repo.UpdateManyAsync(x => x.Children!.Any(c => c.Name == "a1"), x => new RelNode { Rank = 10 }), Is.EqualTo(1L));
+            Assert.That(await repo.UpdateManyAsync(x => !x.Children!.Any() && x.Rank == 0, x => new RelNode { Rank = 5 }), Is.EqualTo(2L),
+                "the leaves");
+            var returned = await ((IReturningUpdateRepository<RelNode, Guid>)repo)
+                .UpdateAndGetAsync(x => x.Children!.Any(c => c.Rank == 5), x => new RelNode { Rank = x.Rank + 1 });
+            Assert.That(returned.Select(x => (x.Name, x.Rank)).OrderBy(x => x.Name), Is.EqualTo(new[] { ("a", 11), ("b", 1) }));
+            Assert.That(await repo.DeleteManyAsync(x => !x.Children!.Any() && x.Name.StartsWith("a")), Is.EqualTo(1L), "a1");
+            Assert.That(await repo.DeleteManyAsync(x => x.Children!.Any(c => c.Name == "b1")), Is.EqualTo(1L), "b");
+        }
+
+        using var check = newScope();
+        Assert.That((await Repo<RelNode>(check).GetAllAsync()).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Name),
+            Is.EqualTo(new[] { ("a", 11), ("b1", 5), ("root", 0) }));
+    }
+
+    /// <summary>The same writes inside an explicit transaction: the keys-first read and the write join it, and a rollback undoes both.</summary>
+    public static async Task SelfReferencingRelationInsideATransaction(Func<IServiceScope> newScope)
+    {
+        var parent = new RelNode { Name = "parent" };
+        await Seed(newScope, parent, new RelNode { Name = "child", ParentId = parent.Id });
+
+        using (var scope = newScope())
+        {
+            var unitOfWork = (Relational.Repository.RelationalUnitOfWork)scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+            await unitOfWork.BeginTransactionAsync();
+            Assert.That(await Repo<RelNode>(scope).UpdateManyAsync(x => x.Children!.Any(), x => new RelNode { Rank = 1 }), Is.EqualTo(1L));
+            Assert.That(await Repo<RelNode>(scope).DeleteManyAsync(x => !x.Children!.Any()), Is.EqualTo(1L), "the child");
+            await unitOfWork.RollbackTransactionAsync();
+        }
+
+        using var check = newScope();
+        Assert.That((await Repo<RelNode>(check).GetAllAsync()).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Name),
+            Is.EqualTo(new[] { ("child", 0), ("parent", 0) }));
     }
 
     /// <summary>A relation test mixing the related row with the entity's own members is refused with the reason.</summary>

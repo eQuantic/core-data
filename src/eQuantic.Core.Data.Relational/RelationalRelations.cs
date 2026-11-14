@@ -70,6 +70,34 @@ internal sealed class RelationalRelations(RelationalModel model, Func<Type, Lamb
         }
     }
 
+    /// <summary>Whether a filter crosses a relation that reads <paramref name="table" /> — directly, or through a related row's own relations.</summary>
+    public bool ReadsTable(LambdaExpression? filter, Type table) => ReadsTable(filter, table, 0);
+
+    private bool ReadsTable(LambdaExpression? filter, Type table, int depth) =>
+        filter is not null && depth < 8
+                           && RelationPredicates.Find(PredicateNormalizer.Normalize(filter), Navigation).Any(relation =>
+                               relation.Navigation.Target == table
+                               || ReadsTable(relation.Condition, table, depth + 1)
+                               || ReadsTable(Scope(relation.Navigation.Target), table, depth + 1));
+
+    /// <summary>
+    ///     The top-level conjuncts of the filter and the global filter that do <b>not</b> read <paramref name="table" />,
+    ///     joined over the filter's parameter — what a write by locked keys still applies — or <c>null</c> when none is left.
+    /// </summary>
+    public LambdaExpression? Without(LambdaExpression filter, LambdaExpression? global, Type table)
+    {
+        var whole = And(filter, global)!;
+        var kept = Conjuncts(whole.Body)
+            .Where(conjunct => !ReadsTable(Expression.Lambda(conjunct, whole.Parameters), table))
+            .ToList();
+        return kept.Count == 0
+            ? null
+            : Expression.Lambda(whole.Type, kept.Aggregate(Expression.AndAlso), whole.Parameters);
+    }
+
+    private static IEnumerable<Expression> Conjuncts(Expression body) =>
+        body is BinaryExpression { NodeType: ExpressionType.AndAlso } and ? Conjuncts(and.Left).Concat(Conjuncts(and.Right)) : [body];
+
     /// <summary>The conjunction of two conditions over the same entity (either may be <c>null</c>).</summary>
     public static LambdaExpression? And(LambdaExpression? left, LambdaExpression? right)
     {
@@ -79,7 +107,7 @@ internal sealed class RelationalRelations(RelationalModel model, Func<Type, Lamb
         }
 
         var body = new Substitution(right.Parameters[0], left.Parameters[0]).Visit(right.Body);
-        return Expression.Lambda(Expression.AndAlso(left.Body, body), left.Parameters);
+        return Expression.Lambda(left.Type, Expression.AndAlso(left.Body, body), left.Parameters);
     }
 
     private sealed class Substitution(ParameterExpression from, Expression to) : ExpressionVisitor

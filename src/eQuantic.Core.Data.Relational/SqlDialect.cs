@@ -73,6 +73,13 @@ public abstract class SqlDialect
     public virtual string LikeWildcards => "%_";
 
     /// <summary>
+    ///     Whether an <c>UPDATE</c>/<c>DELETE</c> may read its own table in a subquery. Where it may not (MySQL and
+    ///     MariaDB: error 1093), a set-based write whose filter crosses a relation back to the written table reads the
+    ///     matching keys first, locked (<c>FOR UPDATE</c>), and writes by them.
+    /// </summary>
+    public virtual bool WritesReadTheirOwnTable => true;
+
+    /// <summary>
     ///     A <c>LIKE</c> that ignores case, of an escaped pattern (escape character <c>!</c>): both sides lower-cased by
     ///     default; PostgreSQL's <c>ILIKE</c>, which its trigram search index serves.
     /// </summary>

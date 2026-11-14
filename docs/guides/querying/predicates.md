@@ -44,7 +44,7 @@ filtered as one (`x.Address.City == …`). Both entities are registered in the m
 
 | Store | A read or a count | A set-based write |
 |---|---|---|
-| PostgreSQL, SQL Server, MySQL, MariaDB | a **correlated `EXISTS`** (`NOT EXISTS` for `!Any`, `All` and `== null`) in the statement's own `WHERE` — one statement, inside the transaction | the same `EXISTS` in the `UPDATE`/`DELETE` (and in the locking read of MySQL's `UpdateAndGetAsync`) — one statement |
+| PostgreSQL, SQL Server, MySQL, MariaDB | a **correlated `EXISTS`** (`NOT EXISTS` for `!Any`, `All` and `== null`) in the statement's own `WHERE` — one statement, inside the transaction | the same `EXISTS` in the `UPDATE`/`DELETE` — one statement; on MySQL and MariaDB, when the relation reads the written table itself, the matching keys are read first with `FOR UPDATE` and the write runs by them (below) |
 | MongoDB | the **related keys resolved first**: one aggregation over the related collection per test (`$match`, then `$group` on the key), inside the open transaction's session, then `$in` (`$nin`) over them | the same: the keys first, then `updateMany`/`deleteMany`/`findOneAndUpdate` filtered by them — a write's filter cannot hold a `$lookup` |
 | Cosmos DB | the **related keys resolved first**: one `SELECT DISTINCT VALUE` over the related container per test (cross-partition), then `IN` (`NOT IN`) over them | the same; each item is then patched (or deleted) **under the filter holding those keys** |
 | Cassandra | the **related keys resolved first**, through the same planner and gates as any read and **under the read's own opt-ins** (`SELECT DISTINCT` when the key is the related table's partition key), then `IN` over them where the table's key serves it — `NOT IN` and anything else CQL cannot express runs client-side behind `.AllowClientEvaluation()` | the keys first, then the write finds its rows by them as by any key: a write carries no opt-ins, so its related read has to be one the table serves natively, and the keys have to address the written table's partition |
@@ -86,7 +86,11 @@ explain runs nothing).
   query. A set-based write with a negated relation (`!x.Runs.Any()`) is refused: a lightweight
   transaction's `IF` has no `NOT IN`.
 - **MySQL and MariaDB** refuse an `UPDATE`/`DELETE` whose subquery reads the table being written
-  (error 1093): a self-referencing relation in a set-based write fails there with the store's message.
+  (error 1093), as a self-referencing relation does (a node filtered by its children). There a
+  set-based write reads the matching keys first, inside the operation's transaction (the open one, or
+  its own), with `SELECT … FOR UPDATE` — a `SELECT` may read its own table — so the set cannot change
+  before the write; the `UPDATE`/`DELETE` then runs by those keys, the filter's other conjuncts still
+  applied. PostgreSQL and SQL Server keep the single statement.
 
 A relation test compares the related rows with **values**: one that also reads the entity's own
 members (`x.Items.Any(i => i.OwnerId == x.Id)`) is refused with the reason, and so is a collection

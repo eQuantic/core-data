@@ -103,6 +103,11 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             return await UpdateManyAsync(filter, EntityLifecycle.SoftDeleteUpdate<TEntity>(_unitOfWork.Conventions, _unitOfWork.Services), cancellationToken).ConfigureAwait(false);
         }
 
+        if (ReadsOwnTable(filter))
+        {
+            return await ByLockedKeysAsync(filter, _ => $"DELETE FROM {Table}", cancellationToken).ConfigureAwait(false);
+        }
+
         // The global filter scopes set-based writes too (a tenant-scoped delete stays tenant-scoped).
         var (where, parameters) = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(),
             _unitOfWork.Relations);
@@ -122,6 +127,13 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
+        if (ReadsOwnTable(filter))
+        {
+            return await _unitOfWork.TranslatingAsync(() => ByLockedKeysAsync(filter,
+                setParameters => $"UPDATE {Table} SET {SetList(updateExpression, setParameters, existingRow: null)}", cancellationToken))
+                .ConfigureAwait(false);
+        }
+
         var parameters = new List<object?>();
         var set = SetList(updateExpression, parameters, existingRow: null);
         var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters,
@@ -185,7 +197,7 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
 
             var updateParameters = new List<object?>();
             var updateSet = SetList(updateExpression, updateParameters, existingRow: null);
-            var byKeys = KeysWhere(keys, updateParameters);
+            var byKeys = KeysAndTheRest(keys, filter, updateParameters);
             await using (var command = await _unitOfWork.CommandAsync(
                              $"UPDATE {Table} SET {updateSet} WHERE {byKeys}", updateParameters, cancellationToken).ConfigureAwait(false))
             {
@@ -544,6 +556,72 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         }
 
         return string.Join(" AND ", clauses);
+    }
+
+    /// <summary>
+    ///     Whether this write's filter crosses a relation back to the written table on a dialect whose <c>UPDATE</c>/<c>DELETE</c>
+    ///     cannot read its own table (MySQL and MariaDB, error 1093): then the matching keys are read first.
+    /// </summary>
+    private bool ReadsOwnTable(Expression<Func<TEntity, bool>> filter) =>
+        !_dialect.WritesReadTheirOwnTable
+        && _unitOfWork.Relations.ReadsTable(RelationalRelations.And(filter, _unitOfWork.GlobalFilter<TEntity>()), typeof(TEntity));
+
+    /// <summary>
+    ///     A set-based write by locked keys, in one transaction (the open one, or its own): the keys of the rows the whole
+    ///     filter matches are read with <c>FOR UPDATE</c> — the relation evaluated by a <c>SELECT</c>, which may read its own
+    ///     table — so the set cannot change before the write; then the statement writes by those keys, the rest of the filter
+    ///     still applied. The count is the rows the write found.
+    /// </summary>
+    /// <param name="filter">The write's filter.</param>
+    /// <param name="statement">The statement before its <c>WHERE</c>, binding its own values first.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    private Task<long> ByLockedKeysAsync(Expression<Func<TEntity, bool>> filter, Func<List<object?>, string> statement,
+        CancellationToken cancellationToken) =>
+        _unitOfWork.AtomicallyAsync(async () =>
+        {
+            var keys = await LockedKeysAsync(filter, cancellationToken).ConfigureAwait(false);
+            if (keys.Count == 0)
+            {
+                return 0L;
+            }
+
+            var parameters = new List<object?>();
+            var sql = statement(parameters);
+            return await ExecuteAsync($"{sql} WHERE {KeysAndTheRest(keys, filter, parameters)}", parameters, cancellationToken)
+                .ConfigureAwait(false);
+        }, cancellationToken);
+
+    /// <summary>The keys of the rows the filter (and the global filter) matches, locked until the transaction ends.</summary>
+    private async Task<List<object?[]>> LockedKeysAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken)
+    {
+        var keyColumns = string.Join(", ", _configuration.Keys.Select(key => _dialect.Quote(key.Name)));
+        var parameters = new List<object?>();
+        var where = RelationalSql.Where(_dialect, _configuration, filter, _unitOfWork.GlobalFilter<TEntity>(), parameters, _unitOfWork.Relations);
+        var keys = new List<object?[]>();
+        await using var command = await _unitOfWork.CommandAsync(
+            $"SELECT {keyColumns} FROM {Table} WHERE {where}{_dialect.ForUpdateClause}", parameters, cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var key = new object?[_configuration.Keys.Count];
+            reader.GetValues(key!);
+            keys.Add(key);
+        }
+
+        return keys;
+    }
+
+    /// <summary>
+    ///     The rows by their keys, and the filter's conjuncts that do not read the written table (the ones that do were
+    ///     evaluated by the locking read, and the store would refuse them in the write).
+    /// </summary>
+    private string KeysAndTheRest(IReadOnlyList<object?[]> keys, Expression<Func<TEntity, bool>> filter, List<object?> parameters)
+    {
+        var byKeys = KeysWhere(keys, parameters);
+        var relations = _unitOfWork.Relations;
+        return relations.Without(filter, _unitOfWork.GlobalFilter<TEntity>(), typeof(TEntity)) is Expression<Func<TEntity, bool>> rest
+            ? $"{byKeys} AND {RelationalSql.Where(_dialect, _configuration, rest, null, parameters, relations)}"
+            : byKeys;
     }
 
     /// <summary>The predicate matching rows by the key values read from them.</summary>

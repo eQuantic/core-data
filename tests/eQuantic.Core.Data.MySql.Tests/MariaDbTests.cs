@@ -142,6 +142,12 @@ public sealed class MariaDbTests
     [Test]
     public Task An_array_and_a_list_are_tested_with_Contains() => QueryPredicateScenarios.ArrayAndListContains(NewScope);
 
+    [Test]
+    public Task A_self_referencing_relation_in_set_based_writes() => QueryPredicateScenarios.SelfReferencingRelationInSetBasedWrites(NewScope);
+
+    [Test]
+    public Task A_self_referencing_relation_inside_a_transaction() => QueryPredicateScenarios.SelfReferencingRelationInsideATransaction(NewScope);
+
     // ---------------------------------------------------------------- generated keys
 
     [Test]

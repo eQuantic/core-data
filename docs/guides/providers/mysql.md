@@ -23,9 +23,10 @@ truth lives.
   `CASE WHEN col IS NULL` (neither engine has `NULLS FIRST`), `LIMIT`/`OFFSET` pages without a count
   and `SELECT DISTINCT` — see [Querying](../querying/includes.md).
 - Filters across relations run as a correlated `EXISTS` / `NOT EXISTS` on both dialects, in reads,
-  counts and set-based writes; a set-based write whose relation reads the very table it writes
-  (a self-referencing navigation) is refused by the store (error 1093) — see
-  [Relations and text in filters](../querying/predicates.md). Text ignoring case is
+  counts and set-based writes. A set-based write whose relation reads the very table it writes (a
+  self-referencing navigation), which both engines refuse in one statement (error 1093), reads the
+  matching keys first with `SELECT … FOR UPDATE` inside its transaction and writes by them, the rest
+  of the filter still applied — see [Relations and text in filters](../querying/predicates.md). Text ignoring case is
   `LOWER(col) = LOWER(@p)` / `LOWER(col) LIKE LOWER(@p) ESCAPE '!'`; the default collations also
   ignore accents.
 - `[SearchIndex]` materializes **no index** on MySQL (no trigram equivalent in the box) — `LIKE`
