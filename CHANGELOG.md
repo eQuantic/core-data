@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.0.0](https://github.com/eQuantic/core-data/compare/v6.9.0...v7.0.0) (2026-11-14)
+
+### ⚠ BREAKING CHANGES
+
+* a taken key is `DuplicateKeyException` on every write path, MongoDB `UpdateManyAsync` returns the matched count, MongoDB and Cosmos DB `DeleteManyAsync` honour soft delete, a MySQL bulk load with a taken key fails as a whole, Cosmos DB ETag refusals are `ConcurrencyConflictException`, a MongoDB counter no longer rolls back with a transaction, and a Cassandra include or relation read with no partition needs `.AllowFiltering()`.
+
+### Features
+
+* the persistence eQuantic Space needs, on every engine ([#13](https://github.com/eQuantic/core-data/issues/13)) ([aa5830c](https://github.com/eQuantic/core-data/commit/aa5830c2e7078cd2e0d7d0eb8d5110c1d94c07e1)), closes [#12](https://github.com/eQuantic/core-data/issues/12)
+
 ## [6.9.0](https://github.com/eQuantic/core-data/compare/v6.8.0...v6.9.0) (2026-07-27)
 
 ### Features
