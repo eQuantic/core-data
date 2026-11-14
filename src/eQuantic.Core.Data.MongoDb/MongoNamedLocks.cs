@@ -60,7 +60,10 @@ public static class MongoNamedLocks
 /// <summary>The leases in a database's <see cref="MongoNamedLocks.CollectionName" /> collection.</summary>
 internal sealed class MongoLeaseStore(IMongoDatabase database) : LeaseStore
 {
-    private readonly IMongoCollection<BsonDocument> _leases = database.GetCollection<BsonDocument>(MongoNamedLocks.CollectionName);
+    // Majority writes and reads: a lease a w:1 acknowledgement granted could be rolled back by a failover, and a new
+    // primary would grant it to a second holder while the first still believes it holds it.
+    private readonly IMongoCollection<BsonDocument> _leases = database.GetCollection<BsonDocument>(MongoNamedLocks.CollectionName)
+        .WithWriteConcern(WriteConcern.WMajority).WithReadConcern(ReadConcern.Majority);
 
     public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration)
     {

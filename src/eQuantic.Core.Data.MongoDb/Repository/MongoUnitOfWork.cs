@@ -43,6 +43,16 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
     internal IMongoCollection<TEntity> GetCollection<TEntity>() =>
         Database.GetCollection<TEntity>(CollectionName<TEntity>());
 
+    private static readonly MethodInfo CollectionNameMethod = typeof(MongoUnitOfWork)
+        .GetMethod(nameof(CollectionName), BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    /// <summary>
+    ///     The collection this unit of work keeps <paramref name="entityType" /> in — its <see cref="CollectionName{TEntity}" />,
+    ///     overridden or not — for the stages that name a collection by type (a <c>$lookup</c>'s <c>from</c>).
+    /// </summary>
+    internal string CollectionNameOf(Type entityType) =>
+        (string)CollectionNameMethod.MakeGenericMethod(entityType).Invoke(this, null)!;
+
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
     private DataConventions? _conventions;
@@ -196,23 +206,6 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
     {
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         Buffer<TEntity>().Add(VersionedReplace(item, upsert: false), conditional: HasToken<TEntity>());
-    }
-
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
-    {
-        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-
-        // A token entity at its initial version is a new document: insert it (a duplicate key surfaces as an
-        // error rather than silently overwriting a concurrent writer's document).
-        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
-            && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
-        {
-            StampInitialVersion(item);
-            Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
-            return;
-        }
-
-        Buffer<TEntity>().Add(VersionedReplace(item, upsert: !HasToken<TEntity>()), conditional: HasToken<TEntity>());
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
@@ -401,8 +394,10 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
 
     /// <summary>
     ///     Gives every staged insert the values the store assigns its store-generated members: the next numbers of
-    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, in the open transaction) and the
-    ///     server's clock (read once, the same instant for every insert of the commit).
+    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, outside any open transaction) and the
+    ///     server's clock (read once, the same instant for every insert of the commit). The inserts stay listed until
+    ///     every value is on its entity: a commit that fails reading the clock or a counter keeps them staged, and the
+    ///     retried commit assigns them again (a counter advanced before the failure leaves a gap, never a repeat).
     /// </summary>
     private async Task AssignStoreGeneratedAsync(CancellationToken cancellationToken)
     {
@@ -411,12 +406,16 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
             return;
         }
 
-        var pending = _generatedInserts.ToList();
+        await AssignStoreGeneratedAsync(_generatedInserts.ToList(), cancellationToken).ConfigureAwait(false);
         _generatedInserts.Clear();
-        await AssignStoreGeneratedAsync(pending, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Gives these inserts the values the store assigns their store-generated members.</summary>
+    /// <summary>
+    ///     Gives these inserts the values the store assigns their store-generated members. A counter advances outside the
+    ///     open transaction, as a PostgreSQL sequence does: concurrent transactions inserting into one collection never
+    ///     write-lock its counter until they end (which MongoDB answers with a write conflict), and a transaction that
+    ///     rolls back leaves the numbers it took unused, a gap.
+    /// </summary>
     internal async Task AssignStoreGeneratedAsync(IReadOnlyList<(object Entity, Type EntityType)> generatedInserts,
         CancellationToken cancellationToken)
     {
@@ -443,7 +442,7 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
                      .GroupBy(insert => MongoSequences.CounterId(MongoModeling.CollectionName(insert.EntityType), insert.Member.ElementName)))
         {
             var count = counter.Count();
-            var last = await MongoSequences.AdvanceAsync(Database, _session, counter.Key, count, cancellationToken).ConfigureAwait(false);
+            var last = await MongoSequences.AdvanceAsync(Database, counter.Key, count, cancellationToken).ConfigureAwait(false);
             var next = last - count + 1;
             foreach (var insert in counter)
             {

@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Reflection;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository.Options;
 using MongoDB.Bson;
@@ -22,9 +23,19 @@ internal static class MongoStages
     public static string FieldName<T>(LambdaExpression selector) =>
         new ExpressionFieldDefinition<T>(Unconverted(selector)).Render(Args<T>()).FieldName;
 
+    /// <summary>The stored field a member selector over <paramref name="type" /> names (untyped).</summary>
+    public static string FieldName(Type type, LambdaExpression selector) =>
+        (string)typeof(MongoStages).GetMethod(nameof(FieldName), 1, [typeof(LambdaExpression)])!
+            .MakeGenericMethod(type).Invoke(null, [selector])!;
+
     /// <summary>Renders a predicate over <typeparamref name="T" /> as a <c>$match</c> filter document.</summary>
     public static BsonDocument Filter<T>(LambdaExpression predicate) =>
         Builders<T>.Filter.Where((Expression<Func<T, bool>>)MongoPredicates.Rendered(predicate)).Render(Args<T>());
+
+    /// <summary>Renders a predicate over <paramref name="type" /> as a <c>$match</c> filter document (untyped).</summary>
+    public static BsonDocument Filter(Type type, LambdaExpression predicate) =>
+        (BsonDocument)typeof(MongoStages).GetMethod(nameof(Filter), 1, [typeof(LambdaExpression)])!
+            .MakeGenericMethod(type).Invoke(null, [predicate])!;
 
     /// <summary>Whether every sort places nulls where MongoDB already puts them (first ascending, last descending).</summary>
     public static bool NaturalNulls(IReadOnlyList<MemorySort> sorts) =>
@@ -87,6 +98,17 @@ internal static class MongoStages
 
         return query;
     }
+
+    /// <summary>
+    ///     Appends raw stages to a LINQ query expression whose elements are <paramref name="elementType" />, keeping its
+    ///     element type: the expression of the query <paramref name="provider" /> builds over it with the stages appended.
+    /// </summary>
+    public static Expression Append(Type elementType, IQueryProvider provider, Expression source, IEnumerable<BsonDocument> stages) =>
+        (Expression)typeof(MongoStages).GetMethod(nameof(AppendTo), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(elementType).Invoke(null, [provider, source, stages])!;
+
+    private static Expression AppendTo<T>(IQueryProvider provider, Expression source, IEnumerable<BsonDocument> stages) =>
+        Append(provider.CreateQuery<T>(source), stages).Expression;
 
     /// <summary>The element name a class-mapped member is stored under, or <c>null</c> when it is not mapped.</summary>
     public static string? ElementName(Type type, string member)

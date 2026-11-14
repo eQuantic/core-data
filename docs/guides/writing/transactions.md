@@ -104,7 +104,8 @@ patches join the transaction's batch.
 A filter may cross a relation (`DeleteManyAsync(x => x.Repository.WorkspaceId == w)`): the relational
 stores put a correlated `EXISTS` in the `UPDATE`/`DELETE` itself; MongoDB, Cosmos DB and Cassandra
 read the related keys first — MongoDB inside the open transaction's session — and write the rows
-those keys find, as [Relations and text in filters](../querying/predicates.md) describes.
+those keys find (MongoDB, past what an `$in` carries, the ids one aggregation with a `$lookup` finds,
+in batches), as [Relations and text in filters](../querying/predicates.md) describes.
 
 On Cassandra a conditional write needs the partition key in its filter (the rows are read by their
 key first), takes no condition on a counter table, and costs a Paxos round per row; an increment of a

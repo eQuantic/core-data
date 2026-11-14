@@ -78,8 +78,11 @@ internal static class MongoTakenKeys
         return free;
     }
 
-    /// <summary>Gives every document without an id the one the driver would generate on insert, so it can be compared now.</summary>
-    private static void AssignIds<TEntity>(IMongoCollection<TEntity> collection, IBsonSerializer<TEntity> serializer, IReadOnlyList<TEntity> entities)
+    /// <summary>
+    ///     Gives every document without an id the one the driver would generate on insert (its id generator's), so it can
+    ///     be compared, or filtered on, before it is written.
+    /// </summary>
+    internal static void AssignIds<TEntity>(IMongoCollection<TEntity> collection, IBsonSerializer<TEntity> serializer, IReadOnlyList<TEntity> entities)
     {
         if (serializer is not IBsonIdProvider provider)
         {

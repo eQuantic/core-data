@@ -37,12 +37,13 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         _unitOfWork.GlobalFilter<TEntity>() is { } global ? filter.AndAlso(global) : filter;
 
     /// <summary>
-    ///     A set-based write's filter as the driver reads it: scoped, normalized, text without regard to case as an escaped
-    ///     regular expression, and each test across a relation resolved into the related keys — read first, in the
-    ///     session — since a write's filter cannot hold a <c>$lookup</c>.
+    ///     The filters a set-based write runs in turn, as the driver reads them: scoped, normalized, text without regard to
+    ///     case as an escaped regular expression, and each test across a relation resolved — read first, in the session,
+    ///     since a write's filter cannot hold a <c>$lookup</c>: one filter with the related keys as an <c>$in</c>, or,
+    ///     past what an <c>$in</c> carries, batches of the matching documents' ids (see <see cref="MongoRelations" />).
     /// </summary>
-    private Task<Expression<Func<TEntity, bool>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
-        MongoPredicates.ReadyAsync(Scoped(filter), _unitOfWork, cancellationToken);
+    private Task<IReadOnlyList<FilterDefinition<TEntity>>> Ready(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken) =>
+        MongoPredicates.WriteFiltersAsync(Scoped(filter), _unitOfWork, _collection, cancellationToken);
 
     // ---------------------------------------------------------------- IQueryable
     public Type ElementType => Queryable.ElementType;
@@ -92,11 +93,16 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         }
 
         var session = _unitOfWork.Session;
-        var ready = await Ready(filter, cancellationToken).ConfigureAwait(false);
-        var result = session is null
-            ? await _collection.DeleteManyAsync(ready, cancellationToken).ConfigureAwait(false)
-            : await _collection.DeleteManyAsync(session, ready, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return result.DeletedCount;
+        long deleted = 0;
+        foreach (var ready in await Ready(filter, cancellationToken).ConfigureAwait(false))
+        {
+            var result = session is null
+                ? await _collection.DeleteManyAsync(ready, cancellationToken).ConfigureAwait(false)
+                : await _collection.DeleteManyAsync(session, ready, cancellationToken: cancellationToken).ConfigureAwait(false);
+            deleted += result.DeletedCount;
+        }
+
+        return deleted;
     }
 
     /// <remarks>
@@ -114,12 +120,17 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
     {
         var update = WithUpdateStamp(MongoUpdate.Build(updateExpression), updateExpression);
         var session = _unitOfWork.Session;
-        var ready = await Ready(filter, cancellationToken).ConfigureAwait(false);
-        var result = await MongoDuplicateKeys.TranslatingAsync(async () => session is null
-            ? await _collection.UpdateManyAsync(ready, update, cancellationToken: cancellationToken).ConfigureAwait(false)
-            : await _collection.UpdateManyAsync(session, ready, update, cancellationToken: cancellationToken).ConfigureAwait(false))
-            .ConfigureAwait(false);
-        return result.MatchedCount;
+        long matched = 0;
+        foreach (var ready in await Ready(filter, cancellationToken).ConfigureAwait(false))
+        {
+            var result = await MongoDuplicateKeys.TranslatingAsync(async () => session is null
+                ? await _collection.UpdateManyAsync(ready, update, cancellationToken: cancellationToken).ConfigureAwait(false)
+                : await _collection.UpdateManyAsync(session, ready, update, cancellationToken: cancellationToken).ConfigureAwait(false))
+                .ConfigureAwait(false);
+            matched += result.MatchedCount;
+        }
+
+        return matched;
     }
 
     // ---------------------------------------------------------------- returning updates (immediate)
@@ -134,23 +145,25 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken)
     {
         var update = WithUpdateStamp(MongoUpdate.Build(updateExpression), updateExpression);
-        var scoped = Builders<TEntity>.Filter.Where(await Ready(filter, cancellationToken).ConfigureAwait(false));
         var session = _unitOfWork.Session;
-        var ids = await (session is null ? _collection.Find(scoped) : _collection.Find(session, scoped))
-            .Project(Builders<TEntity>.Projection.Include("_id"))
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
         var options = new FindOneAndUpdateOptions<TEntity> { ReturnDocument = ReturnDocument.After };
-        var updated = new List<TEntity>(ids.Count);
-        foreach (var id in ids)
+        var updated = new List<TEntity>();
+        foreach (var scoped in await Ready(filter, cancellationToken).ConfigureAwait(false))
         {
-            var one = Builders<TEntity>.Filter.And(new BsonDocumentFilterDefinition<TEntity>(new BsonDocument("_id", id["_id"])), scoped);
-            var document = await MongoDuplicateKeys.TranslatingAsync(() => session is null
-                ? _collection.FindOneAndUpdateAsync(one, update, options, cancellationToken)
-                : _collection.FindOneAndUpdateAsync(session, one, update, options, cancellationToken)).ConfigureAwait(false);
-            if (document is not null)
+            var ids = await (session is null ? _collection.Find(scoped) : _collection.Find(session, scoped))
+                .Project(Builders<TEntity>.Projection.Include("_id"))
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            foreach (var id in ids)
             {
-                updated.Add(document);
+                var one = Builders<TEntity>.Filter.And(new BsonDocumentFilterDefinition<TEntity>(new BsonDocument("_id", id["_id"])), scoped);
+                var document = await MongoDuplicateKeys.TranslatingAsync(() => session is null
+                    ? _collection.FindOneAndUpdateAsync(one, update, options, cancellationToken)
+                    : _collection.FindOneAndUpdateAsync(session, one, update, options, cancellationToken)).ConfigureAwait(false);
+                if (document is not null)
+                {
+                    updated.Add(document);
+                }
             }
         }
 
@@ -181,6 +194,15 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
                                                                     ?? throw new NotSupportedException(
                                                                         $"'{typeof(TEntity).Name}' has no member '{member}' to upsert on."))
             .ToList();
+
+        // An entity whose id is unset is a new document: it takes the id the driver generates on insert (an ObjectId, a
+        // string represented as one, a Guid), so that no upsert filters on an empty id, nor stores one. An upsert on the
+        // id needs it to filter by; one on other members only when it inserts.
+        var targetsId = target.Any(member => member.Name == idMember.MemberName);
+        if (targetsId)
+        {
+            MongoTakenKeys.AssignIds(_collection, _collection.DocumentSerializer, [entity]);
+        }
 
         // The target: the entity's value of each member, and the conflict filter.
         var parameter = Expression.Parameter(typeof(TEntity), "x");
@@ -223,6 +245,11 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
             {
                 // The store's values for the insert, once: a retry that ends in the update leaves a gap, never a repeat.
                 await _unitOfWork.AssignStoreGeneratedAsync([(entity, typeof(TEntity))], cancellationToken).ConfigureAwait(false);
+                if (!targetsId)
+                {
+                    MongoTakenKeys.AssignIds(_collection, _collection.DocumentSerializer, [entity]);
+                }
+
                 inserting = entity.ToBsonDocument(typeof(TEntity));
                 if (on is null)
                 {
