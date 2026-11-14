@@ -1,3 +1,4 @@
+using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.SqlServer.Extensions;
 using eQuantic.Core.Data.SqlServer.Repository;
@@ -70,6 +71,21 @@ public sealed class SqlServerNamedLockTests : SqlServerIntegrationTest
 
     [Test]
     public Task Names_are_compared_exactly() => NamedLockScenarios.NamesAreComparedExactly(Holder);
+
+    [Test]
+    public Task A_commit_that_fails_still_ends_the_transaction_and_its_locks() =>
+        NamedLockScenarios.AFailedCommitEndsTheTransactionsLocks(Holder, async (victim, killer) =>
+        {
+            var session = (await ((RelationalUnitOfWork)victim.Locks).QueryAsync<SessionRow>(
+                "SELECT CAST(@@SPID AS bigint) AS value"))[0].Value;
+            // KILL takes no parameter: the session id is a number the server just answered.
+            await ((RelationalUnitOfWork)killer.Locks).ExecuteAsync($"KILL {session}");
+        });
+
+    private sealed class SessionRow
+    {
+        public long Value { get; set; }
+    }
 
     [Test]
     public async Task The_server_holds_an_application_lock_on_the_documented_resource()

@@ -289,4 +289,34 @@ internal static class NamedLockScenarios
         Assert.That(async () => await second.Acquire($"{prefix}:1:{suffix}", TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
             "a long name is still one lock");
     }
+
+    /// <summary>
+    ///     A commit that fails still ends the transaction. Here its session is killed under it: the server lets go of
+    ///     the lock with the session, and the commit cannot succeed. Another holder then takes the name, the first no
+    ///     longer counts it as held (re-acquiring it waits like anyone else's attempt), and a rollback finds no
+    ///     transaction left to undo.
+    /// </summary>
+    /// <param name="holders">Creates a holder.</param>
+    /// <param name="killSession">Kills the session of the first holder's open transaction, from the second holder.</param>
+    public static async Task AFailedCommitEndsTheTransactionsLocks(Func<LockHolder> holders,
+        Func<LockHolder, LockHolder, Task> killSession)
+    {
+        using var first = holders();
+        using var second = holders();
+        var name = Unique("commit");
+
+        await first.BeginTransaction();
+        await first.Acquire(name, TimeSpan.FromSeconds(5));
+        await killSession(first, second);
+
+        Assert.That(async () => await first.CommitTransaction(), Throws.Exception, "the session is gone, and the commit with it");
+        await using (await second.Acquire(name, TimeSpan.FromSeconds(5)))
+        {
+            Assert.That(async () => await first.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
+                "the failed commit ended the transaction's lock: the first holder does not re-enter it");
+        }
+
+        Assert.That(async () => await first.RollbackTransaction(), Throws.Nothing,
+            "the failed commit left no transaction behind to roll back");
+    }
 }
