@@ -195,6 +195,15 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         var targetFilter = Expression.Lambda<Func<TEntity, bool>>(body, parameter);
         var filter = Builders<TEntity>.Filter.Where(conflictFilter is null ? targetFilter : targetFilter.AndAlso(conflictFilter));
 
+        // An entity whose id is unset is a new document: it takes the id the driver generates on insert (an ObjectId, a
+        // string represented as one, a Guid), so that no upsert filters on an empty id, nor stores one. An upsert on the
+        // id needs it to filter by; one on other members only when it inserts.
+        var targetsId = target.Any(member => member.Name == idMember.MemberName);
+        if (targetsId)
+        {
+            MongoTakenKeys.AssignIds(_collection, _collection.DocumentSerializer, [entity]);
+        }
+
         EntityLifecycle.StampForInsert(entity, _unitOfWork.Conventions, _unitOfWork.Services);
         MongoUnitOfWork.StampInitialVersion(entity);
         var update = UpsertUpdate(entity, classMap, target, updateExpression);
@@ -236,6 +245,11 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
                 var insert = new BsonDocument("$setOnInsert", inserting);
                 var result = session is null
                     ? await _collection.UpdateOneAsync(filter, insert, new UpdateOptions { IsUpsert = true }, cancellationToken).ConfigureAwait(false)
+                if (!targetsId)
+                {
+                    MongoTakenKeys.AssignIds(_collection, _collection.DocumentSerializer, [entity]);
+                }
+
                     : await _collection.UpdateOneAsync(session, filter, insert, new UpdateOptions { IsUpsert = true }, cancellationToken).ConfigureAwait(false);
                 if (result.UpsertedId is not null)
                 {

@@ -103,6 +103,10 @@ the target, ten concurrent upserts leave one document; without one, MongoDB itse
 `InsertManyAsync(…, skipDuplicates: true)` is an unordered `insertMany` discarding only E11000 — except
 inside a transaction, which MongoDB aborts on any write error: there the `_id`s and every unique
 index's values are looked up inside the session first, and only the free documents are inserted (a
+An entity whose id is unset is a new document: it takes the id the driver generates on insert (an
+`ObjectId`, a string represented as one, a `Guid`) before the upsert filters by it, or inserts it on
+another target — never an empty `ObjectId` or a null `_id` that the next new entity would be merged
+into.
 concurrent writer taking a key in between surfaces as MongoDB's transient write conflict).
 `UpdateAndGetAsync` runs `findOneAndUpdate` per matching document. E11000 — from a write, a bulk write
 or a command — is `DuplicateKeyException` naming the index. See
