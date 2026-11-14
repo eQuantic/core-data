@@ -106,7 +106,9 @@ outside the session, as MongoDB requires), are looked up among the stored docume
 holding only documents with one of its fields, a partial index only those its
 `partialFilterExpression` matches, a collated index comparing under its collation (the batch's own
 repeats compared with the platform's culture comparison at that strength), and a number compared by its
-value whatever its BSON type (`10`, `10.0` and `10.00m` are one key, as they are to the index) — and the documents whose
+exact value whatever its BSON type, as the index compares it (`10`, `10.0` and `10.00m` are one key, while
+`0.1 + 0.2` and `0.3` are two, and so are a long past 2^53 and the double nearest it; a partial index's
+filter compares numbers the same way) — and the documents whose
 keys are taken, or repeat an earlier one of the batch, are left out before anything is written. A
 concurrent writer that takes one of the free keys between the check and the insert makes MongoDB
 answer with its **transient write conflict** (`WriteConflict`, labelled `TransientTransactionError`):

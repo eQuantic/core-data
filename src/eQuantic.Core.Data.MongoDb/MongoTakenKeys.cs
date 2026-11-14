@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using MongoDB.Bson;
 using MongoDB.Bson.IO;
 using MongoDB.Bson.Serialization;
@@ -279,44 +280,154 @@ internal static class MongoTakenKeys
         public string Canonical(BsonValue value) => value.BsonType switch
         {
             BsonType.Null or BsonType.Undefined => "null",
-            BsonType.Int32 or BsonType.Int64 => "n:" + value.ToInt64().ToString(CultureInfo.InvariantCulture),
-            BsonType.Double => Number(value.AsDouble),
-            BsonType.Decimal128 => Number(value.AsDecimal128),
+            BsonType.Int32 or BsonType.Int64 or BsonType.Double or BsonType.Decimal128 => ExactNumber.From(value).Canonical,
             BsonType.String when _compareInfo is not null =>
                 "s:" + Convert.ToBase64String(_compareInfo.GetSortKey(value.AsString, _options).KeyData),
             BsonType.String => "s:" + value.AsString,
             _ => "b:" + value.BsonType + ":" + value.ToJson(),
         };
+    }
 
-        // A number is one key whatever its BSON type, as MongoDB's index compares them: 10, 10.0 and 10.00m are one.
-        private static string Number(double value) =>
-            double.IsFinite(value) && Math.Abs(value) < 7.9e27
-                ? Number((decimal)value)
-                : "n:" + value.ToString("R", CultureInfo.InvariantCulture);
+    /// <summary>
+    ///     A BSON number as the exact value it holds, so that two numbers compare as MongoDB compares them: by value,
+    ///     exactly, whatever their BSON types. <c>10</c>, <c>10.0</c> and <c>10.00m</c> are one number; a double is the
+    ///     binary fraction it holds (<c>0.1 + 0.2</c> is not <c>0.3</c>, nor is the double <c>0.1</c> the decimal
+    ///     <c>0.1m</c>), never the 15 digits a conversion to <c>decimal</c> keeps; and a long past 2^53 is not the double
+    ///     nearest it. Finite values are a coefficient and a power of ten with the trailing zeros taken out; NaN sorts below
+    ///     every number, as <c>double.CompareTo</c> sorts it.
+    /// </summary>
+    private readonly struct ExactNumber : IComparable<ExactNumber>
+    {
+        private const int NaN = -2;
+        private const int NegativeInfinity = -1;
+        private const int Finite = 0;
+        private const int PositiveInfinity = 1;
 
-        private static string Number(Decimal128 value)
+        private readonly int _kind;
+        private readonly BigInteger _coefficient;
+        private readonly int _exponent;
+
+        private ExactNumber(int kind, BigInteger coefficient, int exponent)
+        {
+            _kind = kind;
+            _coefficient = coefficient;
+            _exponent = exponent;
+        }
+
+        public string Canonical => _kind switch
+        {
+            NaN => "n:NaN",
+            NegativeInfinity => "n:-Infinity",
+            PositiveInfinity => "n:Infinity",
+            _ => "n:" + _coefficient.ToString(CultureInfo.InvariantCulture) + "e" + _exponent.ToString(CultureInfo.InvariantCulture),
+        };
+
+        public static ExactNumber From(BsonValue value) => value.BsonType switch
+        {
+            BsonType.Int32 or BsonType.Int64 => Normalized(value.ToInt64(), 0),
+            BsonType.Double => FromDouble(value.AsDouble),
+            BsonType.Decimal128 => FromDecimal128(value.AsDecimal128),
+            _ => throw new ArgumentException($"A {value.BsonType} is not a number.", nameof(value)),
+        };
+
+        public int CompareTo(ExactNumber other)
+        {
+            if (_kind != Finite || other._kind != Finite)
+            {
+                return _kind.CompareTo(other._kind);
+            }
+
+            var sign = _coefficient.Sign.CompareTo(other._coefficient.Sign);
+            if (sign != 0 || _coefficient.IsZero)
+            {
+                return sign;
+            }
+
+            // The same sign: compare the coefficients at the smaller of the two powers of ten.
+            return _exponent >= other._exponent
+                ? (_coefficient * BigInteger.Pow(10, _exponent - other._exponent)).CompareTo(other._coefficient)
+                : _coefficient.CompareTo(other._coefficient * BigInteger.Pow(10, other._exponent - _exponent));
+        }
+
+        private static ExactNumber FromDouble(double value)
+        {
+            if (double.IsNaN(value))
+            {
+                return new ExactNumber(NaN, BigInteger.Zero, 0);
+            }
+
+            if (double.IsInfinity(value))
+            {
+                return new ExactNumber(value > 0 ? PositiveInfinity : NegativeInfinity, BigInteger.Zero, 0);
+            }
+
+            // value = mantissa * 2^exponent, exactly.
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            var biased = (int)((bits >> 52) & 0x7FF);
+            var mantissa = bits & 0xFFFFFFFFFFFFFL;
+            if (biased == 0)
+            {
+                biased = 1; // subnormal: no implicit leading bit
+            }
+            else
+            {
+                mantissa |= 1L << 52;
+            }
+
+            var exponent = biased - 1075;
+            var coefficient = new BigInteger(mantissa);
+            if (bits < 0)
+            {
+                coefficient = -coefficient;
+            }
+
+            // 2^-n is 5^n / 10^n: a binary fraction is a decimal one with as many digits as it has binary places.
+            return exponent >= 0
+                ? Normalized(coefficient << exponent, 0)
+                : Normalized(coefficient * BigInteger.Pow(5, -exponent), exponent);
+        }
+
+        private static ExactNumber FromDecimal128(Decimal128 value)
         {
             if (Decimal128.IsNaN(value))
             {
-                return "n:NaN";
+                return new ExactNumber(NaN, BigInteger.Zero, 0);
             }
 
-            try
+            if (Decimal128.IsInfinity(value))
             {
-                return Number(Decimal128.ToDecimal(value));
+                return new ExactNumber(Decimal128.IsNegative(value) ? NegativeInfinity : PositiveInfinity, BigInteger.Zero, 0);
             }
-            catch (OverflowException)
+
+            // Its text is exact: digits, an optional point and an optional power of ten ("-1.250E-7").
+            var text = value.ToString();
+            var power = text.IndexOfAny(['E', 'e']);
+            var exponent = power < 0 ? 0 : int.Parse(text[(power + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+            var digits = power < 0 ? text : text[..power];
+            var point = digits.IndexOf('.');
+            if (point >= 0)
             {
-                // Past a .NET decimal (or infinite): spelt as the double of the same value is.
-                return Number(Decimal128.ToDouble(value));
+                exponent -= digits.Length - point - 1;
+                digits = digits.Remove(point, 1);
             }
+
+            return Normalized(BigInteger.Parse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture), exponent);
         }
 
-        /// <summary>The number without trailing fractional zeros: only a fraction's, never an integer's own (10 stays 10).</summary>
-        private static string Number(decimal value)
+        private static ExactNumber Normalized(BigInteger coefficient, int exponent)
         {
-            var text = value.ToString(CultureInfo.InvariantCulture);
-            return "n:" + (text.Contains('.') ? text.TrimEnd('0').TrimEnd('.') : text);
+            if (coefficient.IsZero)
+            {
+                return new ExactNumber(Finite, BigInteger.Zero, 0);
+            }
+
+            while (BigInteger.Remainder(coefficient, 10).IsZero)
+            {
+                coefficient /= 10;
+                exponent++;
+            }
+
+            return new ExactNumber(Finite, coefficient, exponent);
         }
     }
 
@@ -390,7 +501,8 @@ internal static class MongoTakenKeys
 
             if (value.IsNumeric && other.IsNumeric)
             {
-                return value.ToDouble().CompareTo(other.ToDouble());
+                // Exactly, as MongoDB compares numbers: a long past 2^53 is not the double nearest it.
+                return ExactNumber.From(value).CompareTo(ExactNumber.From(other));
             }
 
             return value.BsonType == other.BsonType ? value.CompareTo(other) : null;

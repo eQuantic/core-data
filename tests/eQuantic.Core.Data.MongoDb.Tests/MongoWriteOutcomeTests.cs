@@ -73,6 +73,22 @@ public sealed class ItemType : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>A reading whose value is unique, and whose name is unique among the early serials (a partial index).</summary>
+public sealed class Reading : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Name { get; set; } = "";
+
+    public double Value { get; set; }
+
+    public long Serial { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
 /// <summary>A page two requests change member by member.</summary>
 public sealed class Page : IEntity<string>
 {
@@ -462,6 +478,45 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
         Assert.That(inserted, Is.EqualTo(2L), "10 is taken by the stored 10.0; 1 and 100 are free");
         using var check = NewScope();
         Assert.That((await Repo<ItemType>(check).GetAllAsync()).Select(x => x.Name), Is.EquivalentTo(new[] { "ten", "one", "hundred" }));
+    }
+
+    [Test]
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_compares_numbers_exactly()
+    {
+        var collection = _db.Database.GetCollection<BsonDocument>("Reading");
+        await collection.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("Value"),
+            new CreateIndexOptions { Unique = true, Name = "ux_reading_value" }));
+        await collection.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("Name"),
+            new CreateIndexOptions<BsonDocument>
+            {
+                Unique = true,
+                Name = "ux_reading_early_name",
+                PartialFilterExpression = new BsonDocument("Serial", new BsonDocument("$lte", new BsonInt64(9007199254740992L))),
+            }));
+        // Written by another client: a long of 2^53, which to the index is the same number as the double 2^53.
+        await collection.InsertManyAsync(
+        [
+            new BsonDocument { { "_id", "stored-a" }, { "Name", "a" }, { "Value", 1.5 }, { "Serial", new BsonInt64(1) } },
+            new BsonDocument { { "_id", "stored-big" }, { "Name", "big" }, { "Value", new BsonInt64(9007199254740992L) }, { "Serial", new BsonInt64(2) } },
+        ]);
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var inserted = await Resolve<IUpsertRepository<Reading, string>>(scope).InsertManyAsync(
+        [
+            new Reading { Name = "b", Value = 0.3, Serial = 3 },
+            // 0.30000000000000004: a double one ulp above 0.3, another key, though a conversion to decimal reads both as 0.3.
+            new Reading { Name = "c", Value = 0.1 + 0.2, Serial = 4 },
+            new Reading { Name = "d", Value = 9007199254740992.0, Serial = 5 },
+            // 2^53 + 1 is past the partial index's 2^53, so this name is not under it, though as doubles the two are equal.
+            new Reading { Name = "a", Value = 2.5, Serial = 9007199254740993L },
+        ], skipDuplicates: true);
+        await unitOfWork.CommitTransactionAsync();
+
+        Assert.That(inserted, Is.EqualTo(3L), "only the double 2^53 is taken, by the stored long 2^53");
+        using var check = NewScope();
+        Assert.That((await Repo<Reading>(check).GetAllAsync()).Select(x => x.Name), Is.EquivalentTo(new[] { "a", "big", "b", "c", "a" }));
     }
 
     [Test]
