@@ -3,6 +3,7 @@ using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Core.Data.Repository.Read;
 using eQuantic.Core.Data.Repository.Write;
 using eQuantic.Linq.Expressions;
+using Microsoft.Azure.Cosmos.Linq;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace eQuantic.Core.Data.CosmosDb.Tests;
@@ -527,5 +528,42 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
 
         Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => repo.SumAsync(x => (int)x.Priority, Scoped()))!.Message, Does.Contain("labels"));
         Assert.That(Assert.ThrowsAsync<NotSupportedException>(() => aggregates.AverageAsync(x => x.Priority, Scoped()))!.Message, Does.Contain("labels"));
+    }
+
+    [Test]
+    public async Task The_public_query_shaping_reads_the_labels_from_the_client_s_serializer()
+    {
+        await SeedTicketsAsync();
+        var container = Database.GetContainer(CosmosTestServer.ContainerName);
+
+        // An order by a member stored as labels cannot be one ORDER BY: refused, whichever way the enum was declared.
+        var fluent = Assert.Throws<NotSupportedException>(() =>
+            container.GetItemLinqQueryable<RunRecord>().ApplyQueryOptions(new QueryOptions<RunRecord>().OrderBy(x => x.Channel)));
+        Assert.That(fluent!.Message, Does.Contain("Channel").And.Contain("labels"), "declared by Enum<Channel>() on the model");
+        var annotated = Assert.Throws<NotSupportedException>(() =>
+            container.GetItemLinqQueryable<RelTicket>().ApplyQueryOptions(new QueryOptions<RelTicket>().OrderByDescending(x => x.Escalation)));
+        Assert.That(annotated!.Message, Does.Contain("RelPriority").And.Contain("labels"), "annotated with [EnumType]");
+        Assert.That(() => container.GetItemLinqQueryable<RunRecord>().ApplyQueryOptions(new QueryOptions<RunRecord>().OrderBy(x => x.Day)),
+            Throws.Nothing, "an enum stored as its number orders as one");
+
+        // An ordered comparison compares the members' values.
+        var partition = Partition;
+        var query = container.GetItemLinqQueryable<RelTicket>()
+            .ApplyQueryOptions(new QueryOptions<RelTicket>().Where(x => x.Category == partition && x.Priority >= RelPriority.Medium));
+        var titles = new List<string>();
+        using (var iterator = query.ToFeedIterator())
+        {
+            while (iterator.HasMoreResults)
+            {
+                titles.AddRange((await iterator.ReadNextAsync()).Select(x => x.Title));
+            }
+        }
+
+        Assert.That(titles.Order(), Is.EqualTo(new[] { "t2", "t3", "t4" }));
+
+        // A query no store translates compares and orders enums as C# does.
+        var memory = new[] { new RelTicket { Title = "b", Priority = RelPriority.High }, new RelTicket { Title = "a", Priority = RelPriority.Low } }
+            .AsQueryable().ApplyQueryOptions(new QueryOptions<RelTicket>().OrderBy(x => x.Priority));
+        Assert.That(memory.Select(x => x.Title), Is.EqualTo(new[] { "a", "b" }));
     }
 }

@@ -30,8 +30,11 @@ translation asks the same contract**:
   and Cosmos DB orders by property paths alone, so a read **ordered by such a member** reads one query per
   member, in the order of their values (and one for the rows whose member is null, where they go),
   concatenated with the window carried across them — on the first sort of an entity or mapped read; a
-  later sort, paging by continuation and streaming refuse it with that reason. An enum declared neither
-  way keeps its number.
+  later sort, paging by continuation and streaming refuse it with that reason. `CosmosQueryableExtensions.ApplyQueryOptions`
+  on a container's own queryable reads which enums are labels from the client's serializer (declared
+  either way): its filters compare by value, and an order by such a member is refused, since one
+  `ORDER BY` cannot say it. `MinAsync`/`MaxAsync` over such a member read the distinct members present
+  and pick by value; `SumAsync` and `AverageAsync` refuse it. An enum declared neither way keeps its number.
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded in the document as
   the JSON they hold (object, array or scalar), come back equal, and `null` stays `null`.
 - **Sequence** — an atomic server-side counter: one item per `<container>.<property>` in the

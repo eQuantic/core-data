@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using eQuantic.Linq.Expressions;
 using eQuantic.Core.Data.Repository.Options;
 using eQuantic.Linq.Web;
 
@@ -16,15 +17,111 @@ namespace eQuantic.Core.Data.CosmosDb;
 /// </remarks>
 public static class CosmosQueryableExtensions
 {
-    /// <summary>Shapes the query with the supplied options.</summary>
+    /// <summary>
+    ///     Shapes the query with the supplied options. An enum stored as its labels — declared on the model with
+    ///     <c>Enum&lt;TEnum&gt;()</c> or annotated with <c>[EnumType]</c>, as the client's serializer says — compares by its
+    ///     members' values, as C# does: an ordered comparison in the filter becomes membership in the labels whose member
+    ///     satisfies it. An order by such a member is refused: an <c>ORDER BY</c> would order the labels' text, and Cosmos DB
+    ///     orders by property paths alone, so one query cannot say it; the repository reads one query per member instead.
+    /// </summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <param name="source">The source query (typically the container).</param>
     /// <param name="options">The query options, or <c>null</c> for no shaping.</param>
     /// <returns>The shaped query.</returns>
+    /// <exception cref="NotSupportedException">An order by a member stored as an enum's labels, or by an enum when the query's serializer cannot be read.</exception>
     public static IQueryable<TEntity> ApplyQueryOptions<TEntity>(this IQueryable<TEntity> source,
         QueryOptions<TEntity>? options)
-        where TEntity : class =>
-        source.ApplyQueryOptions(options, nullsPlaced: false);
+        where TEntity : class
+    {
+        if (options is null)
+        {
+            return source;
+        }
+
+        var labels = Labels.Of(source);
+        foreach (var sort in options.Sortings.Where(sort => sort is not null))
+        {
+            var key = Unconverted(sort.KeySelector.Body).Type;
+            var type = Nullable.GetUnderlyingType(key) ?? key;
+            if (type.IsEnum && labels.Orders(type) is { } refusal)
+            {
+                throw new NotSupportedException($"'{sort.KeySelector.GetMemberName()}' {refusal}");
+            }
+        }
+
+        var shaped = source.ApplyQueryOptions(options, nullsPlaced: false);
+        return labels.IsLabelEnum is { } isLabelEnum && !ReferenceEquals(shaped, source)
+            ? shaped.Provider.CreateQuery<TEntity>(eQuantic.Core.Data.Query.EnumOrder.RewriteComparisons(shaped.Expression, isLabelEnum))
+            : shaped;
+    }
+
+    private static Expression Unconverted(Expression expression)
+    {
+        while (expression is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } conversion)
+        {
+            expression = conversion.Operand;
+        }
+
+        return expression;
+    }
+
+    /// <summary>
+    ///     What a query knows about the enums its store keeps as labels: the client's serializer when the query is the SDK's
+    ///     (the provider's container names the client), nothing to know when it is not (a query in memory compares enums
+    ///     as C# does), and "cannot tell" when it is the SDK's and its container cannot be read.
+    /// </summary>
+    private sealed class Labels
+    {
+        private readonly bool _unknown;
+
+        private Labels(Func<Type, bool>? isLabelEnum, bool unknown)
+        {
+            IsLabelEnum = isLabelEnum;
+            _unknown = unknown;
+        }
+
+        /// <summary>Whether the store keeps an enum as its labels, or <c>null</c> when no store translates the query.</summary>
+        public Func<Type, bool>? IsLabelEnum { get; }
+
+        public static Labels Of(IQueryable source)
+        {
+            var provider = source.Provider;
+            if (provider.GetType().Namespace?.StartsWith("Microsoft.Azure.Cosmos", StringComparison.Ordinal) != true)
+            {
+                return new Labels(null, unknown: false);
+            }
+
+            var container = provider.GetType()
+                .GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)
+                .Where(field => typeof(Microsoft.Azure.Cosmos.Container).IsAssignableFrom(field.FieldType))
+                .Select(field => field.GetValue(provider) as Microsoft.Azure.Cosmos.Container)
+                .FirstOrDefault(found => found is not null);
+            if (container is null)
+            {
+                return new Labels(type => Data.Modeling.EnumTypeAttribute.For(Nullable.GetUnderlyingType(type) ?? type) is not null, unknown: true);
+            }
+
+            return container.Database.Client.ClientOptions.Serializer is CosmosEntitySerializer serializer
+                ? new Labels(serializer.IsLabelEnum, unknown: false)
+                : new Labels(_ => false, unknown: false);
+        }
+
+        /// <summary>Why an order by <paramref name="enumType" /> cannot run, or <c>null</c> when it can.</summary>
+        public string? Orders(Type enumType)
+        {
+            if (_unknown)
+            {
+                return $"is an enum, and the query's serializer cannot be read to tell whether Cosmos DB stores '{enumType.Name}' as its " +
+                       "labels (which an ORDER BY would order by their text); read through the repository, which knows the model.";
+            }
+
+            return IsLabelEnum?.Invoke(enumType) == true
+                ? $"is stored as the labels of '{enumType.Name}', which an ORDER BY would order by their text while C# orders the " +
+                  "members' values, and Cosmos DB orders by property paths alone; read through the repository (GetAllAsync, " +
+                  "GetPagedAsync), which reads one query per member in the order of their values."
+                : null;
+        }
+    }
 
     /// <summary>
     ///     Shapes the query; the repository passes <paramref name="nullsPlaced" /> when it places nulls itself (two
