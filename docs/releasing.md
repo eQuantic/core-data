@@ -34,10 +34,16 @@ version made pushes silent no-ops on NuGet.
 
 ## Arming and gating
 
-Without the `NUGET_KEY` secret, releases are **disarmed**:
+nuget.org is reached through **Trusted Publishing**: the release job's GitHub OIDC token is
+exchanged (`NuGet/login`) for a key that lives one hour, under a policy on nuget.org bound to this
+repository, `release.yml` and the `nuget` environment. No long-lived key is stored anywhere.
+
+When the login gives no key, releases are **disarmed**:
 [release-verify.sh](../.github/scripts/release-verify.sh) fails the pipeline before anything is
-tagged, committed or published. Add a required reviewer on the `nuget` environment (Settings →
-Environments → `nuget`) for a manual approval gate before each release.
+tagged, committed or published. Check the policy on nuget.org (owner eQuantic, repository
+core-data, workflow `release.yml`, environment `nuget`) and the `NUGET_USER` secret. Add a required
+reviewer on the `nuget` environment (Settings → Environments → `nuget`) for a manual approval gate
+before each release.
 
 ## Channels
 
@@ -49,4 +55,6 @@ Environments → `nuget`) for a manual approval gate before each release.
 - Never push tags by hand; never edit `<Version>` in `src/Directory.Build.props` expecting it to be
   released — the pipeline overwrites it.
 - Mark breaking changes with `✨ feat!: …` and/or a `BREAKING CHANGE:` paragraph.
-- Secrets/config: `NUGET_KEY` is the eQuantic org secret; `GITHUB_TOKEN` is the workflow's own.
+- Secrets/config: `NUGET_USER` (an eQuantic org secret) is the nuget.org profile name the Trusted
+  Publishing policy belongs to, not an e-mail address. No NuGet key is stored: the job gets a
+  one-hour key at each release. `GITHUB_TOKEN` is the workflow's own.
