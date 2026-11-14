@@ -198,7 +198,9 @@ new FieldSnapshot("State", "state", "labels:Shop.OrderState")
 
 `Labels` records each label with the member it stands for and that member's number, in the enum's order:
 how a comparison tells a renamed label (the same member, or the same number once the member's name moved)
-from one removed while another is added. `Generated` and `Labels` are written only when there is one, so
+from one removed while another is added. Two members that swap their labels are a change too, though the
+list reads as it did: every row already stored would read back as the other member. A member renamed in
+code with its label kept is none. `Generated` and `Labels` are written only when there is one, so
 a model without them writes the file it always wrote.
 
 An enum stored as its number keeps the spelling it always had: its CLR type on the relational stores,

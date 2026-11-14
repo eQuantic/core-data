@@ -305,6 +305,20 @@ public sealed class ModelDifferTests
     }
 
     [Test]
+    public void Two_members_that_swap_their_labels_are_a_change_of_labels()
+    {
+        // The same labels in the same order, but Queued is now stored as 'running' and Running as 'queued': the rows
+        // already stored would read back as the other member.
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled(new("Running", 1, "queued"), new("Queued", 0, "running"), Stages[2])));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeLabels));
+        Assert.That(change.LabelsAfter, Is.EqualTo(after.Entities[0].Fields[0].Labels));
+    }
+
+    [Test]
     public void An_enum_whose_labels_were_not_recorded_compares_clean()
     {
         // A snapshot written before labels were recorded: the same label enum, and no labels.

@@ -223,12 +223,16 @@ public static class ModelDiffer
             });
         }
 
-        // The same enum's labels, changed. A snapshot written before labels were recorded has none, which is "not
-        // known", never "every label removed": it compares as it did. A conversion above already covers a member
-        // that moved to or from labels.
+        // The same enum's labels, changed: the list the store holds, or the label a member that both versions have is
+        // stored as (two members that swap their labels leave the list as it was, and every row already stored reads
+        // back as the other member). A member renamed in code with its label kept is no change. A snapshot written
+        // before labels were recorded has none, which is "not known", never "every label removed": it compares as it
+        // did. A conversion above already covers a member that moved to or from labels.
         if (string.Equals(before.StoredType, after.StoredType, StringComparison.Ordinal) &&
             before.Labels.Count > 0 && after.Labels.Count > 0 &&
-            !before.Labels.Select(label => label.Label).SequenceEqual(after.Labels.Select(label => label.Label), StringComparer.Ordinal))
+            (!before.Labels.Select(label => label.Label).SequenceEqual(after.Labels.Select(label => label.Label), StringComparer.Ordinal)
+             || before.Labels.Any(label => after.Labels.Any(other =>
+                 other.Member == label.Member && !string.Equals(other.Label, label.Label, StringComparison.Ordinal)))))
         {
             changes.Add(new ModelChange(ModelChangeKind.ChangeLabels, entityType)
             {
