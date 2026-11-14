@@ -104,6 +104,11 @@ answer was lost is the acquisition's own lease, not a stranger's to wait out:
   to a second for the store, before it throws. A lease it cannot delete, or one the store applies
   later still, runs out within `LeaseDuration`; until then another attempt of the same acquisition
   would recognise it.
+- **A Cosmos DB `_locks` container removed while the process runs is created again** by the next
+  acquisition that finds it gone (a 404 whose sub-status says the container is missing, not the
+  item), within that acquisition's deadline, and the lease is taken in the new one. The leases went
+  with the old container: their holders' renewals find them gone, so those holders are told the lock
+  is lost, and their releases touch nothing in the new container.
 
 **A lease never expires before `LeaseDuration`.** That is the promise a holder is given, and two of the
 stores count in whole seconds, which would cut into it. Cosmos DB's `_ts` is the second of the last
