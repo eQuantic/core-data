@@ -274,7 +274,7 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     public MongoEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
         Modeling.StoreValue value = Modeling.StoreValue.Inferred)
     {
-        GeneratedMembers.Add((eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector), value));
+        GeneratedMembers.Add((Modeling.StoreGeneratedAttribute.OwnMember(eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberPath(selector), typeof(TEntity)), value));
         return this;
     }
 

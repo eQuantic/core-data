@@ -72,6 +72,19 @@ public sealed class StoreGeneratedAttribute : Attribute
     public StoreValue Value { get; } = StoreValue.Inferred;
 
     /// <summary>
+    ///     The member a model builder's <c>Generated(selector)</c> declares, from the selector's dotted path: one of the
+    ///     entity's own members, never a member of a member (an embedded document's), which a store does not generate.
+    ///     Read by its last segment alone, <c>x =&gt; x.Audit.Serial</c> would declare the entity's own <c>Serial</c>.
+    /// </summary>
+    /// <param name="path">The selector's member path (<c>Serial</c>, or <c>Audit.Serial</c>).</param>
+    /// <param name="entityType">The entity, for the message.</param>
+    public static string OwnMember(string path, Type entityType) =>
+        path.IndexOf('.') < 0
+            ? path
+            : throw new InvalidOperationException(
+                $"'{entityType.Name}.{path}' is a member of a member, and a store-generated member is one of the entity's own.");
+
+    /// <summary>
     ///     What a store-generated member of <paramref name="memberType" /> receives, with <see cref="StoreValue.Inferred" />
     ///     resolved; throws when the kind cannot apply to the type, naming the member.
     /// </summary>

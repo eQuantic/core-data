@@ -431,5 +431,29 @@ public sealed class CassandraNativeTypesTests : CassandraIntegrationTest
             Throws.TypeOf<InvalidOperationException>().With.Message.Contains("primary key column"));
         Assert.That(() => new CassandraModelBuilder().Entity<StampedLedger>(entity => entity.PartitionKey(x => x.Id).Generated(x => x.Holder)),
             Throws.TypeOf<InvalidOperationException>().With.Message.Contains("neither"));
+        Assert.That(() => new CassandraModelBuilder().Entity<Audited>(entity => entity.PartitionKey(x => x.Id).Generated(x => x.Audit.Serial)),
+            Throws.TypeOf<InvalidOperationException>().With.Message.Contains("is a member of a member"), "read by its last segment, it would declare the entity's own Serial");
+    }
+
+    /// <summary>An entity with a member of its own and an embedded one of the same name.</summary>
+    public sealed class Audited : IEntity<long>
+    {
+        public long Id { get; set; }
+
+        public string Category { get; set; } = "";
+
+        public long Serial { get; set; }
+
+        public AuditTrail Audit { get; set; } = new();
+
+        public long GetKey() => Id;
+
+        public void SetKey(long key) => Id = key;
+    }
+
+    /// <summary>An embedded document whose member shares a name with one of its owner's.</summary>
+    public sealed class AuditTrail
+    {
+        public long Serial { get; set; }
     }
 }

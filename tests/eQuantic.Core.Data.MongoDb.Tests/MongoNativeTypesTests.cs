@@ -355,6 +355,8 @@ public sealed class MongoNativeTypesTests : MongoIntegrationTest
             Throws.TypeOf<InvalidOperationException>().With.Message.Contains("_id"));
         Assert.That(() => new MongoModelBuilder().Entity<GeneratedText>(entity => entity.Generated(x => x.Text)),
             Throws.TypeOf<InvalidOperationException>().With.Message.Contains("neither"));
+        Assert.That(() => new MongoModelBuilder().Entity<Audited>(entity => entity.Generated(x => x.Audit.Serial)),
+            Throws.TypeOf<InvalidOperationException>().With.Message.Contains("is a member of a member"), "read by its last segment, it would declare the entity's own Serial");
     }
 
     [Test]
@@ -386,5 +388,27 @@ public sealed class MongoNativeTypesTests : MongoIntegrationTest
         public string GetKey() => Id;
 
         public void SetKey(string key) => Id = key;
+    }
+
+    /// <summary>An entity with a member of its own and an embedded one of the same name.</summary>
+    public sealed class Audited : IEntity<long>
+    {
+        public long Id { get; set; }
+
+        public string Category { get; set; } = "";
+
+        public long Serial { get; set; }
+
+        public AuditTrail Audit { get; set; } = new();
+
+        public long GetKey() => Id;
+
+        public void SetKey(long key) => Id = key;
+    }
+
+    /// <summary>An embedded document whose member shares a name with one of its owner's.</summary>
+    public sealed class AuditTrail
+    {
+        public long Serial { get; set; }
     }
 }

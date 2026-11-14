@@ -120,7 +120,9 @@ build to refuse.
   out and reads it back onto the entity; no update, staged or set-based, ever writes it; a bulk insert
   leaves it to the store. `Sequence` hands out each number once and they grow; `Clock` is the store's own
   time at the insert, in UTC, never the client's. The relational builders also take a SQL default
-  (`Generated(x => x.Member, "now()")`) for a schema another tool made.
+  (`Generated(x => x.Member, "now()")`) for a schema another tool made. The member is one of the
+  entity's own: `Generated(x => x.Audit.Serial)` is refused on every engine, rather than read by its
+  last segment as the entity's own `Serial`.
 - **Composite keys are fluent-only.** An annotation declares one member; a composite key is a
   projection — `Key(x => new { x.OrderId, x.LineNo })` — and lives in the
   [fluent builder](fluent.md).

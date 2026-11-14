@@ -264,7 +264,32 @@ public sealed class PostgreSqlNativeTypesTests : PostgreSqlIntegrationTest
         Assert.That(() => new RelationalModelBuilder(dialect)
                 .Entity<Receipt>(entity => entity.Generated(x => x.Id)).Build(),
             Throws.InvalidOperationException.With.Message.Contains("cannot also be declared store-generated"));
+        Assert.That(() => new RelationalModelBuilder(dialect)
+                .Entity<Audited>(entity => entity.Generated(x => x.Audit.Serial)).Build(),
+            Throws.InvalidOperationException.With.Message.Contains("is a member of a member"), "read by its last segment, it would declare the entity's own Serial");
         Assert.That(() => new RelationalModelBuilder(dialect).Enum<RunState>("RunState").Enum<RunState>("run_state"),
             Throws.InvalidOperationException.With.Message.Contains("already declared stored as labels"));
+    }
+
+    /// <summary>An entity with a member of its own and an embedded one of the same name.</summary>
+    public sealed class Audited : IEntity<long>
+    {
+        public long Id { get; set; }
+
+        public string Category { get; set; } = "";
+
+        public long Serial { get; set; }
+
+        public AuditTrail Audit { get; set; } = new();
+
+        public long GetKey() => Id;
+
+        public void SetKey(long key) => Id = key;
+    }
+
+    /// <summary>An embedded document whose member shares a name with one of its owner's.</summary>
+    public sealed class AuditTrail
+    {
+        public long Serial { get; set; }
     }
 }

@@ -538,7 +538,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     public RelationalEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
         Modeling.StoreValue value = Modeling.StoreValue.Inferred)
     {
-        _generated[selector.GetMemberName()] = (value, null);
+        _generated[Modeling.StoreGeneratedAttribute.OwnMember(selector.GetMemberPath(), typeof(TEntity))] = (value, null);
         return this;
     }
 
@@ -557,7 +557,7 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             throw new ArgumentException("A store default needs its SQL expression.", nameof(defaultSql));
         }
 
-        _generated[selector.GetMemberName()] = (Modeling.StoreValue.Inferred, defaultSql);
+        _generated[Modeling.StoreGeneratedAttribute.OwnMember(selector.GetMemberPath(), typeof(TEntity))] = (Modeling.StoreValue.Inferred, defaultSql);
         return this;
     }
 

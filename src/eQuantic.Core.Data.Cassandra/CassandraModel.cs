@@ -530,7 +530,7 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     public CassandraEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
         Data.Modeling.StoreValue value = Data.Modeling.StoreValue.Inferred)
     {
-        _generated[selector.GetMemberName()] = value;
+        _generated[Data.Modeling.StoreGeneratedAttribute.OwnMember(selector.GetMemberPath(), typeof(TEntity))] = value;
         return this;
     }
 
