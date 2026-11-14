@@ -437,6 +437,22 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task A_reference_whose_id_two_partitions_hold_is_refused_not_guessed()
+    {
+        var id = Guid.NewGuid().ToString("N");
+        await Seed(new RelBox { Id = id, Name = "mine" }, new RelItem { Title = "A", BoxId = id });
+        using var scope = NewScope();
+        // Another partition's box with the same id: an id is unique within a partition only.
+        await RepoOf<RelBox>(scope).AddAsync(new RelBox { Id = id, Name = "theirs", Category = "other-" + Guid.NewGuid().ToString("N") });
+        await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+        var partition = Partition;
+
+        var refusal = Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RepoOf<RelItem>(scope).GetAllAsync(new QueryOptions<RelItem>().Where(x => x.Category == partition).Include("Box")));
+        Assert.That(refusal!.Message, Does.Contain("two 'RelBox' documents hold the id"), "neither box is attached: either could be another tenant's");
+    }
+
+    [Test]
     public async Task An_array_and_a_list_are_tested_with_Contains()
     {
         var companies = Enumerable.Range(1, 4).Select(rank => new RelCompany { Name = "c" + rank, Rank = rank }).ToArray();

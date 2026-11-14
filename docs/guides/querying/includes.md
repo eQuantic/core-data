@@ -61,7 +61,10 @@ Foreign keys resolve by convention — reference `Buyer` → `BuyerId` on the or
 - **Cosmos DB** has no join across containers. The second query is cross-partition unless the
   related container is partitioned by the foreign key; its RU charge grows with the rows the filter
   keeps, not with the limit, because a per-parent limit has no Cosmos SQL form. Filter what you
-  can, and keep the limit for display.
+  can, and keep the limit for display. An id is unique within a partition only, so when two
+  documents of the referenced container hold the id a reference names, the include refuses
+  (`InvalidOperationException`) rather than attach either of them, one of which may be another
+  tenant's: give such documents ids unique across the container.
 - **Cassandra** has no join either. The second query runs through the same
   [gates](pushdown.md) as any read, **under the read's own opt-ins**: a read on a foreign key that
   is not the related table's partition key names none of its partitions, so it is a scan and needs

@@ -174,7 +174,20 @@ internal static class CosmosInclude
 
         var targets = await ReadAllAsync(unitOfWork.GetContainer<TTarget>().GetItemLinqQueryable<TTarget>()
             .Where(In<TTarget>(targetKey, ids)), cancellationToken).ConfigureAwait(false);
-        var byKey = targets.ToDictionary(target => KeyText(targetKey.GetValue(target)));
+        // A document's id is unique within its partition only: two documents of one id leave the reference ambiguous, and
+        // attaching either could attach another partition's (another tenant's) document. That is refused, not guessed.
+        var byKey = new Dictionary<string, TTarget>();
+        foreach (var target in targets)
+        {
+            var key = KeyText(targetKey.GetValue(target));
+            if (!byKey.TryAdd(key, target))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot include '{navigation.Name}': two '{typeof(TTarget).Name}' documents hold the id '{key}' (an id is unique " +
+                    $"within a partition only), and '{localKey.Name}' names the id alone, so which one it refers to is not known.");
+            }
+        }
+
         foreach (var parent in parents)
         {
             if (localKey.GetValue(parent) is { } id && byKey.TryGetValue(KeyText(id), out var match))
