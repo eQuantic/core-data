@@ -44,6 +44,23 @@ public sealed class RevisedDoc : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>A versioned document whose token is stored under another name: <c>[StoredAs("v")]</c>.</summary>
+[Entity("renamed_token_docs")]
+public sealed class RenamedTokenDoc : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Owner { get; set; } = "";
+
+    [ConcurrencyToken]
+    [StoredAs("v")]
+    public long Version { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
 /// <summary>
 ///     An expiring document: <c>[TimeToLive]</c> plus the lifecycle <c>CreatedAt</c> (<c>IEntityTimeMark</c>)
 ///     gives the TTL index its date member by convention.
@@ -161,6 +178,64 @@ public sealed class MongoConcurrencyAndTtlTests : MongoIntegrationTest
         var current = await repo.GetAsync(doc.Id);
         Assert.That((current!.Owner, current.Note, current.Revision), Is.EqualTo(("bia", "final", 3)),
             "the stale replace changed nothing");
+    }
+
+    [Test]
+    public async Task A_token_stored_under_another_name_guards_every_replace_and_delete()
+    {
+        using var db = NewDatabase();
+        var raw = db.Database.GetCollection<BsonDocument>("renamed_token_docs");
+        IAsyncRepository<RenamedTokenDoc, string> Repo(Microsoft.Extensions.DependencyInjection.IServiceScope scope) =>
+            Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService<IAsyncRepository<RenamedTokenDoc, string>>(scope.ServiceProvider);
+        Task Commit(Microsoft.Extensions.DependencyInjection.IServiceScope scope) =>
+            Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService<IUnitOfWork>(scope.ServiceProvider).CommitAsync();
+
+        var doc = new RenamedTokenDoc { Owner = "ana" };
+        using (var scope = db.NewScope())
+        {
+            await Repo(scope).AddAsync(doc);
+            await Commit(scope);
+        }
+
+        var stored = await raw.Find(new BsonDocument("_id", doc.Id)).SingleAsync();
+        Assert.That((stored.Contains("v"), stored.Contains("Version")), Is.EqualTo((true, false)), stored.ToJson());
+
+        RenamedTokenDoc stale;
+        using (var scope = db.NewScope())
+        {
+            stale = (await Repo(scope).GetAsync(doc.Id))!;
+            var fresh = (await Repo(scope).GetAsync(doc.Id))!;
+            fresh.Owner = "bia";
+            await Repo(scope).ModifyAsync(fresh);
+            await Commit(scope);
+            Assert.That(fresh.Version, Is.EqualTo(2), "the replace found the version under its stored name");
+        }
+
+        Assert.That((await raw.Find(new BsonDocument("_id", doc.Id)).SingleAsync())["v"].ToInt64(), Is.EqualTo(2L));
+
+        using (var scope = db.NewScope())
+        {
+            stale.Owner = "carla";
+            await Repo(scope).ModifyAsync(stale);
+            Assert.ThrowsAsync<ConcurrencyConflictException>(() => Commit(scope), "a replace from version 1 matches nothing");
+        }
+
+        using (var scope = db.NewScope())
+        {
+            var outdated = new RenamedTokenDoc { Id = doc.Id, Owner = "bia", Version = 1 };
+            await Repo(scope).RemoveAsync(outdated);
+            Assert.ThrowsAsync<ConcurrencyConflictException>(() => Commit(scope), "a delete from version 1 matches nothing");
+        }
+
+        using (var scope = db.NewScope())
+        {
+            var current = (await Repo(scope).GetAsync(doc.Id))!;
+            Assert.That((current.Owner, current.Version), Is.EqualTo(("bia", 2L)));
+            await Repo(scope).RemoveAsync(current);
+            await Commit(scope);
+        }
+
+        Assert.That(await raw.CountDocumentsAsync(new BsonDocument("_id", doc.Id)), Is.EqualTo(0L), "the delete found the version under its stored name");
     }
 
     [Test]
