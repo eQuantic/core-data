@@ -26,7 +26,7 @@ public sealed class CosmosTestServer
     public const string UsersContainer = "users";
 
     private static readonly string[] RelationContainers =
-        ["rel_items", "rel_mentions", "rel_runs", "rel_boxes", "rel_artifacts", "rel_repos", "rel_spaces"];
+        ["rel_items", "rel_mentions", "rel_runs", "rel_boxes", "rel_artifacts", "rel_repos", "rel_spaces", "shape_logs", "shape_runners"];
 
     // The well-known emulator account key (identical across the classic and vNext emulators).
     private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";

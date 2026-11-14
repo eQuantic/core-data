@@ -162,6 +162,54 @@ public sealed class CosmosReadShapesTests
         Assert.That(first!.Majors, Is.EqualTo(2L), "a count's filter reads captured values, and LongCount counts as a long");
     }
 
+    /// <summary>
+    ///     A count's filter may test the counted entity's own relations, a collection (<c>s.Logs.Any()</c>) and a reference's
+    ///     member (<c>s.Runner.Name == a</c>), negated, null or combined: the store counts with them, as a filter across
+    ///     relations reads them, and never answers a count that ignored them.
+    /// </summary>
+    [Test]
+    public async Task A_count_s_filter_crosses_the_counted_entity_s_relations()
+    {
+        var a = "a-" + Guid.NewGuid().ToString("N");
+        var b = "b-" + Guid.NewGuid().ToString("N");
+        var onA = new ShapeRunner { Category = _partition, Name = a };
+        var onB = new ShapeRunner { Category = _partition, Name = b };
+        var build = new ShapeRun { Category = _partition, Name = "build" };
+        var idle = new ShapeRun { Category = _partition, Name = "idle" };
+        var deploy = new ShapeRun { Category = _partition, Name = "deploy" };
+        var logged = new ShapeStep { Category = _partition, ShapeRunId = build.Id, Status = "ok", StartedAt = T0.AddMinutes(1), RunnerId = onA.Id };
+        var silent = new ShapeStep { Category = _partition, ShapeRunId = build.Id, Status = "ok", StartedAt = T0.AddMinutes(2), RunnerId = onB.Id };
+        var unassigned = new ShapeStep { Category = _partition, ShapeRunId = build.Id, Status = "ok", StartedAt = T0.AddMinutes(3) };
+        var shipped = new ShapeStep { Category = _partition, ShapeRunId = deploy.Id, Status = "ok", StartedAt = T0.AddMinutes(4), RunnerId = onA.Id };
+        await Add(onA, onB);
+        await Add(build, idle, deploy);
+        await Add(logged, silent, unassigned, shipped);
+        await Add(
+            new ShapeLog { Category = _partition, ShapeStepId = logged.Id, Text = "1" },
+            new ShapeLog { Category = _partition, ShapeStepId = logged.Id, Text = "2" },
+            new ShapeLog { Category = _partition, ShapeStepId = unassigned.Id, Text = "3" });
+        await Commit();
+
+        var ids = new[] { build.Id, idle.Id, deploy.Id };
+        var rows = (await Repo<ShapeRun>().GetMappedAsync(x => new
+            {
+                x.Id,
+                Busy = x.Steps!.Count(s => s.Logs!.Any()),
+                Quiet = x.Steps!.Count(s => !s.Logs!.Any()),
+                OnA = x.Steps!.Count(s => s.Runner!.Name == a),
+                Unassigned = x.Steps!.LongCount(s => s.Runner == null),
+                Either = x.Steps!.Count(s => s.Logs!.Any(l => l.Text == "3") || s.Runner!.Name == b),
+            }, new QueryOptions<ShapeRun>().Where(x => x.Category == _partition && ids.Contains(x.Id))))
+            .ToDictionary(x => x.Id);
+
+        Assert.That((rows[build.Id].Busy, rows[build.Id].Quiet, rows[build.Id].OnA, rows[build.Id].Unassigned, rows[build.Id].Either),
+            Is.EqualTo((2, 1, 1, 1L, 2)), "the steps with logs, without, on runner a, on none, and with log 3 or on runner b");
+        Assert.That((rows[idle.Id].Busy, rows[idle.Id].Quiet, rows[idle.Id].OnA, rows[idle.Id].Unassigned, rows[idle.Id].Either),
+            Is.EqualTo((0, 0, 0, 0L, 0)), "a run without steps counts zero");
+        Assert.That((rows[deploy.Id].Busy, rows[deploy.Id].Quiet, rows[deploy.Id].OnA, rows[deploy.Id].Unassigned, rows[deploy.Id].Either),
+            Is.EqualTo((0, 1, 1, 0L, 0)));
+    }
+
     [Test]
     public async Task Nulls_are_ordered_first_or_last()
     {

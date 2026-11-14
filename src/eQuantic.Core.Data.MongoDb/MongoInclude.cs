@@ -71,9 +71,13 @@ internal static class MongoInclude
     /// <summary>
     ///     The <c>$lookup</c> of a relation count: the related documents matching the filter, correlated by the foreign
     ///     key, counted inside the lookup (<c>$count</c>) into <paramref name="field" /> — nothing but the count travels.
-    ///     The related documents are read from the collection the unit of work keeps them in.
+    ///     The related documents are read from the collection the unit of work keeps them in. A test the filter makes across
+    ///     the related documents' own relations (<c>s.Logs.Any()</c>, <c>s.Runner.Name == v</c>) resolves through
+    ///     <paramref name="relations" /> as in a filter: the keys read first and an <c>$in</c> over them, or a
+    ///     <c>$lookup</c> inside this one past the bound.
     /// </summary>
-    public static BsonDocument CountLookup(MongoUnitOfWork unitOfWork, Type parentType, RelationCount count, string field)
+    public static async Task<BsonDocument> CountLookupAsync(MongoUnitOfWork unitOfWork, Type parentType, RelationCount count, string field,
+        MongoRelations relations)
     {
         var foreignKey = ForeignKey(count.ElementType, parentType.Name)
                          ?? throw new InvalidOperationException(
@@ -81,7 +85,10 @@ internal static class MongoInclude
         var pipeline = new BsonArray();
         if (count.Predicate is not null)
         {
-            pipeline.Add(new BsonDocument("$match", RenderFilter(count.ElementType, count.Predicate)));
+            var resolved = await relations.PredicateAsync((System.Linq.Expressions.LambdaExpression)MongoPredicates.Rewrite(count.Predicate))
+                .ConfigureAwait(false);
+            pipeline.AddRange(resolved.Stages);
+            pipeline.Add(new BsonDocument("$match", RenderFilter(count.ElementType, resolved.Predicate)));
         }
 
         pipeline.Add(new BsonDocument("$count", "n"));

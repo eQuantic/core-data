@@ -150,6 +150,7 @@ internal static class CassandraCql
         var alternatives = new List<CassandraCqlAlternative>();
         var requiresFiltering = false;
         var partitionScoped = false;
+        var pushed = new List<(LambdaNode Lambda, ExpressionNode Conjunct, QueryFilter Filter, string Cql, object?[] Values, bool Filtering)>();
 
         foreach (var filter in filters)
         {
@@ -175,14 +176,7 @@ internal static class CassandraCql
                 {
                     if (rendered.Cql.Length > 0)
                     {
-                        if (interpreted is InFilter inFilter && CassandraCqlRenderer.IsChunkable(configuration, inFilter))
-                        {
-                            chunkable.Add((clauses.Count, inFilter));
-                        }
-
-                        clauses.Add((rendered.Cql, rendered.Values));
-                        requiresFiltering |= rendered.RequiresAllowFiltering;
-                        partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
+                        pushed.Add((lambda, conjunct, interpreted, rendered.Cql, rendered.Values, rendered.RequiresAllowFiltering));
                     }
                 }
                 else if (alternatives.Count == 0 && TryOrSplit(configuration, conjunct, alternatives))
@@ -197,6 +191,26 @@ internal static class CassandraCql
                     residual.Add(FilterInterpreter.RebuildPredicate<TEntity>(lambda, conjunct));
                 }
             }
+        }
+
+        var unreachable = UnreachableIns(configuration, pushed.Select(candidate => candidate.Cql).ToList());
+        for (var index = 0; index < pushed.Count; index++)
+        {
+            var (lambda, conjunct, interpreted, cql, values, filtering) = pushed[index];
+            if (unreachable.Contains(index))
+            {
+                residual.Add(FilterInterpreter.RebuildPredicate<TEntity>(lambda, conjunct));
+                continue;
+            }
+
+            if (interpreted is InFilter inFilter && CassandraCqlRenderer.IsChunkable(configuration, inFilter))
+            {
+                chunkable.Add((clauses.Count, inFilter));
+            }
+
+            clauses.Add((cql, values));
+            requiresFiltering |= filtering;
+            partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
         }
 
         CassandraCqlChunks? chunks = null;
@@ -215,6 +229,61 @@ internal static class CassandraCql
         {
             Chunks = chunks,
         };
+    }
+
+    /// <summary>
+    ///     The conjuncts whose <c>IN</c> restricts a clustering column some clustering column before it leaves unrestricted
+    ///     (neither <c>=</c> nor <c>IN</c> in another pushed conjunct): CQL refuses such a statement ("PRIMARY KEY column …
+    ///     cannot be restricted as preceding column … is not restricted"), with or without <c>ALLOW FILTERING</c>, so the
+    ///     conjunct runs client-side, behind the same opt-in as any residual. A relation's resolved keys make this shape:
+    ///     <c>keys.Contains(x.Id)</c> on a table clustered by another column before its key. Read off the clauses as
+    ///     rendered, which is what CQL sees (an ordered comparison of an enum stored as labels renders as an <c>IN</c> too),
+    ///     and repeated until nothing else leaves, since a conjunct sent client-side no longer restricts its column.
+    /// </summary>
+    private static HashSet<int> UnreachableIns(CassandraEntityConfiguration configuration, IReadOnlyList<string> clauses)
+    {
+        var unreachable = new HashSet<int>();
+        if (configuration.ClusteringKeys.Count < 2)
+        {
+            return unreachable;
+        }
+
+        var columns = configuration.ClusteringKeys.Select(key => key.Column).ToList();
+        bool changed;
+        do
+        {
+            changed = false;
+            var restricted = columns
+                .Where(column => clauses.Where((_, index) => !unreachable.Contains(index))
+                    .Any(clause => Restricts(clause, column, " = ?") || Restricts(clause, column, " IN (")))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < clauses.Count; index++)
+            {
+                if (unreachable.Contains(index))
+                {
+                    continue;
+                }
+
+                for (var position = 1; position < columns.Count; position++)
+                {
+                    if (Restricts(clauses[index], columns[position], " IN (") && columns.Take(position).Any(preceding => !restricted.Contains(preceding)))
+                    {
+                        unreachable.Add(index);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        while (changed);
+
+        return unreachable;
+
+        // "column IN (" / "column = ?" as a whole name: "id" is not the end of "runnerid".
+        static bool Restricts(string clause, string column, string relation) =>
+            System.Text.RegularExpressions.Regex.IsMatch(clause,
+                $@"(?<![A-Za-z0-9_\""]){System.Text.RegularExpressions.Regex.Escape(column)}{System.Text.RegularExpressions.Regex.Escape(relation)}",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
     /// <summary>

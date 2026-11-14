@@ -16,7 +16,10 @@ public sealed class ShapeRun : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
-/// <summary>A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>).</summary>
+/// <summary>
+///     A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>), the runner it ran on (a
+///     reference, by <c>RunnerId</c>) and the lines it logged (a collection): the relations a count's filter tests.
+/// </summary>
 public sealed class ShapeStep : IEntity<string>
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -26,6 +29,38 @@ public sealed class ShapeStep : IEntity<string>
     public string Status { get; set; } = "";
 
     public DateTime StartedAt { get; set; }
+
+    public string? RunnerId { get; set; }
+
+    public ShapeRunner? Runner { get; set; }
+
+    public List<ShapeLog>? Logs { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
+/// <summary>A line a step logged, holding the foreign key back to its step by convention (<c>ShapeStepId</c>).</summary>
+public sealed class ShapeLog : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string ShapeStepId { get; set; } = "";
+
+    public string Text { get; set; } = "";
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
+/// <summary>A runner a step ran on.</summary>
+public sealed class ShapeRunner : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Name { get; set; } = "";
 
     public string GetKey() => Id;
 

@@ -18,7 +18,10 @@ public sealed class ShapeRun : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
-/// <summary>A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>).</summary>
+/// <summary>
+///     A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>), the runner it ran on (a
+///     reference, by <c>RunnerId</c>) and the lines it logged (a collection): the relations a count's filter tests.
+/// </summary>
 public sealed class ShapeStep : IEntity<Guid>
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -28,6 +31,38 @@ public sealed class ShapeStep : IEntity<Guid>
     public string Status { get; set; } = "";
 
     public DateTime StartedAt { get; set; }
+
+    public Guid? RunnerId { get; set; }
+
+    public ShapeRunner? Runner { get; set; }
+
+    public List<ShapeLog>? Logs { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A line a step logged, holding the foreign key back to its step by convention (<c>ShapeStepId</c>).</summary>
+public sealed class ShapeLog : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid ShapeStepId { get; set; }
+
+    public string Text { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A runner a step ran on.</summary>
+public sealed class ShapeRunner : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Name { get; set; } = "";
 
     public Guid GetKey() => Id;
 
@@ -102,6 +137,8 @@ internal static class ReadShapesSchema
     public static RelationalModelBuilder Configure(RelationalModelBuilder builder) => builder
         .Entity<ShapeRun>(_ => { })
         .Entity<ShapeStep>(_ => { })
+        .Entity<ShapeLog>(_ => { })
+        .Entity<ShapeRunner>(_ => { })
         .Entity<ShapePackage>(_ => { })
         .Entity<ShapeVersion>(_ => { })
         .Entity<ShapeCard>(_ => { })
@@ -116,6 +153,8 @@ public sealed class ReadShapesMigration : Data.Migration.Migration
     public override void Up(IMigrationBuilder migration) => migration
         .For<ShapeRun>(run => run.EnsureCollection())
         .For<ShapeStep>(step => step.EnsureCollection().Index(x => x.ShapeRunId))
+        .For<ShapeLog>(log => log.EnsureCollection().Index(x => x.ShapeStepId))
+        .For<ShapeRunner>(runner => runner.EnsureCollection())
         .For<ShapePackage>(package => package.EnsureCollection())
         .For<ShapeVersion>(version => version.EnsureCollection().Index(x => x.ShapePackageId))
         .For<ShapeCard>(card => card.EnsureCollection())

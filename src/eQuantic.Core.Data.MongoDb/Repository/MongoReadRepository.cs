@@ -179,7 +179,8 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     ///     related document travels.
     /// </remarks>
     public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Project(await WindowedAsync(options, null, cancellationToken).ConfigureAwait(false), NotNull(map))
+        await (await ProjectAsync(await WindowedAsync(options, null, cancellationToken).ConfigureAwait(false), NotNull(map), false, cancellationToken)
+                .ConfigureAwait(false))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
@@ -188,7 +189,8 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        await Project(await WindowedAsync(options, 1, cancellationToken).ConfigureAwait(false), NotNull(map))
+        await (await ProjectAsync(await WindowedAsync(options, 1, cancellationToken).ConfigureAwait(false), NotNull(map), false, cancellationToken)
+                .ConfigureAwait(false))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
@@ -213,7 +215,8 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
         var query = await QueryAsync(options, cancellationToken: cancellationToken).ConfigureAwait(false);
         var total = await query.LongCountAsync(cancellationToken).ConfigureAwait(false);
-        var items = await Project(Ordered(query, options).Skip(page.Skip).Take(page.Take), NotNull(map)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var items = await (await ProjectAsync(Ordered(query, options).Skip(page.Skip).Take(page.Take), NotNull(map), false, cancellationToken)
+            .ConfigureAwait(false)).ToListAsync(cancellationToken).ConfigureAwait(false);
         return new PagedResult<TResult>(items, total, page.PageIndex, page.PageSize);
     }
 
@@ -618,10 +621,19 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     }
 
     /// <summary>
-    ///     Applies the map — through the driver's LINQ <c>$project</c>, after a <c>$lookup</c> + <c>$count</c> per relation
-    ///     count the map holds, whose results ride beside the document into the projection.
+    ///     Applies the map, for a synchronous read: what <see cref="ProjectAsync{TResult}" /> does, the keys a count's
+    ///     relations read first read through the driver's synchronous API (every task then completes before it is returned).
     /// </summary>
-    private IQueryable<TResult> Project<TResult>(IQueryable<TEntity> query, Expression<Func<TEntity, TResult>> map)
+    private IQueryable<TResult> Project<TResult>(IQueryable<TEntity> query, Expression<Func<TEntity, TResult>> map) =>
+        ProjectAsync(query, map, synchronous: true, CancellationToken.None).GetAwaiter().GetResult();
+
+    /// <summary>
+    ///     Applies the map — through the driver's LINQ <c>$project</c>, after a <c>$lookup</c> + <c>$count</c> per relation
+    ///     count the map holds, whose results ride beside the document into the projection. A count's filter that crosses
+    ///     the counted documents' own relations has them resolved first, in the session, as a filter's are.
+    /// </summary>
+    private async Task<IQueryable<TResult>> ProjectAsync<TResult>(IQueryable<TEntity> query, Expression<Func<TEntity, TResult>> map,
+        bool synchronous, CancellationToken cancellationToken)
     {
         if (RelationCountInterpreter.Interpret(map, property => MongoInclude.IsRelation(typeof(TEntity), property)) is not { } counted)
         {
@@ -629,8 +641,16 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         }
 
         var fields = counted.Counts.Select((_, index) => "__eq_count" + index).ToList();
-        query = MongoStages.Append(query,
-            counted.Counts.Select((count, index) => MongoInclude.CountLookup(UnitOfWork, typeof(TEntity), count, fields[index])));
+        var relations = new MongoRelations(UnitOfWork, synchronous, cancellationToken);
+        var lookups = new List<BsonDocument>(counted.Counts.Count);
+        for (var index = 0; index < counted.Counts.Count; index++)
+        {
+            // One at a time: a session runs one operation at a time.
+            lookups.Add(await MongoInclude.CountLookupAsync(UnitOfWork, typeof(TEntity), counted.Counts[index], fields[index], relations)
+                .ConfigureAwait(false));
+        }
+
+        query = MongoStages.Append(query, lookups);
 
         var carry = new BsonDocument("$project", new BsonDocument
         {

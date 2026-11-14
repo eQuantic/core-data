@@ -216,7 +216,9 @@ internal static class CosmosInclude
         var query = container.GetItemLinqQueryable<TElement>().Where(In<TElement>(foreignKey, keys));
         if (predicate is Expression<Func<TElement, bool>> filter)
         {
-            query = query.Where(CosmosPredicates.Rendered(filter, unitOfWork));
+            // A test the filter makes across the counted documents' own relations (s.Logs.Any(), s.Runner.Name == v) resolves
+            // as in a filter: the related keys read first, then IN (NOT IN) over them in this count's WHERE.
+            query = query.Where(await CosmosPredicates.ReadyAsync(filter, unitOfWork, cancellationToken).ConfigureAwait(false));
         }
 
         var parameter = Expression.Parameter(typeof(TElement), "element");

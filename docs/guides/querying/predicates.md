@@ -90,7 +90,10 @@ explain runs nothing).
   `.AllowClientEvaluation()` — both on the read's own options, which the related read inherits, and
   checked before anything is read. Model the related table partitioned by the key the filter names,
   and the relation is one routed query; the `IN` the keys make runs in chunks of 100 keys, a query
-  each. A set-based write carries no opt-ins, so its related read has to be partition-scoped: by the
+  each. An `IN` over a clustering column pushes down only when every clustering column before it is
+  restricted too (CQL refuses it otherwise, `ALLOW FILTERING` or not): `keys.Contains(x.Id)` on a table
+  clustered by another column before `Id` runs client-side, behind `.AllowClientEvaluation()`. A
+  set-based write carries no opt-ins, so its related read has to be partition-scoped: by the
   relation's condition, or — when the write's filter names the written table's partition — by the
   rows the write finds, their keys read from the related table by its partition key
   (`x.Space == s && !x.Runs.Any()` reads only the runs of the items of `s`); any other is refused. A

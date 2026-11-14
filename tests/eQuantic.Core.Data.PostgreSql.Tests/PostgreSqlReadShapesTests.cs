@@ -42,6 +42,16 @@ public sealed class PostgreSqlReadShapesTests : PostgreSqlIntegrationTest
     }
 
     [Test]
+    public async Task A_count_s_filter_crosses_the_counted_entity_s_relations()
+    {
+        var (db, store) = await NewStoreAsync();
+        using (db)
+        {
+            await ReadShapeScenarios.CountFilterCrossesRelations(store);
+        }
+    }
+
+    [Test]
     public async Task Nulls_are_ordered_first_or_last()
     {
         var (db, store) = await NewStoreAsync();

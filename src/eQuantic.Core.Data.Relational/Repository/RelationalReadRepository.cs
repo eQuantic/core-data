@@ -910,8 +910,11 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         var where = $"{alias}.{_dialect.Quote(foreignKey.Name)} = {parentTable}.{_dialect.Quote(_configuration.Key.Name)}";
         if (count.Predicate is not null)
         {
-            // Unqualified columns resolve to the innermost table first: the filter reads the related rows.
-            where += " AND " + SqlFilterRenderer.Render(_dialect, element, FilterInterpreter.Interpret(count.Predicate), parameters);
+            // The filter reads the related rows, qualified by the subquery's alias, and a test it makes across the related
+            // entity's own relations (s.Logs.Any(), s.Runner.Name == v) is a correlated EXISTS on that alias, as in a filter.
+            var relations = UnitOfWork.Relations;
+            var marked = RelationPredicates.Mark(PredicateNormalizer.Normalize(count.Predicate), relations.Navigation);
+            where += " AND " + SqlFilterRenderer.Render(_dialect, element, FilterInterpreter.Interpret(marked), parameters, relations, alias);
         }
 
         return $"(SELECT COUNT(*) FROM {_dialect.Quote(element.TableName)} {alias} WHERE {where})";

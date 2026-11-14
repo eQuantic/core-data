@@ -19,7 +19,10 @@ public sealed class ShapeRun : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
-/// <summary>A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>).</summary>
+/// <summary>
+///     A run's step, holding the foreign key back to its run by convention (<c>ShapeRunId</c>), the runner it ran on (a
+///     reference, by <c>RunnerId</c>) and the lines it logged (a collection): the relations a count's filter tests.
+/// </summary>
 public sealed class ShapeStep : IEntity<Guid>
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -29,6 +32,38 @@ public sealed class ShapeStep : IEntity<Guid>
     public string Status { get; set; } = "";
 
     public DateTime StartedAt { get; set; }
+
+    public Guid? RunnerId { get; set; }
+
+    public ShapeRunner? Runner { get; set; }
+
+    public List<ShapeLog>? Logs { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A line a step logged, in its step's partition (<c>ShapeStepId</c>).</summary>
+public sealed class ShapeLog : IEntity<Guid>
+{
+    public Guid ShapeStepId { get; set; }
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Text { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A runner a step ran on.</summary>
+public sealed class ShapeRunner : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Name { get; set; } = "";
 
     public Guid GetKey() => Id;
 
@@ -190,6 +225,11 @@ internal static class ReadShapesModel
             .ClusteringKey(x => x.StartedAt, descending: true)
             .ClusteringKey(x => x.Id)
             .Key(x => x.Id))
+        .Entity<ShapeLog>(entity => entity
+            .PartitionKey(x => x.ShapeStepId)
+            .ClusteringKey(x => x.Id)
+            .Key(x => x.Id))
+        .Entity<ShapeRunner>(entity => entity.PartitionKey(x => x.Id))
         .Entity<ShapePackage>(entity => entity.PartitionKey(x => x.Id))
         .Entity<ShapeVersion>(entity => entity
             .PartitionKey(x => x.ShapePackageId)
@@ -226,6 +266,8 @@ internal static class ReadShapesModel
     [
         new EnsureCollectionOperation(typeof(ShapeRun)),
         new EnsureCollectionOperation(typeof(ShapeStep)),
+        new EnsureCollectionOperation(typeof(ShapeLog)),
+        new EnsureCollectionOperation(typeof(ShapeRunner)),
         new EnsureCollectionOperation(typeof(ShapePackage)),
         new EnsureCollectionOperation(typeof(ShapeVersion)),
         new EnsureCollectionOperation(typeof(ShapeCard)),

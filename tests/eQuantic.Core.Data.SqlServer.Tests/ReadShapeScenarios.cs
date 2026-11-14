@@ -149,6 +149,53 @@ internal static class ReadShapeScenarios
         Assert.That(first!.Majors, Is.EqualTo(2L), "a count's filter reads captured values, and LongCount counts as a long");
     }
 
+    /// <summary>
+    ///     A count's filter may test the counted entity's own relations, a collection (<c>s.Logs.Any()</c>) and a reference's
+    ///     member (<c>s.Runner.Name == a</c>), negated, null or combined: the store counts with them, as a filter across
+    ///     relations reads them, and never answers a count that ignored them.
+    /// </summary>
+    public static async Task CountFilterCrossesRelations(ShapeStore store)
+    {
+        var a = "a-" + Guid.NewGuid().ToString("N");
+        var b = "b-" + Guid.NewGuid().ToString("N");
+        var onA = new ShapeRunner { Name = a };
+        var onB = new ShapeRunner { Name = b };
+        var build = new ShapeRun { Name = "build" };
+        var idle = new ShapeRun { Name = "idle" };
+        var deploy = new ShapeRun { Name = "deploy" };
+        var logged = new ShapeStep { ShapeRunId = build.Id, Status = "ok", StartedAt = At(1), RunnerId = onA.Id };
+        var silent = new ShapeStep { ShapeRunId = build.Id, Status = "ok", StartedAt = At(2), RunnerId = onB.Id };
+        var unassigned = new ShapeStep { ShapeRunId = build.Id, Status = "ok", StartedAt = At(3) };
+        var shipped = new ShapeStep { ShapeRunId = deploy.Id, Status = "ok", StartedAt = At(4), RunnerId = onA.Id };
+        await store.Add(onA, onB);
+        await store.Add(build, idle, deploy);
+        await store.Add(logged, silent, unassigned, shipped);
+        await store.Add(
+            new ShapeLog { ShapeStepId = logged.Id, Text = "1" },
+            new ShapeLog { ShapeStepId = logged.Id, Text = "2" },
+            new ShapeLog { ShapeStepId = unassigned.Id, Text = "3" });
+        await store.Commit();
+
+        var ids = new[] { build.Id, idle.Id, deploy.Id };
+        var rows = (await store.Repo<ShapeRun>().GetMappedAsync(x => new
+            {
+                x.Id,
+                Busy = x.Steps!.Count(s => s.Logs!.Any()),
+                Quiet = x.Steps!.Count(s => !s.Logs!.Any()),
+                OnA = x.Steps!.Count(s => s.Runner!.Name == a),
+                Unassigned = x.Steps!.LongCount(s => s.Runner == null),
+                Either = x.Steps!.Count(s => s.Logs!.Any(l => l.Text == "3") || s.Runner!.Name == b),
+            }, new QueryOptions<ShapeRun>().Where(x => ids.Contains(x.Id))))
+            .ToDictionary(x => x.Id);
+
+        Assert.That((rows[build.Id].Busy, rows[build.Id].Quiet, rows[build.Id].OnA, rows[build.Id].Unassigned, rows[build.Id].Either),
+            Is.EqualTo((2, 1, 1, 1L, 2)), "the steps with logs, without, on runner a, on none, and with log 3 or on runner b");
+        Assert.That((rows[idle.Id].Busy, rows[idle.Id].Quiet, rows[idle.Id].OnA, rows[idle.Id].Unassigned, rows[idle.Id].Either),
+            Is.EqualTo((0, 0, 0, 0L, 0)), "a run without steps counts zero");
+        Assert.That((rows[deploy.Id].Busy, rows[deploy.Id].Quiet, rows[deploy.Id].OnA, rows[deploy.Id].Unassigned, rows[deploy.Id].Either),
+            Is.EqualTo((0, 1, 1, 0L, 0)));
+    }
+
     /// <summary>Positions 2, null and 1 come back with the null first or last, ascending and descending.</summary>
     public static async Task NullsFirstOrLast(ShapeStore store)
     {

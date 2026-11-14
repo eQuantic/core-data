@@ -961,7 +961,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         {
             var members = counted.Members?.Append(_configuration.MemberFor(_configuration.KeyColumn)).ToList();
             var entities = await SelectAsync(options, limit, cancellationToken, null, members, offset).ConfigureAwait(false);
-            var counts = await CassandraInclude.CountAsync(UnitOfWork, entities, counted.Counts, options).ConfigureAwait(false);
+            var counts = await CassandraInclude.CountAsync(UnitOfWork, entities, counted.Counts, options, cancellationToken).ConfigureAwait(false);
             var project = counted.Projection.Compile();
             return entities.Select((entity, index) => project(entity, counts[index])).ToList();
         }

@@ -330,6 +330,9 @@ public sealed class MariaDbTests
     public Task A_relation_is_counted_not_loaded() => ReadShapeScenarios.CountedNotLoaded(Shapes);
 
     [Test]
+    public Task A_count_s_filter_crosses_the_counted_entity_s_relations() => ReadShapeScenarios.CountFilterCrossesRelations(Shapes);
+
+    [Test]
     public Task Nulls_are_ordered_first_or_last() => ReadShapeScenarios.NullsFirstOrLast(Shapes);
 
     [Test]

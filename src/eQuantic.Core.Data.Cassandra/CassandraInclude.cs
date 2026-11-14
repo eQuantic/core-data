@@ -79,7 +79,7 @@ internal static class CassandraInclude
 
     /// <summary>Counts, for each entity, the related rows of each count; one array of counts per entity, in order.</summary>
     public static async Task<long[][]> CountAsync<TEntity>(CassandraUnitOfWork unitOfWork, IReadOnlyList<TEntity> entities,
-        IReadOnlyList<RelationCount> counts, object? options) where TEntity : class
+        IReadOnlyList<RelationCount> counts, object? options, CancellationToken cancellationToken) where TEntity : class
     {
         var result = entities.Select(_ => new long[counts.Count]).ToArray();
         if (entities.Count == 0)
@@ -95,7 +95,7 @@ internal static class CassandraInclude
             var perKey = await ((Task<Dictionary<string, long>>)typeof(CassandraInclude)
                 .GetMethod(nameof(GroupCountAsync), BindingFlags.NonPublic | BindingFlags.Static)!
                 .MakeGenericMethod(typeof(TEntity), count.ElementType)
-                .Invoke(null, [unitOfWork, keys, count, options])!).ConfigureAwait(false);
+                .Invoke(null, [unitOfWork, keys, count, options, cancellationToken])!).ConfigureAwait(false);
 
             for (var row = 0; row < entities.Count; row++)
             {
@@ -180,7 +180,7 @@ internal static class CassandraInclude
     }
 
     private static async Task<Dictionary<string, long>> GroupCountAsync<TParent, TElement>(CassandraUnitOfWork unitOfWork,
-        List<object?> keys, RelationCount count, object? parentOptions) where TElement : class
+        List<object?> keys, RelationCount count, object? parentOptions, CancellationToken cancellationToken) where TElement : class
     {
         var counts = new Dictionary<string, long>();
         if (keys.Count == 0)
@@ -193,7 +193,12 @@ internal static class CassandraInclude
                          ?? throw new NotSupportedException(
                              $"Cannot count '{count.Navigation.Name}': no foreign key found on '{typeof(TElement).Name}' back to '{typeof(TParent).Name}'.");
         var column = configuration.ColumnFor(foreignKey.Name);
-        var options = Options<TElement>(parentOptions, count.Predicate as Expression<Func<TElement, bool>>);
+        // A test the filter makes across the counted rows' own relations (s.Logs.Any(), s.Runner.Name == v) resolves as in a
+        // filter: the related keys read first, under the read's opt-ins, then IN over them.
+        var predicate = count.Predicate is Expression<Func<TElement, bool>> filter
+            ? await CassandraPredicates.ResolveAsync(filter, unitOfWork, parentOptions, cancellationToken).ConfigureAwait(false)
+            : null;
+        var options = Options<TElement>(parentOptions, predicate);
         var plan = CassandraCql.Plan(configuration, options, In<TElement>(foreignKey, keys.Take(CassandraCqlRenderer.InChunkSize).ToList()));
         var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions);
 
