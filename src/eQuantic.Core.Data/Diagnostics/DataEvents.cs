@@ -35,4 +35,10 @@ public static class DataEvents
 
     /// <summary>A named lock could not be released explicitly (the store frees it when its session ends or its lease runs out). Warning.</summary>
     public static readonly EventId LockReleaseFailed = new(10401, nameof(LockReleaseFailed));
+
+    /// <summary>
+    ///     The sweep of expired leases could not be set up (MongoDB's TTL index on <c>expiresAt</c>): expired leases are
+    ///     still taken over, by their own expiry, but nothing deletes the ones nobody takes. Warning.
+    /// </summary>
+    public static readonly EventId LeaseSweepFailed = new(10402, nameof(LeaseSweepFailed));
 }

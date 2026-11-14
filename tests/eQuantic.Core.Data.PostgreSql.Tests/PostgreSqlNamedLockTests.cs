@@ -1,6 +1,7 @@
 using eQuantic.Core.Data.PostgreSql.Extensions;
 using eQuantic.Core.Data.PostgreSql.Repository;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Relational.Repository;
 using eQuantic.Core.Data.Repository.Locking;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
@@ -74,6 +75,15 @@ public sealed class PostgreSqlNamedLockTests : PostgreSqlIntegrationTest
     public Task Names_are_compared_exactly() => NamedLockScenarios.NamesAreComparedExactly(Holder);
 
     [Test]
+    public Task A_commit_that_fails_still_ends_the_transaction_and_its_locks() =>
+        NamedLockScenarios.AFailedCommitEndsTheTransactionsLocks(Holder, async (victim, killer) =>
+        {
+            var session = await SessionOf(victim, "SELECT pg_backend_pid()::bigint AS value");
+            // Waits (up to 5 s) until the backend is gone, so the commit that follows meets a dead session.
+            await ((RelationalUnitOfWork)killer.Locks).ExecuteAsync("SELECT pg_terminate_backend(CAST(@p0 AS integer), 5000)", [session]);
+        });
+
+    [Test]
     public async Task The_server_holds_an_advisory_lock_on_the_documented_key()
     {
         using var holder = Holder();
@@ -128,6 +138,15 @@ public sealed class PostgreSqlNamedLockTests : PostgreSqlIntegrationTest
         var locks = scope.ServiceProvider.GetRequiredService<ILockingUnitOfWork>();
         Assert.That(locks, Is.SameAs(scope.ServiceProvider.GetRequiredService<IUnitOfWork>()));
         await using var held = await locks.AcquireLockAsync(NamedLockScenarios.Unique("aot"), TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>The id of the session a holder's open transaction runs on, as <paramref name="sql" /> answers it.</summary>
+    private static async Task<long> SessionOf(LockHolder holder, string sql) =>
+        (await ((RelationalUnitOfWork)holder.Locks).QueryAsync<SessionRow>(sql))[0].Value;
+
+    private sealed class SessionRow
+    {
+        public long Value { get; set; }
     }
 
     private static async Task<long> AdvisoryLocksOn(long key)

@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Reflection;
 using eQuantic.Core.Data.Cassandra.Repository;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Locking;
 using Microsoft.Extensions.DependencyInjection;
 using global::Cassandra;
 
@@ -83,7 +85,7 @@ public sealed class CassandraNamedLockTests : CassandraIntegrationTest
         var name = NamedLockScenarios.Unique("tenant");
 
         // A holder that dies: its lease is written exactly as a live holder's, and never renewed or released.
-        Assert.That(await CassandraNamedLocks.Store(Database.Session, null, false).TryTakeAsync(name, "dead-holder", Lease), Is.Not.Null);
+        Assert.That(await CassandraNamedLocks.Store(Database.Session, null, false).TryTakeAsync(name, "dead-holder", Lease, CancellationToken.None), Is.Not.Null);
 
         var clock = Stopwatch.StartNew();
         Assert.That(async () => await holder.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
@@ -149,11 +151,159 @@ public sealed class CassandraNamedLockTests : CassandraIntegrationTest
         Assert.That(await Row(name), Is.Null, "released: the row is deleted");
     }
 
+    [Test]
+    public Task A_hung_renewal_is_lost_before_another_holder_takes_the_lock() =>
+        LeaseScenarios.AHungRenewalIsLostBeforeAnotherHolderTakesTheLock(CassandraNamedLocks.Store(Database.Session, null, false), Holder, Lease);
+
+    [Test]
+    public Task A_lost_lock_is_taken_afresh_not_reentered() =>
+        LeaseScenarios.ALostLockIsTakenAfresh(Holder,
+            name => Database.Session.ExecuteAsync(new SimpleStatement(
+                $"UPDATE {CassandraNamedLocks.TableName} USING TTL 60 SET owner = 'someone-else' WHERE name = ?", name)),
+            name => Database.Session.ExecuteAsync(new SimpleStatement(
+                $"DELETE FROM {CassandraNamedLocks.TableName} WHERE name = ?", name)),
+            Lease);
+
+    [Test]
+    public Task An_acquisition_recognises_its_own_lease() =>
+        LeaseScenarios.AnAcquisitionRecognisesItsOwnLease(CassandraNamedLocks.Store(Database.Session, null, false));
+
+    [Test]
+    public Task A_waiter_backs_off() => LeaseScenarios.AWaiterBacksOff(CassandraNamedLocks.Store(Database.Session, null, false), Holder, Lease);
+
+    [Test]
+    public async Task A_lease_insert_whose_CAS_timed_out_is_settled_by_a_serial_read()
+    {
+        var store = CassandraNamedLocks.Store(LeaseInserts.Over(Database.Session, out var inserts, timeOutFirst: true), null, false);
+        var options = new NamedLockOptions { LeaseDuration = Lease };
+        var set = new NamedLockSet("cassandra", options);
+        using var other = Holder();
+        var name = NamedLockScenarios.Unique("cas");
+        try
+        {
+            await using (await set.AcquireAsync(name, TimeSpan.FromSeconds(5), false, () => new LeaseLockAttempt(store, name, options), default))
+            {
+                Assert.That((await Row(name))!.GetValue<string>("owner"), Does.Contain(Environment.MachineName),
+                    "the insert was applied, and the row read back is the holder's");
+                Assert.That(async () => await other.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>());
+            }
+
+            Assert.That(inserts.Tampered, Is.EqualTo(1), "the insert's answer was a CAS write timeout");
+            await using var taken = await other.Acquire(name, TimeSpan.Zero);
+        }
+        finally
+        {
+            set.ReleaseAll();
+        }
+    }
+
+    [Test]
+    public async Task An_acquisition_keeps_to_its_timeout_and_its_token_however_long_the_store_takes_to_answer()
+    {
+        // Every lease insert is applied, and its answer is held back for ten seconds. The lease is long, so a lease
+        // left behind would keep the other holder out for the rest of the test.
+        var store = CassandraNamedLocks.Store(LeaseInserts.Over(Database.Session, out var inserts, hold: TimeSpan.FromSeconds(10)), null, false);
+        var options = new NamedLockOptions { LeaseDuration = TimeSpan.FromSeconds(30) };
+        var set = new NamedLockSet("cassandra", options);
+        using var other = Holder();
+        try
+        {
+            var timedOut = NamedLockScenarios.Unique("slow");
+            var clock = Stopwatch.StartNew();
+            Assert.That(async () => await set.AcquireAsync(timedOut, TimeSpan.FromMilliseconds(300), false,
+                () => new LeaseLockAttempt(store, timedOut, options), default), Throws.InstanceOf<TimeoutException>());
+            Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(3)), "the timeout bounds the acquisition, not the store");
+            await using (await other.Acquire(timedOut, TimeSpan.Zero))
+            {
+            }
+
+            var cancelled = NamedLockScenarios.Unique("slow");
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            clock.Restart();
+            Assert.That(async () => await set.AcquireAsync(cancelled, Timeout.InfiniteTimeSpan, false,
+                () => new LeaseLockAttempt(store, cancelled, options), cancellation.Token), Throws.InstanceOf<OperationCanceledException>());
+            Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(3)), "the token cuts the acquisition short");
+            await using (await other.Acquire(cancelled, TimeSpan.Zero))
+            {
+            }
+
+            Assert.That(inserts.Tampered, Is.EqualTo(2), "both inserts were applied, and their answers were held back");
+        }
+        finally
+        {
+            set.ReleaseAll();
+        }
+    }
+
     private async Task<Row?> Row(string name)
     {
         var statement = new SimpleStatement(
             $"SELECT owner, TTL(owner) AS ttl FROM {CassandraNamedLocks.TableName} WHERE name = ?", name);
         statement.SetConsistencyLevel(ConsistencyLevel.Serial);
         return (await Database.Session.ExecuteAsync(statement)).FirstOrDefault();
+    }
+}
+
+/// <summary>
+///     The cluster's session with the answers to the lease inserts tampered with, after each insert has run on the
+///     cluster: the first one answered with the CAS write timeout a coordinator gives when it cannot tell whether the
+///     Paxos round committed, or every one held back.
+/// </summary>
+public class LeaseInserts : DispatchProxy
+{
+    private ISession _session = null!;
+    private bool _timeOutFirst;
+    private TimeSpan _hold;
+    private int _inserts;
+    private int _tampered;
+
+    /// <summary>The lease inserts whose answers were tampered with, so a test knows the session saw them.</summary>
+    public int Tampered => Volatile.Read(ref _tampered);
+
+    /// <summary>A session over <paramref name="session" /> that tampers with the lease inserts' answers.</summary>
+    public static ISession Over(ISession session, out LeaseInserts inserts, bool timeOutFirst = false, TimeSpan hold = default)
+    {
+        var proxy = Create<ISession, LeaseInserts>();
+        inserts = (LeaseInserts)(object)proxy;
+        inserts._session = session;
+        inserts._timeOutFirst = timeOutFirst;
+        inserts._hold = hold;
+        return proxy;
+    }
+
+    protected override object? Invoke(MethodInfo? method, object?[]? args)
+    {
+        object? result;
+        try
+        {
+            result = method!.Invoke(_session, args);
+        }
+        catch (TargetInvocationException invocation) when (invocation.InnerException is not null)
+        {
+            throw invocation.InnerException;
+        }
+
+        return method.Name == nameof(ISession.ExecuteAsync) && args is [BoundStatement { PreparedStatement.QueryString: var cql }, ..]
+                                                            && cql.StartsWith($"INSERT INTO {CassandraNamedLocks.TableName}")
+            ? TamperAsync((Task<RowSet>)result!)
+            : result;
+    }
+
+    private async Task<RowSet> TamperAsync(Task<RowSet> execution)
+    {
+        var rows = await execution;
+        if (_timeOutFirst && Interlocked.Increment(ref _inserts) == 1)
+        {
+            Interlocked.Increment(ref _tampered);
+            throw new WriteTimeoutException(ConsistencyLevel.Serial, 0, 1, "CAS");
+        }
+
+        if (_hold > TimeSpan.Zero)
+        {
+            Interlocked.Increment(ref _tampered);
+            await Task.Delay(_hold);
+        }
+
+        return rows;
     }
 }

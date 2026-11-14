@@ -1,8 +1,11 @@
 using System.Diagnostics;
+using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.MongoDb.Extensions;
 using eQuantic.Core.Data.MongoDb.Repository;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Locking;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using MongoDB.Bson;
 using MongoDB.Driver;
 
@@ -90,7 +93,7 @@ public sealed class MongoNamedLockTests : MongoIntegrationTest
         var name = NamedLockScenarios.Unique("tenant");
 
         // A holder that dies: its lease is written exactly as a live holder's, and never renewed or released.
-        Assert.That(await MongoNamedLocks.Store(Database).TryTakeAsync(name, "dead-holder", Lease), Is.Not.Null);
+        Assert.That(await MongoNamedLocks.Store(Database).TryTakeAsync(name, "dead-holder", Lease, CancellationToken.None), Is.Not.Null);
 
         var clock = Stopwatch.StartNew();
         Assert.That(async () => await holder.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
@@ -160,6 +163,62 @@ public sealed class MongoNamedLockTests : MongoIntegrationTest
     }
 
     [Test]
+    public Task A_hung_renewal_is_lost_before_another_holder_takes_the_lock() =>
+        LeaseScenarios.AHungRenewalIsLostBeforeAnotherHolderTakesTheLock(MongoNamedLocks.Store(Database), Holder, Lease);
+
+    [Test]
+    public Task A_lost_lock_is_taken_afresh_not_reentered() =>
+        LeaseScenarios.ALostLockIsTakenAfresh(Holder,
+            name => Leases.ReplaceOneAsync(new BsonDocument("_id", name),
+                new BsonDocument { { "_id", name }, { "owner", "someone-else" }, { "expiresAt", DateTime.UtcNow.AddMinutes(1) } }),
+            name => Leases.DeleteOneAsync(new BsonDocument("_id", name)),
+            Lease);
+
+    [Test]
+    public Task An_acquisition_recognises_its_own_lease() => LeaseScenarios.AnAcquisitionRecognisesItsOwnLease(MongoNamedLocks.Store(Database));
+
+    [Test]
+    public Task A_waiter_backs_off() => LeaseScenarios.AWaiterBacksOff(MongoNamedLocks.Store(Database), Holder, Lease);
+
+    [Test]
+    public async Task An_expiry_index_the_ttl_one_conflicts_with_does_not_stop_the_locks()
+    {
+        // The leases collection of a fresh database already has an index on expiresAt, not a TTL one: creating the
+        // TTL index conflicts with it. The sweep is housekeeping; the lease's own expiry is what decides.
+        var database = MongoTestServer.Client.GetDatabase("locks_" + Guid.NewGuid().ToString("N"));
+        var leases = database.GetCollection<BsonDocument>(MongoNamedLocks.CollectionName);
+        await leases.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("expiresAt")));
+
+        var warnings = new Warnings();
+        var store = MongoNamedLocks.Store(database, warnings);
+        var options = new NamedLockOptions { LeaseDuration = Lease };
+        var set = new NamedLockSet("mongodb", options);
+        var name = NamedLockScenarios.Unique("tenant");
+        var dead = NamedLockScenarios.Unique("dead");
+        try
+        {
+            await using (await set.AcquireAsync(name, TimeSpan.FromSeconds(5), false, () => new LeaseLockAttempt(store, name, options), default))
+            {
+                Assert.That(await leases.CountDocumentsAsync(new BsonDocument("_id", name)), Is.EqualTo(1));
+            }
+
+            Assert.That(warnings.Events, Is.EqualTo(new[] { DataEvents.LeaseSweepFailed.Id }), "the index that could not be created is reported once");
+
+            Assert.That(await store.TryTakeAsync(dead, "dead-holder", Lease, CancellationToken.None), Is.Not.Null);
+            var clock = Stopwatch.StartNew();
+            await using var taken = await set.AcquireAsync(dead, TimeSpan.FromSeconds(15), false,
+                () => new LeaseLockAttempt(store, dead, options), default);
+            Assert.That(clock.Elapsed, Is.GreaterThanOrEqualTo(Lease - TimeSpan.FromMilliseconds(300)),
+                "a dead holder's lease is taken over once it expires, with no TTL index to sweep it");
+        }
+        finally
+        {
+            set.ReleaseAll();
+            await MongoTestServer.Client.DropDatabaseAsync(database.DatabaseNamespace.DatabaseName);
+        }
+    }
+
+    [Test]
     public async Task A_lease_inside_a_transaction_is_visible_to_other_holders_and_gone_after_it()
     {
         using var holder = Holder();
@@ -172,5 +231,38 @@ public sealed class MongoNamedLockTests : MongoIntegrationTest
 
         await holder.CommitTransaction();
         Assert.That(await Leases.CountDocumentsAsync(new BsonDocument("_id", name)), Is.Zero);
+    }
+}
+
+/// <summary>The ids of the warnings a logger was given.</summary>
+internal sealed class Warnings : ILogger
+{
+    private readonly List<int> _events = [];
+
+    public IReadOnlyList<int> Events
+    {
+        get
+        {
+            lock (_events)
+            {
+                return [.. _events];
+            }
+        }
+    }
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (logLevel == LogLevel.Warning)
+        {
+            lock (_events)
+            {
+                _events.Add(eventId.Id);
+            }
+        }
     }
 }

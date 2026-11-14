@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.MySql.Extensions;
 using eQuantic.Core.Data.MySql.Repository;
+using eQuantic.Core.Data.Relational.Repository;
 using Microsoft.Extensions.DependencyInjection;
 using MySqlConnector;
 using Testcontainers.MariaDb;
@@ -75,6 +76,21 @@ public abstract class NamedLockSuite
 
     [Test]
     public Task Names_are_compared_exactly() => NamedLockScenarios.NamesAreComparedExactly(Holder);
+
+    [Test]
+    public Task A_commit_that_fails_still_ends_the_transaction_and_its_locks() =>
+        NamedLockScenarios.AFailedCommitEndsTheTransactionsLocks(Holder, async (victim, killer) =>
+        {
+            var session = (await ((RelationalUnitOfWork)victim.Locks).QueryAsync<SessionRow>(
+                "SELECT CAST(CONNECTION_ID() AS SIGNED) AS value"))[0].Value;
+            // KILL takes no parameter: the connection id is a number the server just answered.
+            await ((RelationalUnitOfWork)killer.Locks).ExecuteAsync($"KILL {session}");
+        });
+
+    private sealed class SessionRow
+    {
+        public long Value { get; set; }
+    }
 
     [Test]
     public async Task The_server_holds_the_documented_lock_until_the_transaction_ends()

@@ -4,6 +4,7 @@ using System.Text.Json;
 using eQuantic.Core.Data.CosmosDb.Extensions;
 using eQuantic.Core.Data.CosmosDb.Repository;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Locking;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -17,6 +18,9 @@ namespace eQuantic.Core.Data.CosmosDb.Tests;
 [TestFixture]
 public sealed class CosmosNamedLockTests : CosmosIntegrationTest
 {
+    // The well-known emulator account key (the same for every emulator).
+    private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
+
     private static readonly TimeSpan Lease = TimeSpan.FromSeconds(2);
 
     private ServiceProvider? _provider;
@@ -89,7 +93,7 @@ public sealed class CosmosNamedLockTests : CosmosIntegrationTest
         var name = NamedLockScenarios.Unique("tenant");
 
         // A holder that dies: its lease is written exactly as a live holder's, and never renewed or released.
-        Assert.That(await CosmosNamedLocks.Store(Database).TryTakeAsync(name, "dead-holder", Lease), Is.Not.Null);
+        Assert.That(await CosmosNamedLocks.Store(Database).TryTakeAsync(name, "dead-holder", Lease, CancellationToken.None), Is.Not.Null);
 
         var clock = Stopwatch.StartNew();
         Assert.That(async () => await holder.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
@@ -155,6 +159,159 @@ public sealed class CosmosNamedLockTests : CosmosIntegrationTest
         }
 
         Assert.That(await ReadLease(name), Is.Null, "released: the item is deleted");
+    }
+
+    [Test]
+    public Task A_hung_renewal_is_lost_before_another_holder_takes_the_lock() =>
+        LeaseScenarios.AHungRenewalIsLostBeforeAnotherHolderTakesTheLock(CosmosNamedLocks.Store(Database), Holder, Lease);
+
+    [Test]
+    public Task A_lost_lock_is_taken_afresh_not_reentered() =>
+        LeaseScenarios.ALostLockIsTakenAfresh(Holder,
+            async name =>
+            {
+                var id = CosmosNamedLocks.ItemId(name);
+                using var _ = await Leases.UpsertItemStreamAsync(CosmosNamedLocks.Body(id, name, "someone-else", TimeSpan.FromMinutes(1)),
+                    new PartitionKey(id));
+            },
+            async name =>
+            {
+                var id = CosmosNamedLocks.ItemId(name);
+                using var _ = await Leases.DeleteItemStreamAsync(id, new PartitionKey(id));
+            },
+            Lease);
+
+    [Test]
+    public Task An_acquisition_recognises_its_own_lease() => LeaseScenarios.AnAcquisitionRecognisesItsOwnLease(CosmosNamedLocks.Store(Database));
+
+    [Test]
+    public Task A_waiter_backs_off() => LeaseScenarios.AWaiterBacksOff(CosmosNamedLocks.Store(Database), Holder, Lease);
+
+    [TestCase(HttpStatusCode.RequestTimeout)]
+    [TestCase(HttpStatusCode.ServiceUnavailable)]
+    public async Task A_lease_create_whose_answer_is_lost_is_settled_by_reading_the_lease_back(HttpStatusCode lostAs)
+    {
+        var creates = new LeaseCreates { FirstAnsweredAs = lostAs };
+        using var client = ClientWith(creates);
+        var options = new NamedLockOptions { LeaseDuration = Lease };
+        var set = new NamedLockSet("cosmosdb", options);
+        var store = CosmosNamedLocks.Store(client.GetDatabase(CosmosTestServer.DatabaseName));
+        using var other = Holder();
+        var name = NamedLockScenarios.Unique("lost-answer");
+        try
+        {
+            await using (await set.AcquireAsync(name, TimeSpan.FromSeconds(5), false, () => new LeaseLockAttempt(store, name, options), default))
+            {
+                Assert.That((await ReadLease(name))!.Value.GetProperty("owner").GetString(), Does.Contain(Environment.MachineName),
+                    "the create landed, and the lease read back is the holder's");
+                Assert.That(async () => await other.Acquire(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>());
+            }
+
+            Assert.That(creates.Tampered, Is.EqualTo(1), "the create's answer was lost");
+            await using var taken = await other.Acquire(name, TimeSpan.Zero);
+        }
+        finally
+        {
+            set.ReleaseAll();
+        }
+    }
+
+    [Test]
+    public async Task An_acquisition_keeps_to_its_timeout_and_its_token_however_long_the_store_takes_to_answer()
+    {
+        // Every lease create lands, and its answer is held back for ten seconds. The lease is long, so a lease left
+        // behind would keep the other holder out for the rest of the test.
+        var creates = new LeaseCreates { HoldAnswers = TimeSpan.FromSeconds(10) };
+        using var client = ClientWith(creates);
+        var options = new NamedLockOptions { LeaseDuration = TimeSpan.FromSeconds(30) };
+        var set = new NamedLockSet("cosmosdb", options);
+        var store = CosmosNamedLocks.Store(client.GetDatabase(CosmosTestServer.DatabaseName));
+        using var other = Holder();
+        try
+        {
+            var timedOut = NamedLockScenarios.Unique("slow");
+            var clock = Stopwatch.StartNew();
+            Assert.That(async () => await set.AcquireAsync(timedOut, TimeSpan.FromMilliseconds(300), false,
+                () => new LeaseLockAttempt(store, timedOut, options), default), Throws.InstanceOf<TimeoutException>());
+            Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(3)), "the timeout bounds the acquisition, not the store");
+            await using (await other.Acquire(timedOut, TimeSpan.Zero))
+            {
+            }
+
+            var cancelled = NamedLockScenarios.Unique("slow");
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+            clock.Restart();
+            Assert.That(async () => await set.AcquireAsync(cancelled, Timeout.InfiniteTimeSpan, false,
+                () => new LeaseLockAttempt(store, cancelled, options), cancellation.Token), Throws.InstanceOf<OperationCanceledException>());
+            Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(3)), "the token cuts the acquisition short");
+            await using (await other.Acquire(cancelled, TimeSpan.Zero))
+            {
+            }
+
+            Assert.That(creates.Tampered, Is.EqualTo(2), "both creates landed, and their answers were held back");
+        }
+        finally
+        {
+            set.ReleaseAll();
+        }
+    }
+
+    /// <summary>A client of the emulator whose requests go through <paramref name="handler" />.</summary>
+    private static CosmosClient ClientWith(RequestHandler handler) =>
+        new(CosmosTestServer.Provider.GetRequiredService<CosmosClient>().Endpoint.ToString(), EmulatorKey, new CosmosClientOptions
+        {
+            ConnectionMode = ConnectionMode.Gateway,
+            LimitToEndpoint = true,
+            RequestTimeout = TimeSpan.FromMinutes(2),
+            CustomHandlers = { handler },
+        });
+
+    /// <summary>
+    ///     Lets every request reach the emulator, and then tampers with the answer to a lease create: the first one
+    ///     answered with a status that says nothing of whether it landed (a 408 or a 503), or every one held back.
+    /// </summary>
+    private sealed class LeaseCreates : RequestHandler
+    {
+        private int _creates;
+        private int _tampered;
+
+        public HttpStatusCode? FirstAnsweredAs { get; init; }
+
+        /// <summary>The lease creates whose answers were tampered with, so a test knows its handler saw them.</summary>
+        public int Tampered => Volatile.Read(ref _tampered);
+
+        public TimeSpan HoldAnswers { get; init; }
+
+        public override async Task<ResponseMessage> SendAsync(RequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = await base.SendAsync(request, cancellationToken);
+            if (!IsLeaseCreate(request))
+            {
+                return response;
+            }
+
+            if (FirstAnsweredAs is { } status && Interlocked.Increment(ref _creates) == 1)
+            {
+                Interlocked.Increment(ref _tampered);
+                response.Dispose();
+                return new ResponseMessage(status, request, "The answer was lost after the write.");
+            }
+
+            if (HoldAnswers > TimeSpan.Zero)
+            {
+                Interlocked.Increment(ref _tampered);
+                await Task.Delay(HoldAnswers, cancellationToken);
+            }
+
+            return response;
+        }
+
+        // A create is a POST to the container's own address that is neither a query nor an upsert.
+        private static bool IsLeaseCreate(RequestMessage request) =>
+            request.Method == HttpMethod.Post
+            && request.Headers["x-ms-documentdb-isquery"] is null
+            && request.Headers["x-ms-documentdb-is-upsert"] is null
+            && request.RequestUri.OriginalString.TrimEnd('/').EndsWith($"colls/{CosmosNamedLocks.ContainerName}", StringComparison.Ordinal);
     }
 
     private async Task<JsonElement?> ReadLease(string name)

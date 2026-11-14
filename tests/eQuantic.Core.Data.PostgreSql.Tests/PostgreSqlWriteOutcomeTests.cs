@@ -1,5 +1,9 @@
 using eQuantic.Core.Data.Migration;
+using eQuantic.Core.Data.Relational.Repository;
+using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Options;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 
 namespace eQuantic.Core.Data.PostgreSql.Tests;
 
@@ -89,4 +93,41 @@ public sealed class PostgreSqlWriteOutcomeTests : PostgreSqlIntegrationTest
     [Test]
     public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
         WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
+
+    [Test]
+    public async Task A_commit_a_deferred_unique_key_refuses_throws_DuplicateKeyException_and_ends_the_transaction()
+    {
+        using var scope = NewScope();
+        var unitOfWork = (RelationalUnitOfWork)scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        var locks = (ILockingUnitOfWork)unitOfWork;
+        var users = scope.ServiceProvider.GetRequiredService<IAsyncRepository<UserAccount, Guid>>();
+
+        // The unique index becomes a constraint checked at COMMIT: the flush passes, and the commit itself is refused.
+        await unitOfWork.ExecuteAsync("DROP INDEX ix_users_email");
+        await unitOfWork.ExecuteAsync("ALTER TABLE users ADD CONSTRAINT ix_users_email UNIQUE (email) DEFERRABLE INITIALLY DEFERRED");
+
+        var email = $"{Guid.NewGuid():N}@example.test";
+        var name = $"deferred:{Guid.NewGuid():N}";
+        await unitOfWork.BeginTransactionAsync();
+        await locks.AcquireLockAsync(name, TimeSpan.FromSeconds(5));
+        await users.AddAsync(new UserAccount { Email = email, Name = "one" });
+        await users.AddAsync(new UserAccount { Email = email, Name = "two" });
+        await unitOfWork.CommitAsync();
+
+        var refused = Assert.ThrowsAsync<DuplicateKeyException>(() => unitOfWork.CommitTransactionAsync());
+        Assert.That(refused!.ConstraintName, Is.EqualTo("ix_users_email"));
+        Assert.That(refused.InnerException, Is.InstanceOf<PostgresException>(), "the driver's exception is kept");
+
+        using var other = NewScope();
+        var otherLocks = other.ServiceProvider.GetRequiredService<ILockingUnitOfWork>();
+        await using (await otherLocks.AcquireLockAsync(name, TimeSpan.Zero))
+        {
+            Assert.That(async () => await locks.AcquireLockAsync(name, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
+                "the refused commit ended the transaction, and the lock it held");
+        }
+
+        Assert.That(async () => await unitOfWork.RollbackTransactionAsync(), Throws.Nothing, "no transaction is left open");
+        Assert.That(await users.CountAsync(new QueryOptions<UserAccount>().Where(x => x.Email == email)), Is.Zero,
+            "nothing of the refused transaction was written");
+    }
 }

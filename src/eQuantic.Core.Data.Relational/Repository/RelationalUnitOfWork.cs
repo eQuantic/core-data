@@ -610,33 +610,93 @@ public abstract partial class RelationalUnitOfWork : IQueryableUnitOfWork, IUnio
         }
     }
 
-    /// <summary>Flushes any staged writes into the transaction and makes it durable.</summary>
+    /// <summary>
+    ///     Flushes any staged writes into the transaction and makes it durable. The transaction ends either way: a
+    ///     commit that fails (a flush refused, a deferred constraint checked at <c>COMMIT</c>, a session lost) rolls
+    ///     back what it had not made durable, and the named locks taken inside it end with it. A key the store refuses
+    ///     at <c>COMMIT</c> reaches the caller as <see cref="DuplicateKeyException" />, as it does from a flush.
+    /// </summary>
     public async Task CommitTransactionAsync(CancellationToken cancellationToken = default)
     {
-        if (_transaction is null)
+        if (_transaction is not { } transaction)
         {
             return;
         }
 
-        await CommitAsync(cancellationToken).ConfigureAwait(false);
-        await _transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        await _transaction.DisposeAsync().ConfigureAwait(false);
-        _transaction = null;
-        await EndTransactionLocksAsync().ConfigureAwait(false);
+        try
+        {
+            await CommitAsync(cancellationToken).ConfigureAwait(false);
+            await TranslatingAsync(async () =>
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return 0;
+            }).ConfigureAwait(false);
+        }
+        catch
+        {
+            await RollbackQuietlyAsync(transaction).ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            await EndTransactionAsync(transaction).ConfigureAwait(false);
+        }
     }
 
-    /// <summary>Rolls the transaction back and discards staged writes.</summary>
+    /// <summary>
+    ///     Rolls the transaction back and discards staged writes. The transaction and its named locks end even when the
+    ///     rollback itself fails (a session already lost, whose transaction the server rolled back with it).
+    /// </summary>
     public async Task RollbackTransactionAsync(CancellationToken cancellationToken = default)
     {
         _pending.Clear();
-        if (_transaction is not null)
+        if (_transaction is not { } transaction)
         {
-            await _transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            await _transaction.DisposeAsync().ConfigureAwait(false);
-            _transaction = null;
+            await EndTransactionLocksAsync().ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndTransactionAsync(transaction).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    ///     Forgets the explicit transaction and ends the named locks taken inside it. The transaction is cleared first,
+    ///     so a lock released by statement (MySQL's <c>RELEASE_LOCK</c>) runs outside it; a lock the store would have
+    ///     kept is never left counted as held.
+    /// </summary>
+    private async Task EndTransactionAsync(DbTransaction transaction)
+    {
+        _transaction = null;
+        try
+        {
+            await transaction.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // A transaction on a broken session cannot be disposed cleanly; the server already ended it.
         }
 
         await EndTransactionLocksAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Rolls back a transaction whose commit failed; the commit's failure is the one worth reporting.</summary>
+    private static async Task RollbackQuietlyAsync(DbTransaction transaction)
+    {
+        try
+        {
+            await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Already rolled back by the server (a refused COMMIT, a lost session), or nothing left to undo.
+        }
     }
 
     // -------------------------------------------------------------- repositories / sets
