@@ -29,11 +29,12 @@ translation asks the same contract**:
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded in the document as
   the JSON they hold (object, array or scalar), come back equal, and `null` stays `null`.
 - **Sequence** — an atomic server-side counter: one item per `<container>.<property>` in the
-  `_sequences` container (partitioned by `/id`, created on first use), advanced by a `Patch`
-  `Increment`, which answers the new value. One increment per counter covers a whole commit. It
-  runs outside a `TransactionalBatch` (bound to one partition): a failed batch leaves a gap, never
-  a repeat. On an account with provisioned throughput, the container takes its own throughput
-  unless the database shares it.
+  `_sequences` container (partitioned by `/id`, created on first use, and created again if it is
+  removed later), advanced by a `Patch` `Increment`, which answers the new value. One increment per
+  counter covers a whole commit. It runs outside a `TransactionalBatch` (bound to one partition): a
+  failed batch leaves a gap, never a repeat. On an account with provisioned throughput, the
+  container takes its own throughput unless the database shares it. An account with **multi-region
+  writes** is refused — see [Multi-region writes](#multi-region-writes).
 - **Clock** — the server's clock, `SELECT VALUE GetCurrentDateTime()` scoped to one partition,
   read once per commit and given to every insert of it.
 - **Updates keep them** — a replace writes the whole document, so `Modify` first reads the stored
@@ -90,6 +91,22 @@ model.Entity<Order>(entity => entity
   key). See [Upserts and write outcomes](../writing/upserts.md).
 - `BeginTransactionAsync` gives a `TransactionalBatch` — single partition, enforced with guidance.
 
+## Multi-region writes
+
+A counter's `Patch` `Increment` and a lease's create and ETag-guarded replace are atomic **in the
+region that applies them**. An account with multi-region writes applies a write to the copy in the
+writer's region and converges the copies afterwards (by default, the last writer wins), so two
+processes writing in two regions can both succeed: two inserts take the same number, two holders take
+the same lock. Neither can be made safe from the client, and the region a client writes to moves on a
+failover.
+
+So the provider refuses them. The first use of `_sequences` or `_locks` in a process reads the
+account (`ReadAccountAsync`, once per account and process), and an account listing more than one
+writable region fails with `NotSupportedException` naming its regions. An account with a single write
+region lists only that one, however many regions it reads from, and is unaffected. Store-generated
+sequences and named locks need an account with a single write region; the rest of the provider (the
+clock included) works on either.
+
 ## Reading shapes across documents
 
 Cosmos DB has no join across containers, and the read shapes say what that costs instead of hiding
@@ -137,7 +154,8 @@ A named lock is a **lease**: an item in the `_locks` container (partitioned by `
 use), written by a create that answers 409 while another owner's item is there, taken over only once
 its `_ts` plus its lease is past the server's `GetCurrentDateTime()`, with a replace guarded by the
 item's ETag, and renewed and deleted the same way. It is written outside the transactional batch, and
-a dead holder's lease expires — see [Named locks](../writing/locks.md).
+a dead holder's lease expires — see [Named locks](../writing/locks.md). An account with multi-region
+writes is refused, as for the sequences ([Multi-region writes](#multi-region-writes)).
 
 ## Registration recap
 

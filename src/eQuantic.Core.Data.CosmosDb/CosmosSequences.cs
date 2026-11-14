@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -15,13 +14,22 @@ namespace eQuantic.Core.Data.CosmosDb;
 ///     one container and one partition): a batch that fails leaves a gap, never a repeat, as a relational sequence
 ///     does. The clock is the server's (<c>SELECT VALUE GetCurrentDateTime()</c>), read once per commit and given to
 ///     every insert of it. Everything here goes through the stream API, whatever serializer the client carries.
+///     <para>
+///         The increment is atomic in the region that applies it. An account that accepts writes in several regions
+///         applies it to each region's copy of the counter before the copies converge, so two inserts in two regions
+///         could take the same number: the counters refuse such an account with <see cref="NotSupportedException" />
+///         (its writable regions are read once per account and process).
+///     </para>
 /// </summary>
 public static class CosmosSequences
 {
     /// <summary>The container holding the counters, one item per <c>&lt;container&gt;.&lt;property&gt;</c>.</summary>
     public const string ContainerName = "_sequences";
 
-    private static readonly ConcurrentDictionary<string, Lazy<Task>> Ensured = new();
+    /// <summary>Why the counters cannot live in an account with several write regions.</summary>
+    private const string Purpose =
+        "A store-generated sequence advances its counter in '" + ContainerName + "' with a patch that each write region applies to " +
+        "its own copy of the counter, so two inserts in two regions could take the same number.";
 
     /// <summary>The counter item's id for a property of a container's documents.</summary>
     /// <param name="container">The entity's container.</param>
@@ -34,7 +42,7 @@ public static class CosmosSequences
     /// </summary>
     internal static async Task<long> AdvanceAsync(Database database, string counterId, long count, CancellationToken cancellationToken)
     {
-        var container = await CountersAsync(database, cancellationToken).ConfigureAwait(false);
+        var container = await CosmosSystemContainers.GetAsync(database, ContainerName, Purpose, cancellationToken).ConfigureAwait(false);
         var partitionKey = new PartitionKey(counterId);
 
         for (var attempt = 0; attempt < 5; attempt++)
@@ -48,6 +56,13 @@ public static class CosmosSequences
                     return item.RootElement.GetProperty("value").GetInt64();
                 }
 
+                if (CosmosSystemContainers.IsGone(patched))
+                {
+                    // The container was removed after this process created it: create it again, and the counter in it.
+                    container = await CosmosSystemContainers.RecreateAsync(database, ContainerName, Purpose, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 if (patched.StatusCode != HttpStatusCode.NotFound)
                 {
                     patched.EnsureSuccessStatusCode();
@@ -59,6 +74,12 @@ public static class CosmosSequences
             using var created = await container.CreateItemStreamAsync(
                 new MemoryStream(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new Dictionary<string, object> { ["id"] = counterId, ["value"] = 0L }))),
                 partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (CosmosSystemContainers.IsGone(created))
+            {
+                container = await CosmosSystemContainers.RecreateAsync(database, ContainerName, Purpose, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             if (!created.IsSuccessStatusCode && created.StatusCode != HttpStatusCode.Conflict)
             {
                 created.EnsureSuccessStatusCode();
@@ -86,26 +107,5 @@ public static class CosmosSequences
         }
 
         throw new InvalidOperationException("GetCurrentDateTime() answered nothing; the server's clock could not be read.");
-    }
-
-    /// <summary>The counters' container, created on first use (once per database and process).</summary>
-    private static async Task<Container> CountersAsync(Database database, CancellationToken cancellationToken)
-    {
-        var key = $"{database.Client.Endpoint}|{database.Id}";
-        var ensure = Ensured.GetOrAdd(key, _ => new Lazy<Task>(() =>
-            database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/id"), cancellationToken: CancellationToken.None)));
-        try
-        {
-            await ensure.Value.ConfigureAwait(false);
-        }
-        catch
-        {
-            // A failed creation is not remembered: the next use tries again.
-            Ensured.TryRemove(new KeyValuePair<string, Lazy<Task>>(key, ensure));
-            throw;
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        return database.GetContainer(ContainerName);
     }
 }
