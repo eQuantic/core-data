@@ -36,6 +36,9 @@ public sealed class CosmosTestServer
     private static ServiceProvider? _provider;
     private static Exception? _startupError;
 
+    /// <summary>Counts the requests the shared client has in flight against one container, while a test watches.</summary>
+    public static InFlightRequests Requests { get; } = new();
+
     /// <summary>The shared service provider (repositories, unit of work, migrations) over the emulator.</summary>
     public static ServiceProvider Provider => _provider!;
 
@@ -68,6 +71,7 @@ public sealed class CosmosTestServer
                 Serializer = new CosmosEntitySerializer(CosmosEntitySerializer.BuildOptions(model)),
                 RequestTimeout = TimeSpan.FromMinutes(2),
             };
+            options.CustomHandlers.Add(Requests);
             _client = new CosmosClient(endpoint, EmulatorKey, options);
 
             // The gateway health probe flips to ready before the vNext data-plane (the pgcosmos engine) finishes
@@ -196,6 +200,57 @@ public sealed class CosmosTestServer
         if (_startupError is not null)
         {
             Assert.Ignore($"Cosmos emulator is unavailable (Docker required): {_startupError.Message}");
+        }
+    }
+}
+
+/// <summary>
+///     A request handler of the shared client that counts the requests in flight against one container while a test
+///     watches it, and the most it saw at once. Retries run below the custom handlers, so each request counts once.
+/// </summary>
+public sealed class InFlightRequests : RequestHandler
+{
+    private string? _watched;
+    private int _current;
+    private int _peak;
+
+    /// <summary>The most requests against the watched container seen in flight at once since <see cref="Watch" />.</summary>
+    public int Peak => Volatile.Read(ref _peak);
+
+    /// <summary>Starts counting the requests against <paramref name="container" />, from zero.</summary>
+    public void Watch(string container)
+    {
+        Volatile.Write(ref _peak, 0);
+        Volatile.Write(ref _watched, "/colls/" + container + "/");
+    }
+
+    /// <summary>Stops counting.</summary>
+    public void Stop() => Volatile.Write(ref _watched, null);
+
+    public override async Task<ResponseMessage> SendAsync(RequestMessage request, CancellationToken cancellationToken)
+    {
+        var watched = Volatile.Read(ref _watched);
+        if (watched is null || request.RequestUri?.OriginalString.Contains(watched, StringComparison.Ordinal) != true)
+        {
+            return await base.SendAsync(request, cancellationToken);
+        }
+
+        var current = Interlocked.Increment(ref _current);
+        for (var peak = Volatile.Read(ref _peak); current > peak; peak = Volatile.Read(ref _peak))
+        {
+            if (Interlocked.CompareExchange(ref _peak, current, peak) == peak)
+            {
+                break;
+            }
+        }
+
+        try
+        {
+            return await base.SendAsync(request, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _current);
         }
     }
 }

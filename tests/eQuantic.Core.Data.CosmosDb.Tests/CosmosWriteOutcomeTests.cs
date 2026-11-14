@@ -694,4 +694,62 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
             F07 = "s7", F08 = "s8", F09 = "s9", F10 = "s10", F11 = "s11", F12 = 0,
         }), Is.Empty, "the condition no longer holds");
     }
+
+    // ---------------------------------------------------------------- refusals and their exceptions
+
+    [Test]
+    public async Task A_unique_key_taken_through_the_etag_fallback_is_a_DuplicateKeyException()
+    {
+        var owner = new UserAccount { Category = Partition, Email = "owner@example.test" };
+        var other = new UserAccount { Category = Partition, Email = "other@example.test" };
+        using (var seed = NewScope())
+        {
+            await RepoOf<UserAccount>(seed).AddRangeAsync([owner, other]);
+            await Commit(seed);
+        }
+
+        // Text compared ignoring case is a filter the store cannot evaluate as a patch's condition (it answers 400):
+        // the item is patched under the _etag of a read that still matches, and that patch takes another's unique key.
+        using var scope = NewScope();
+        var repo = RepoOf<UserAccount>(scope);
+        var exception = Assert.ThrowsAsync<DuplicateKeyException>(() => repo.UpdateManyAsync(
+            x => x.Id == other.Id && x.Email.Equals("OTHER@EXAMPLE.TEST", StringComparison.OrdinalIgnoreCase),
+            x => new UserAccount { Email = owner.Email }));
+        Assert.That(exception!.InnerException, Is.InstanceOf<CosmosException>(), "the SDK's exception is kept");
+        Assert.That((await repo.GetAsync(other.Id))!.Email, Is.EqualTo(other.Email));
+
+        Assert.That(await repo.UpdateManyAsync(
+            x => x.Id == other.Id && x.Email.Equals("OTHER@EXAMPLE.TEST", StringComparison.OrdinalIgnoreCase),
+            x => new UserAccount { Email = "renamed@example.test" }), Is.EqualTo(1L), "the fallback applies an update that takes no key");
+    }
+
+    [Test]
+    public async Task Deleting_many_matches_keeps_a_bounded_number_of_requests_in_flight_and_counts_every_delete()
+    {
+        const int stale = 200;
+        using (var seed = NewScope())
+        {
+            await RepoOf<Job>(seed).AddRangeAsync(Enumerable.Range(0, stale).Select(_ => new Job { Category = Partition, Status = "stale" }));
+            await RepoOf<Job>(seed).AddRangeAsync(Enumerable.Range(0, 3).Select(_ => new Job { Category = Partition, Status = "live" }));
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        long deleted;
+        CosmosTestServer.Requests.Watch(CosmosTestServer.ContainerName);
+        try
+        {
+            deleted = await RepoOf<Job>(scope).DeleteManyAsync(x => x.Category == Partition && x.Status == "stale");
+        }
+        finally
+        {
+            CosmosTestServer.Requests.Stop();
+        }
+
+        Assert.That(deleted, Is.EqualTo((long)stale), "every match deleted, every delete counted");
+        Assert.That(CosmosTestServer.Requests.Peak, Is.InRange(2, Repository.CosmosSet<Job>.MaxConcurrentItems),
+            "the items are deleted several at a time, never all of them at once");
+        var left = (await RepoOf<Job>(scope).GetFilteredAsync(x => x.Category == Partition)).ToList();
+        Assert.That(left.Select(x => x.Status), Is.EqualTo(new[] { "live", "live", "live" }));
+    }
 }

@@ -81,7 +81,11 @@ model.Entity<Order>(entity => entity
   (`PatchItemRequestOptions.FilterPredicate`), so an item that stopped matching is left alone and the
   count is the patches applied: a compare-and-set. `DeleteManyAsync` deletes each item under the
   `_etag` of a read that still finds it matching. (Before, the patch and the delete applied
-  unconditionally to whatever the query had found.) Any number of paths: beyond the ten Cosmos DB
+  unconditionally to whatever the query had found.) A filter the store cannot evaluate as a patch's
+  condition (text compared ignoring case, for one) patches under the `_etag` of a read instead, and a
+  unique key taken that way is a `DuplicateKeyException` too. Both work on **at most 32 items at
+  once**: each item is a read and a write of its own, and every match at once would be throttled
+  (429) past the SDK's retries. Any number of paths: beyond the ten Cosmos DB
   takes in one patch, the item is patched several times in one transactional batch, the first patch
   under the filter, so it takes the whole update or none of it — the same holds for a member-scoped
   `ModifyAsync` (under the `_etag`), whose patches join an explicit transaction's batch.
