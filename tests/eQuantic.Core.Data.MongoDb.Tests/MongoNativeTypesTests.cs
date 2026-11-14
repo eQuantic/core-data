@@ -166,6 +166,35 @@ public sealed class MongoNativeTypesTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task A_json_member_reads_a_decimal_another_client_stored_past_the_range_of_a_dotnet_decimal()
+    {
+        using var db = NewDatabase();
+        var repo = Runs(db);
+        using var payload = JsonDocument.Parse("""{"name":"build"}""");
+        var record = new RunRecord { Payload = payload };
+        await repo.AddAsync(record);
+        await Uow(db).CommitAsync();
+
+        // Another client writes numbers JSON holds and a .NET decimal does not (out of its range, or of its precision).
+        await db.Database.GetCollection<BsonDocument>("RunRecord").UpdateOneAsync(new BsonDocument("_id", record.Id),
+            new BsonDocument("$set", new BsonDocument
+            {
+                { "Payload.huge", new BsonDecimal128(Decimal128.Parse("1E+40")) },
+                { "Payload.precise", new BsonDecimal128(Decimal128.Parse("0.1234567890123456789012345678901234")) },
+            }));
+
+        var loaded = (await repo.GetAsync(record.Id))!;
+        Assert.That(loaded.Payload!.RootElement.GetProperty("huge").GetDouble(), Is.EqualTo(1E+40));
+        Assert.That(loaded.Payload.RootElement.GetProperty("precise").GetRawText(), Is.EqualTo("0.1234567890123456789012345678901234"),
+            "every digit the store holds");
+
+        await db.Database.GetCollection<BsonDocument>("RunRecord").UpdateOneAsync(new BsonDocument("_id", record.Id),
+            new BsonDocument("$set", new BsonDocument("Payload.nan", new BsonDecimal128(Decimal128.QNaN))));
+        Assert.That(async () => await repo.GetAsync(record.Id), Throws.InstanceOf<FormatException>().With.Message.Contains("NaN"),
+            "JSON has no NaN: refused by name");
+    }
+
+    [Test]
     public async Task Json_members_round_trip_as_embedded_bson()
     {
         using var db = NewDatabase();

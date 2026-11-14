@@ -180,7 +180,16 @@ internal sealed class MongoJsonMemberSerializer<TJson> : SerializerBase<TJson>, 
                 writer.WriteNumberValue(value.AsDouble);
                 break;
             case BsonType.Decimal128:
-                writer.WriteNumberValue(Decimal128.ToDecimal(value.AsDecimal128));
+                var number = value.AsDecimal128;
+                if (Decimal128.IsNaN(number) || Decimal128.IsInfinity(number))
+                {
+                    throw new FormatException(
+                        $"A JSON member cannot hold the BSON Decimal128 {number} the document stores: JSON has no NaN or infinity.");
+                }
+
+                // As BSON spells it, which is JSON's number syntax: every digit it holds, past a .NET decimal's range or
+                // precision too.
+                writer.WriteRawValue(number.ToString());
                 break;
             case BsonType.Boolean:
                 writer.WriteBooleanValue(value.AsBoolean);
