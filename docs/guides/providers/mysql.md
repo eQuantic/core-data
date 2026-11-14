@@ -15,12 +15,52 @@ truth lives.
 ## Capabilities
 
 - Atomic batched commit in a transaction, identity readback.
+- Named locks through `GET_LOCK`, a **session** lock no transaction releases: inside a transaction the
+  engine releases it right after the commit or rollback, outside one on dispose. Lock names are
+  **server-wide**, and MySQL rounds its wait to whole seconds (MariaDB does not) — see
+  [Named locks](../writing/locks.md).
 - Concurrency tokens, composite keys, facets (`varchar(n)`, `decimal(p,s)`), converters,
   navigations/includes, GROUP BY/HAVING, UNION/UNION ALL — the full
   [relational engine surface](../concepts/contracts.md).
+- Read shapes on both dialects: shaped includes ranked with `ROW_NUMBER()` (MySQL 8.0, MariaDB
+  10.2 or later), relation counts as correlated subqueries, nulls placed by ordering on
+  `CASE WHEN col IS NULL` (neither engine has `NULLS FIRST`), `LIMIT`/`OFFSET` pages without a count
+  and `SELECT DISTINCT` — see [Querying](../querying/includes.md).
+- Filters across relations run as a correlated `EXISTS` / `NOT EXISTS` on both dialects, in reads,
+  counts and set-based writes. A set-based write whose relation reads the very table it writes (a
+  self-referencing navigation), which both engines refuse in one statement (error 1093), reads the
+  matching keys first with `SELECT … FOR UPDATE` inside its transaction and writes by them, the rest
+  of the filter still applied — see [Relations and text in filters](../querying/predicates.md). Text ignoring case is
+  `LOWER(col) = LOWER(@p)` / `LOWER(col) LIKE LOWER(@p) ESCAPE '!'`; the default collations also
+  ignore accents.
 - `[SearchIndex]` materializes **no index** on MySQL (no trigram equivalent in the box) — `LIKE`
   still pushes down, unindexed, and [`Explain()`](../modeling/explain.md) says exactly that. The
   declaration stays portable; the plan differs per dialect, visibly.
+
+## Upserts and write outcomes
+
+`ON DUPLICATE KEY UPDATE` fires on **any** unique key and cannot be told which one is the target, so
+`UpsertAsync` works in a transaction (the caller's, or one of its own). It first takes the engine's
+named lock on the target — `GET_LOCK`, named by the table and the target's values (a text value by its
+column's collation, so the values the column compares equal take one lock), hashed to fit MySQL's 64
+characters and its case-insensitive lock names, and released when the transaction ends — so upserts of
+one target run one after another, however many there are and whether or not they run inside explicit
+transactions, while upserts of different targets never wait for each other (save text values that
+differ only in trailing spaces, which share a lock). It then reads the target
+without a row lock, updates the row it finds under `SELECT … FOR UPDATE`, or inserts it; when another
+insert of the target won (error 1062, which rolls back that statement alone) it updates the row that
+won. The wait for the lock is the session's `innodb_lock_wait_timeout`, then `TimeoutException`. Outside
+an explicit transaction it also runs again when InnoDB picks it as a deadlock victim (1213) against a
+writer that is not an upsert. An upsert on a key the store generates takes no lock; it is refused
+on MySQL, which cannot hand that key back, and runs on MariaDB, with `RETURNING`. `InsertManyAsync(…, skipDuplicates: true)` inserts row by row in one
+transaction, discarding only error 1062; `UpdateAndGetAsync` locks the matching rows, updates them and
+reads them back in one transaction (neither engine has `RETURNING` for an `UPDATE`). The data source
+always reports the rows a statement **found** (`UseAffectedRows=false`, whatever the connection string
+says), so `UpdateManyAsync` counts the rows it matched. Error 1062 — and a bulk load's duplicate-key
+warning, which `LOAD DATA LOCAL` would otherwise skip silently — is `DuplicateKeyException`, and the
+load is undone whole: its own transaction rolled back, or, inside the caller's, a savepoint the engine
+set before it. See
+[Upserts and write outcomes](../writing/upserts.md).
 
 ## Honest refusals you may meet
 

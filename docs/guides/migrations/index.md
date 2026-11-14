@@ -66,6 +66,15 @@ The single most used operation derives schema from the model, so schema and mapp
 | Cosmos DB | the container with partition key path(s) — **hierarchical multi-hash included** — default TTL and the model's composite indexes |
 | Cassandra | `CREATE TABLE` with partition/clustering keys, `CLUSTERING ORDER BY`, `default_time_to_live`, plus the model's SASI search indexes |
 
+On a relational store, `AddField` adds the column the way `EnsureCollection()` would have created it:
+the type the model declares for that member, facets included (`varchar(n)`, `numeric(p,s)`), so the
+drift check expects what the operation left behind. `ResizeField` restates an existing column to the
+same type.
+
+An `Update` binds its values the way the unit of work binds them: an enum stored as its labels goes as
+its label, and on PostgreSQL a JSON member or a string-keyed dictionary goes into its `jsonb` column as a
+document.
+
 ## Store honesty in migrations
 
 Operations that a store cannot express refuse with guidance rather than approximating:
@@ -91,5 +100,6 @@ The same message discipline as queries: what, why, and the way out.
 
 Everything above is the authoring surface, and it stays the surface: the `eqdata` tool compares your
 model against a snapshot committed beside it and writes one of these classes, which you then read and
-edit. It also checks a live database for having stopped matching the model — the one question the
+edit. What it cannot write faithfully — an enum switched between its numbers and its labels, a member
+that becomes store-generated — it hands back as a decision the build refuses until you write the step. It also checks a live database for having stopped matching the model — the one question the
 migration history cannot answer. See [Generating and drift checking](tooling.md).

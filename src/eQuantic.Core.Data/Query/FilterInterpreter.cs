@@ -139,6 +139,22 @@ public static class FilterInterpreter
 
     private static QueryFilter Compare(BinaryNode binary, ComparisonOperator op)
     {
+        // x.Name.ToLower() == v (or ToUpper, either side): the member's folded text against the value as it is.
+        if (op is ComparisonOperator.Equal or ComparisonOperator.NotEqual
+            && (CaseFolded(binary.Left, binary.Right, out var folded) || CaseFolded(binary.Right, binary.Left, out folded)))
+        {
+            return op == ComparisonOperator.Equal ? folded : NotText(folded);
+        }
+
+        // x.Name.ToLower() == null (or !=, ToUpper, either side): null folds to null and a text folds to a text, so it is
+        // the member's own null test, as the residual reads it (PredicateNormalizer.CompileResidual) and as the document
+        // stores answer it.
+        if (op is ComparisonOperator.Equal or ComparisonOperator.NotEqual
+            && (FoldedNull(binary.Left, binary.Right) ?? FoldedNull(binary.Right, binary.Left)) is { } nullable)
+        {
+            return new ComparisonFilter(nullable, op, null);
+        }
+
         if (Path(binary.Left) is { } leftMember)
         {
             return new ComparisonFilter(leftMember, op, Value(binary.Right));
@@ -173,11 +189,38 @@ public static class FilterInterpreter
 
         if (operand is BinaryNode binary && TryComparison(binary.NodeType, out var op))
         {
-            return Compare(binary, Negated(op));
+            // C# lifts an ordered comparison of a nullable member, and a lifted comparison is false for null: its
+            // negation holds for null, which the reversed comparison alone would not say (null <= v is not true either).
+            var negated = Compare(binary, Negated(op));
+            return op is not (ComparisonOperator.Equal or ComparisonOperator.NotEqual) && Lifted(binary)
+                                                                                     && negated is ComparisonFilter { Value: not null } comparison
+                ? new LogicalFilter(LogicalOperator.Or, [negated, new ComparisonFilter(comparison.Member, ComparisonOperator.Equal, null)])
+                : negated;
         }
 
-        return new LogicalFilter(LogicalOperator.Not, [Visit(operand)]);
+        var visited = Visit(operand);
+        return visited is TextFilter ? NotText(visited) : new LogicalFilter(LogicalOperator.Not, [visited]);
     }
+
+    /// <summary>
+    ///     The negation of a text test: a member that is null fails <c>string.Equals(x.Name, v, comparison)</c> (C# answers
+    ///     false), so it passes the negation, as it passes <c>x.Name != v</c>; the store's NOT alone would drop it.
+    /// </summary>
+    private static QueryFilter NotText(QueryFilter text) =>
+        text is TextFilter { Match: TextMatch.Equals } equality
+            ? new LogicalFilter(LogicalOperator.Or,
+                [new LogicalFilter(LogicalOperator.Not, [text]), new ComparisonFilter(equality.Member, ComparisonOperator.Equal, null)])
+            : new LogicalFilter(LogicalOperator.Not, [text]);
+
+    /// <summary>Whether a comparison is lifted: the compiler typed one of its sides nullable.</summary>
+    private static bool Lifted(BinaryNode binary) => Nullable(binary.Left) || Nullable(binary.Right);
+
+    private static bool Nullable(ExpressionNode node) => node switch
+    {
+        UnaryNode { Type.Name: { } name } => name.StartsWith("System.Nullable", StringComparison.Ordinal),
+        ConstantNode { Type.Name: { } name } => name.StartsWith("System.Nullable", StringComparison.Ordinal),
+        _ => false,
+    };
 
     private static QueryFilter Or(QueryFilter left, QueryFilter right)
     {
@@ -194,6 +237,11 @@ public static class FilterInterpreter
 
     private static QueryFilter Call(MethodCallNode call)
     {
+        if (TryText(call, out var textFilter))
+        {
+            return textFilter;
+        }
+
         // string.StartsWith / EndsWith / Contains over a member — the single-argument overloads only, so the
         // store's collation decides case sensitivity exactly as string equality already does.
         if (call.Method.Name is nameof(string.StartsWith) or nameof(string.EndsWith)
@@ -254,6 +302,131 @@ public static class FilterInterpreter
 
         throw Unsupported(call);
     }
+
+    // ---------------------------------------------------------------- text without regard to case
+
+    /// <summary>
+    ///     Recognizes a text test that does not follow the store's collation: <c>string.Equals(x.Name, v, comparison)</c>,
+    ///     <c>x.Name.Equals(v, comparison)</c>, <c>x.Name.Contains/StartsWith/EndsWith(v, comparison)</c> with a comparison
+    ///     that ignores case, and <c>Equals</c>/<c>Contains</c>/<c>StartsWith</c>/<c>EndsWith</c> over <c>x.Name.ToLower()</c>
+    ///     or <c>ToUpper()</c>.
+    /// </summary>
+    private static bool TryText(MethodCallNode call, out QueryFilter filter)
+    {
+        filter = null!;
+        var arguments = call.Arguments ?? [];
+        var match = call.Method.Name switch
+        {
+            nameof(string.Equals) => TextMatch.Equals,
+            nameof(string.StartsWith) => TextMatch.StartsWith,
+            nameof(string.EndsWith) => TextMatch.EndsWith,
+            nameof(string.Contains) => TextMatch.Contains,
+            _ => (TextMatch?)null,
+        };
+        if (match is null || !IsStringMethod(call.Method))
+        {
+            return false;
+        }
+
+        // string.Equals(a, b, comparison): the member on either side.
+        if (call.Object is null && match == TextMatch.Equals && arguments.Count == 3 && IgnoresCase(arguments[2]))
+        {
+            return Text(arguments[0], arguments[1], TextMatch.Equals, out filter) || Text(arguments[1], arguments[0], TextMatch.Equals, out filter);
+        }
+
+        if (call.Object is not { } receiver)
+        {
+            return false;
+        }
+
+        // x.Name.Op(v, comparison) — and v.Equals(x.Name, comparison).
+        if (arguments.Count == 2 && IgnoresCase(arguments[1]))
+        {
+            return Text(receiver, arguments[0], match.Value, out filter)
+                   || (match == TextMatch.Equals && Text(arguments[0], receiver, match.Value, out filter));
+        }
+
+        // x.Name.ToLower().Op(v)
+        if (arguments.Count == 1 && Folding(receiver) is { } folding && NodeEvaluation.TryValue(arguments[0], out var value))
+        {
+            switch (value)
+            {
+                case string text:
+                    filter = new TextFilter(folding.Member, match.Value, text, folding.Case);
+                    return true;
+                case null when match == TextMatch.Equals:
+                    // x.Name.ToLower().Equals(null) holds for no row, as the residual reads it: a null member fails a text
+                    // test, and a text never equals null. Written as that reading ("the member is a text, and its folded
+                    // text is null"), it stays two-valued under a negation, which then holds for every row.
+                    filter = new LogicalFilter(LogicalOperator.And,
+                    [
+                        new ComparisonFilter(folding.Member, ComparisonOperator.NotEqual, null),
+                        new ComparisonFilter(folding.Member, ComparisonOperator.Equal, null),
+                    ]);
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A case-ignoring test of <paramref name="memberNode" /> against <paramref name="valueNode" />, when they are a member and a value.</summary>
+    private static bool Text(ExpressionNode memberNode, ExpressionNode valueNode, TextMatch match, out QueryFilter filter)
+    {
+        filter = null!;
+        if (Path(memberNode) is not { } member || !NodeEvaluation.TryValue(valueNode, out var value))
+        {
+            return false;
+        }
+
+        filter = value switch
+        {
+            string text => new TextFilter(member, match, text, TextCase.Ignore),
+            null when match == TextMatch.Equals => new ComparisonFilter(member, ComparisonOperator.Equal, null),
+            _ => throw new NotSupportedException($"A text match of '{member}' needs a string value."),
+        };
+        return true;
+    }
+
+    /// <summary><c>x.Name.ToLower() == v</c>: the folded member on one side, a string value on the other.</summary>
+    private static bool CaseFolded(ExpressionNode foldedNode, ExpressionNode valueNode, out QueryFilter filter)
+    {
+        filter = null!;
+        if (Folding(foldedNode) is not { } folding || !NodeEvaluation.TryValue(valueNode, out var value) || value is not string text)
+        {
+            return false;
+        }
+
+        filter = new TextFilter(folding.Member, TextMatch.Equals, text, folding.Case);
+        return true;
+    }
+
+    /// <summary>The member of <c>x.Name.ToLower() == null</c>: the folded member on one side, a null value on the other; else <c>null</c>.</summary>
+    private static string? FoldedNull(ExpressionNode foldedNode, ExpressionNode valueNode) =>
+        Folding(foldedNode) is { } folding && NodeEvaluation.TryValue(valueNode, out var value) && value is null ? folding.Member : null;
+
+    /// <summary>The member and the case of <c>x.Name.ToLower()</c> / <c>ToLowerInvariant()</c> / <c>ToUpper()</c> / <c>ToUpperInvariant()</c>.</summary>
+    private static (string Member, TextCase Case)? Folding(ExpressionNode node)
+    {
+        if (Unwrap(node) is not MethodCallNode { Object: { } receiver } call || call.Arguments is { Count: > 0 } || !IsStringMethod(call.Method)
+            || Path(receiver) is not { } member)
+        {
+            return null;
+        }
+
+        return call.Method.Name switch
+        {
+            nameof(string.ToLower) or nameof(string.ToLowerInvariant) => (member, TextCase.Lower),
+            nameof(string.ToUpper) or nameof(string.ToUpperInvariant) => (member, TextCase.Upper),
+            _ => null,
+        };
+    }
+
+    /// <summary>Whether the node is a <see cref="StringComparison" /> that ignores case (ordinal or invariant).</summary>
+    private static bool IgnoresCase(ExpressionNode node) =>
+        NodeEvaluation.TryValue(node, out var value) && value is StringComparison or int
+                                                      && (StringComparison)Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture)
+                                                      is StringComparison.OrdinalIgnoreCase or StringComparison.InvariantCultureIgnoreCase;
 
     /// <summary>
     ///     Recognizes a function over a member: an instance call whose receiver is a member chain, or a static

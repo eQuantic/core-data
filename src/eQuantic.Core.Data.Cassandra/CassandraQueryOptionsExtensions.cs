@@ -100,7 +100,30 @@ internal sealed record CassandraCqlPlan(
 {
     /// <summary>Human-readable description of the residual conjunction (empty when fully pushed down).</summary>
     public string ResidualText => string.Join(" AND ", Residual.Select(residual => residual.Body.ToString()));
+
+    /// <summary>
+    ///     The same read with its longest pushed <c>IN</c> split in chunks of <see cref="CassandraCqlRenderer.InChunkSize" />
+    ///     keys, when it holds more than one chunk and the plan has no OR split: the common conjunction without it, and one
+    ///     alternative per chunk. <c>null</c> when nothing is split.
+    /// </summary>
+    public CassandraCqlChunks? Chunks { get; init; }
+
+    /// <summary>
+    ///     The plan a read of rows runs: one query per chunk of its longest <c>IN</c> (as alternatives, merged and
+    ///     de-duplicated by primary key), or this plan when nothing is split. A count, an aggregate, a group or a page binds
+    ///     the whole list in one statement instead, as it has one answer per statement.
+    /// </summary>
+    public CassandraCqlPlan Chunked() => Chunks is { } chunks && Alternatives.Count == 0
+        ? this with { Where = chunks.Where, Values = chunks.Values, Alternatives = chunks.Alternatives, Chunks = null }
+        : this;
 }
+
+/// <summary>A plan's longest <c>IN</c> split in chunks: the common conjunction without it, and one alternative per chunk.</summary>
+/// <param name="Where">The conjunction without the split <c>IN</c>.</param>
+/// <param name="Values">Its bound values.</param>
+/// <param name="Alternatives">One <c>IN</c> per chunk.</param>
+/// <param name="Keys">How many keys the split <c>IN</c> holds.</param>
+internal sealed record CassandraCqlChunks(string Where, object?[] Values, IReadOnlyList<CassandraCqlAlternative> Alternatives, int Keys);
 
 /// <summary>Builds CQL <c>WHERE</c> fragments and pushdown plans from a <see cref="QueryOptions{TEntity}" />.</summary>
 internal static class CassandraCql
@@ -114,16 +137,22 @@ internal static class CassandraCql
     public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration,
         QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter = null,
         Expression<Func<TEntity, bool>>? globalFilter = null)
+        where TEntity : class =>
+        Plan(configuration, Filters(options, extraFilter, globalFilter).Select(PredicateNormalizer.Normalize));
+
+    /// <summary>The pushdown plan of the filters as given (each already prepared: normalized, its relations resolved).</summary>
+    public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration, IEnumerable<Expression<Func<TEntity, bool>>> filters)
         where TEntity : class
     {
-        var clauses = new List<string>();
-        var values = new List<object?>();
+        var clauses = new List<(string Cql, object?[] Values)>();
+        var chunkable = new List<(int Clause, InFilter Filter)>();
         var residual = new List<LambdaExpression>();
         var alternatives = new List<CassandraCqlAlternative>();
         var requiresFiltering = false;
         var partitionScoped = false;
+        var pushed = new List<(LambdaNode Lambda, ExpressionNode Conjunct, QueryFilter Filter, string Cql, object?[] Values, bool Filtering)>();
 
-        foreach (var filter in Filters(options, extraFilter, globalFilter))
+        foreach (var filter in filters)
         {
             // One node-model conversion per filter (a single partial-evaluation pass); splitting, interpretation
             // and the OR analysis all walk the nodes, and only a refused conjunct is rebuilt into an expression
@@ -147,10 +176,7 @@ internal static class CassandraCql
                 {
                     if (rendered.Cql.Length > 0)
                     {
-                        clauses.Add(rendered.Cql);
-                        values.AddRange(rendered.Values);
-                        requiresFiltering |= rendered.RequiresAllowFiltering;
-                        partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
+                        pushed.Add((lambda, conjunct, interpreted, rendered.Cql, rendered.Values, rendered.RequiresAllowFiltering));
                     }
                 }
                 else if (alternatives.Count == 0 && TryOrSplit(configuration, conjunct, alternatives))
@@ -167,7 +193,97 @@ internal static class CassandraCql
             }
         }
 
-        return new CassandraCqlPlan(string.Join(" AND ", clauses), values.ToArray(), requiresFiltering, residual, alternatives, partitionScoped);
+        var unreachable = UnreachableIns(configuration, pushed.Select(candidate => candidate.Cql).ToList());
+        for (var index = 0; index < pushed.Count; index++)
+        {
+            var (lambda, conjunct, interpreted, cql, values, filtering) = pushed[index];
+            if (unreachable.Contains(index))
+            {
+                residual.Add(FilterInterpreter.RebuildPredicate<TEntity>(lambda, conjunct));
+                continue;
+            }
+
+            if (interpreted is InFilter inFilter && CassandraCqlRenderer.IsChunkable(configuration, inFilter))
+            {
+                chunkable.Add((clauses.Count, inFilter));
+            }
+
+            clauses.Add((cql, values));
+            requiresFiltering |= filtering;
+            partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
+        }
+
+        CassandraCqlChunks? chunks = null;
+        if (alternatives.Count == 0 && chunkable.Count > 0)
+        {
+            var (index, filter) = chunkable.MaxBy(candidate => candidate.Filter.Values.Count);
+            var common = clauses.Where((_, position) => position != index).ToList();
+            chunks = new CassandraCqlChunks(string.Join(" AND ", common.Select(clause => clause.Cql)),
+                common.SelectMany(clause => clause.Values).ToArray(),
+                CassandraCqlRenderer.InChunks(configuration, filter).Select(chunk => new CassandraCqlAlternative(chunk.Cql, chunk.Values)).ToList(),
+                filter.Values.Count);
+        }
+
+        return new CassandraCqlPlan(string.Join(" AND ", clauses.Select(clause => clause.Cql)),
+            clauses.SelectMany(clause => clause.Values).ToArray(), requiresFiltering, residual, alternatives, partitionScoped)
+        {
+            Chunks = chunks,
+        };
+    }
+
+    /// <summary>
+    ///     The conjuncts whose <c>IN</c> restricts a clustering column some clustering column before it leaves unrestricted
+    ///     (neither <c>=</c> nor <c>IN</c> in another pushed conjunct): CQL refuses such a statement ("PRIMARY KEY column …
+    ///     cannot be restricted as preceding column … is not restricted"), with or without <c>ALLOW FILTERING</c>, so the
+    ///     conjunct runs client-side, behind the same opt-in as any residual. A relation's resolved keys make this shape:
+    ///     <c>keys.Contains(x.Id)</c> on a table clustered by another column before its key. Read off the clauses as
+    ///     rendered, which is what CQL sees (an ordered comparison of an enum stored as labels renders as an <c>IN</c> too),
+    ///     and repeated until nothing else leaves, since a conjunct sent client-side no longer restricts its column.
+    /// </summary>
+    private static HashSet<int> UnreachableIns(CassandraEntityConfiguration configuration, IReadOnlyList<string> clauses)
+    {
+        var unreachable = new HashSet<int>();
+        if (configuration.ClusteringKeys.Count < 2)
+        {
+            return unreachable;
+        }
+
+        var columns = configuration.ClusteringKeys.Select(key => key.Column).ToList();
+        bool changed;
+        do
+        {
+            changed = false;
+            var restricted = columns
+                .Where(column => clauses.Where((_, index) => !unreachable.Contains(index))
+                    .Any(clause => Restricts(clause, column, " = ?") || Restricts(clause, column, " IN (")))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < clauses.Count; index++)
+            {
+                if (unreachable.Contains(index))
+                {
+                    continue;
+                }
+
+                for (var position = 1; position < columns.Count; position++)
+                {
+                    if (Restricts(clauses[index], columns[position], " IN (") && columns.Take(position).Any(preceding => !restricted.Contains(preceding)))
+                    {
+                        unreachable.Add(index);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        while (changed);
+
+        return unreachable;
+
+        // "column IN (" / "column = ?" as a whole name: "id" is not the end of "runnerid".
+        static bool Restricts(string clause, string column, string relation) =>
+            System.Text.RegularExpressions.Regex.IsMatch(clause,
+                $@"(?<![A-Za-z0-9_\""]){System.Text.RegularExpressions.Regex.Escape(column)}{System.Text.RegularExpressions.Regex.Escape(relation)}",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     }
 
     /// <summary>
@@ -249,7 +365,8 @@ internal static class CassandraCql
     public static bool ClientEvaluationOptedIn<TEntity>(QueryOptions<TEntity>? options) where TEntity : class =>
         CassandraQueryOptionsExtensions.IsClientEvaluationOptedIn(options);
 
-    private static IEnumerable<Expression<Func<TEntity, bool>>> Filters<TEntity>(
+    /// <summary>The filters a read applies: the global filter, the options' filter and specification, and the extra filter.</summary>
+    public static IEnumerable<Expression<Func<TEntity, bool>>> Filters<TEntity>(
         QueryOptions<TEntity>? options, Expression<Func<TEntity, bool>>? extraFilter,
         Expression<Func<TEntity, bool>>? globalFilter) where TEntity : class
     {

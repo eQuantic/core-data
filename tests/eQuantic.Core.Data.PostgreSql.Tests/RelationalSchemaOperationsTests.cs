@@ -1,8 +1,11 @@
 using System.Data.Common;
+using System.Text.Json;
 using eQuantic.Core.Data.Evolution;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Relational.Migration;
+using eQuantic.Core.Data.Repository;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace eQuantic.Core.Data.PostgreSql.Tests;
 
@@ -70,6 +73,59 @@ public sealed class RelationalSchemaOperationsTests : PostgreSqlIntegrationTest
 
         Assert.That(await TypeOfAsync(db, "order_lines", "product"), Is.EqualTo("character varying(200)"),
             "restating a column to what it already is has to be safe — a migration gets re-run");
+    }
+
+    [Test]
+    public async Task Adding_a_member_creates_the_column_at_the_size_the_model_declares()
+    {
+        using var db = await NewSchemaAsync();
+        // The table as it stood before the two members existed.
+        await using (var connection = await db.Resolve<DbDataSource>().OpenConnectionAsync())
+        {
+            await using var drop = connection.CreateCommand();
+            drop.CommandText = "ALTER TABLE order_lines DROP COLUMN product, DROP COLUMN amount";
+            await drop.ExecuteNonQueryAsync();
+        }
+
+        await ApplyAsync(db, migration => migration.For<OrderLine>(line => line.AddField(x => x.Product).AddField(x => x.Amount)));
+
+        Assert.That(await TypeOfAsync(db, "order_lines", "product"), Is.EqualTo("character varying(200)"),
+            "[Facet(Length = 200)] sizes an added column the way it sizes a created one");
+        Assert.That(await TypeOfAsync(db, "order_lines", "amount"), Is.EqualTo("numeric(18,2)"),
+            "[Facet(Precision = 18, Scale = 2)] too");
+        var source = db.Resolve<IDatabaseSnapshotSource>();
+        Assert.That(DriftComparer.Compare(source.Expect(), await source.ObserveAsync()).Findings, Is.Empty,
+            "the drift check expects the sized type, so an added column has to land on it");
+    }
+
+    [Test]
+    public async Task An_update_step_writes_a_json_member_and_a_dictionary_document()
+    {
+        using var db = await NewSchemaAsync();
+        var runs = db.Resolve<IAsyncRepository<RunRecord, Guid>>();
+        var orders = db.Resolve<IAsyncRepository<SaleOrder, Guid>>();
+        var run = new RunRecord();
+        var order = new SaleOrder { Id = Guid.NewGuid(), Customer = "alice", CreatedAt = DateTime.UtcNow };
+        await runs.AddAsync(run);
+        await orders.AddAsync(order);
+        await db.Resolve<PostgreSql.Repository.PostgreSqlDefaultUnitOfWork>().CommitAsync();
+
+        using var payload = JsonDocument.Parse("""{"name":"backfill","retries":3}""");
+        var attributes = new Dictionary<string, string> { ["tier"] = "gold", ["region"] = "emea" };
+        await ApplyAsync(db, migration => migration
+            .For<RunRecord>(r => r.Update(x => x.Id == run.Id, set => set.Set(x => x.Payload, payload)))
+            .For<SaleOrder>(o => o.Update(x => x.Id == order.Id, set => set.Set(x => x.Attributes, attributes))));
+
+        Assert.That(await ScalarAsync(db, $"SELECT payload ->> 'name' FROM run_record WHERE id = '{run.Id}'"),
+            Is.EqualTo("backfill"), "the JSON member reached its jsonb column as a document the store reads inside");
+        Assert.That(await ScalarAsync(db, $"SELECT attributes ->> 'region' FROM sale_orders WHERE id = '{order.Id}'"),
+            Is.EqualTo("emea"), "the dictionary reached its jsonb column as a document, not as another type");
+
+        using var scope = db.NewScope();
+        var loadedRun = await scope.ServiceProvider.GetRequiredService<IAsyncRepository<RunRecord, Guid>>().GetAsync(run.Id);
+        var loadedOrder = await scope.ServiceProvider.GetRequiredService<IAsyncRepository<SaleOrder, Guid>>().GetAsync(order.Id);
+        Assert.That(loadedRun!.Payload!.RootElement.GetProperty("retries").GetInt32(), Is.EqualTo(3));
+        Assert.That(loadedOrder!.Attributes, Is.EqualTo(attributes), "the row holds the dictionary the step set");
     }
 
     [Test]

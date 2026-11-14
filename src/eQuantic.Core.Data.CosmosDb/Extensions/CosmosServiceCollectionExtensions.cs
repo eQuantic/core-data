@@ -70,11 +70,15 @@ public static class CosmosServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(TUnitOfWork), typeof(TUnitOfWork), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(ILockingUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
 
         services.TryAdd(new ServiceDescriptor(typeof(IRepository<,>), typeof(CosmosRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<,>), typeof(CosmosRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncRepository<,>), typeof(CosmosRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncQueryableRepository<,>), typeof(CosmosRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IUpsertRepository<,>), typeof(CosmosRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IReturningUpdateRepository<,>), typeof(CosmosRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IPartialModifyRepository<,>), typeof(CosmosRepository<,>), lifetime));
 
         return services;
     }

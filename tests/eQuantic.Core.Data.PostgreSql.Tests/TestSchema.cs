@@ -230,10 +230,85 @@ public sealed class OrderLine : IEntity<(Guid, int)>
     public void SetKey((Guid, int) key) => (OrderId, LineNo) = key;
 }
 
+/// <summary>A run's state, stored as the enum type <c>"RunState"</c> (mixed case, the way Prisma names one).</summary>
+[Modeling.EnumType("RunState")]
+public enum RunState
+{
+    Queued,
+    [Modeling.StoredAs("in_progress")]
+    InProgress,
+    Completed,
+}
+
+/// <summary>A delivery channel, stored as the native enum type <c>channel</c> (the convention's name).</summary>
+public enum Channel
+{
+    Email,
+    Sms,
+}
+
+/// <summary>A weekday, kept as a plain enum: stored as its number, as before native enums existed.</summary>
+public enum Weekday
+{
+    Monday = 1,
+    Tuesday = 2,
+}
+
+/// <summary>
+///     The column shapes a schema made by another tool holds: native enums (alone, nullable and in an array), JSON
+///     members holding any JSON, and columns the store fills (an identity and a default) beside a client key.
+/// </summary>
+public sealed class RunRecord : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public RunState State { get; set; }
+
+    public RunState? Previous { get; set; }
+
+    public List<RunState> History { get; set; } = [];
+
+    public Channel Channel { get; set; }
+
+    public Weekday Day { get; set; }
+
+    public System.Text.Json.JsonDocument? Payload { get; set; }
+
+    public System.Text.Json.Nodes.JsonNode? Steps { get; set; }
+
+    public System.Text.Json.JsonElement? Meta { get; set; }
+
+    [Modeling.StoreGenerated]
+    public int Sequence { get; set; }
+
+    [Modeling.StoreGenerated]
+    public DateTime RecordedAt { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A generated key read back together with the store-generated columns after it.</summary>
+public sealed class Receipt : IEntity<long>
+{
+    public long Id { get; set; }
+
+    public string Note { get; set; } = "";
+
+    public long Number { get; set; }
+
+    public DateTime IssuedAt { get; set; }
+
+    public long GetKey() => Id;
+
+    public void SetKey(long key) => Id = key;
+}
+
 /// <summary>The relational mapping shared by the integration tests.</summary>
 internal static class TestSchema
 {
-    public static void Configure(RelationalModelBuilder builder) => builder
+    public static void Configure(RelationalModelBuilder builder) => QueryPredicateSchema.Configure(WriteOutcomeSchema.Configure(builder))
         .Entity<SaleOrder>(entity => entity
             .Table("sale_orders")
             .Collection(x => x.Invoices, invoice => invoice.OrderCode))
@@ -250,7 +325,13 @@ internal static class TestSchema
         .Entity<AuditedTicket>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Ticket>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Article>(_ => { })
-        .Entity<OrderLine>(entity => entity.Key(x => new { x.OrderId, x.LineNo }));
+        .Entity<OrderLine>(entity => entity.Key(x => new { x.OrderId, x.LineNo }))
+        .Enum<Channel>()
+        .Entity<RunRecord>(_ => { })
+        .Entity<Receipt>(entity => entity
+            .Key(x => x.Id, generated: true)
+            .Generated(x => x.Number)
+            .Generated(x => x.IssuedAt, "now()"));
 }
 
 /// <summary>The schema migration the runner discovers: both tables plus a customer index.</summary>
@@ -281,6 +362,10 @@ public sealed class SchemaSetupMigration : Data.Migration.Migration
         .For<Article>(article => article
             .EnsureCollection())
         .For<OrderLine>(line => line
+            .EnsureCollection())
+        .For<RunRecord>(run => run
+            .EnsureCollection())
+        .For<Receipt>(receipt => receipt
             .EnsureCollection());
 }
 

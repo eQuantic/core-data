@@ -9,17 +9,23 @@ namespace eQuantic.Core.Data.Cassandra;
 ///     assignments become <c>col = ?</c> and collection updates become the native read-modify-write forms
 ///     (<c>col = col + ?</c>, <c>col = ? + col</c>, <c>col = col - ?</c>) — atomic per column in Cassandra.
 ///     Numeric read-modify-writes render as counter increments when the model declares the column with
-///     <c>Counter(...)</c>, and are rejected with guidance otherwise.
+///     <c>Counter(...)</c>; on any other column CQL has no in-place form, and the set-based writes compute them from
+///     the row read and write them under a lightweight transaction's compare-and-set instead.
 /// </summary>
 internal static class CassandraUpdate
 {
     public static (string Set, object?[] Values) Build<TEntity>(CassandraEntityConfiguration configuration,
-        Expression<Func<TEntity, TEntity>> updateFactory)
+        Expression<Func<TEntity, TEntity>> updateFactory) =>
+        Build(configuration, UpdateInterpreter.Interpret(updateFactory));
+
+    /// <summary>Renders already-interpreted assignments (the update's, and the lifecycle stamps a caller adds).</summary>
+    public static (string Set, object?[] Values) Build(CassandraEntityConfiguration configuration,
+        IReadOnlyList<UpdateAssignment> updateAssignments)
     {
         var assignments = new List<string>();
         var values = new List<object?>();
 
-        foreach (var assignment in UpdateInterpreter.Interpret(updateFactory))
+        foreach (var assignment in updateAssignments)
         {
             // The interpreter names CLR members; the CQL wants the stored column names.
             var column = configuration.ColumnFor(assignment.Name);
@@ -29,8 +35,9 @@ internal static class CassandraUpdate
                     throw new NotSupportedException(
                         $"A counter column cannot be set ('{set.Name}'); counters only move by increments (x => new ... {{ {set.Name} = x.{set.Name} + n }}).");
                 case SetAssignment set:
+                    // The assigned value binds as its stored form: an enum's label (or number), a JSON member's text.
                     assignments.Add($"{column} = ?");
-                    values.Add(set.Value);
+                    values.Add(CassandraValues.ToStored(configuration.Column(column), set.Value));
                     break;
                 case IncrementAssignment increment when configuration.IsCounter(column):
                     assignments.Add($"{column} = {column} + ?");

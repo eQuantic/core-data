@@ -79,6 +79,35 @@ public sealed class CassandraCqlTests
     }
 
     [Test]
+    public void Plan_sends_an_in_on_a_clustering_column_whose_preceding_one_is_unrestricted_to_residual()
+    {
+        // Clustered by CreatedAt, then Id: CQL refuses "Id IN (…)" unless CreatedAt is restricted too, with or without
+        // ALLOW FILTERING. A relation's resolved keys make exactly this shape (keys.Contains(x.Id)).
+        var config = new CassandraModelBuilder()
+            .Entity<OrderData>(entity => entity
+                .Table("orders")
+                .PartitionKey(x => x.TenantId)
+                .ClusteringKey(x => x.CreatedAt, descending: true)
+                .ClusteringKey(x => x.Id)
+                .Key(x => x.Id))
+            .Build()
+            .For(typeof(OrderData));
+        var ids = new List<Guid> { Guid.NewGuid(), Guid.NewGuid() };
+        var date = new DateTime(2026, 1, 1);
+
+        var unrestricted = CassandraCql.Plan<OrderData>(config, null, x => x.TenantId == 5 && ids.Contains(x.Id));
+        Assert.That(unrestricted.Where, Is.EqualTo("TenantId = ?"));
+        Assert.That(unrestricted.ResidualText, Does.Contain("Id"), "the IN runs client-side");
+
+        var restricted = CassandraCql.Plan<OrderData>(config, null, x => x.TenantId == 5 && x.CreatedAt == date && ids.Contains(x.Id));
+        Assert.That(restricted.Where, Is.EqualTo("TenantId = ? AND CreatedAt = ? AND Id IN (?, ?)"), "the column before it is restricted");
+        Assert.That(restricted.Residual, Is.Empty);
+
+        var first = CassandraCql.Plan<OrderData>(config, null, x => x.TenantId == 5 && new[] { date }.Contains(x.CreatedAt));
+        Assert.That(first.Where, Is.EqualTo("TenantId = ? AND CreatedAt IN (?)"), "the first clustering column needs nothing before it");
+    }
+
+    [Test]
     public void Plan_sends_an_or_across_columns_to_residual()
     {
         var plan = CassandraCql.Plan<OrderData>(Config(), null, x => x.TenantId == 1 || x.Total > 1m);

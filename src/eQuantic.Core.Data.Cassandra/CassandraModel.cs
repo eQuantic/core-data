@@ -16,7 +16,19 @@ public sealed record CassandraColumn(string Name, string CqlType)
 {
     /// <summary>The CLR member the column stores (the column name itself when no rename applies).</summary>
     public string Member { get; init; } = Name;
+
+    /// <summary>
+    ///     The member's CLR type, which says how a value is stored: an enum as its label (a <c>text</c> column) or its
+    ///     number, a JSON member as its JSON text, anything else as itself.
+    /// </summary>
+    public Type ClrType { get; init; } = typeof(object);
 }
+
+/// <summary>A column whose value the store assigns on insert.</summary>
+/// <param name="Column">The stored column name.</param>
+/// <param name="Member">The CLR member.</param>
+/// <param name="Value">What the store assigns (<see cref="Data.Modeling.StoreValue.Sequence" /> or <see cref="Data.Modeling.StoreValue.Clock" />).</param>
+public sealed record CassandraGeneratedColumn(string Column, string Member, Data.Modeling.StoreValue Value);
 
 /// <summary>
 ///     The Cassandra mapping for an entity: its table, the partition key (one or more columns), the clustering
@@ -29,9 +41,10 @@ public abstract class CassandraEntityConfiguration
     protected CassandraEntityConfiguration(Type entityType, string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
         IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null,
-        string? concurrencyColumn = null, int? defaultTtlSeconds = null)
+        string? concurrencyColumn = null, int? defaultTtlSeconds = null, IReadOnlyList<CassandraGeneratedColumn>? storeGenerated = null)
     {
         EntityType = entityType;
+        StoreGenerated = storeGenerated ?? [];
         TableName = tableName;
         PartitionKeys = partitionKeys;
         ClusteringKeys = clusteringKeys;
@@ -65,7 +78,16 @@ public abstract class CassandraEntityConfiguration
     public IReadOnlyList<string> CounterColumns { get; }
 
     /// <summary>The search-indexed columns — <c>LIKE</c> pushes down on these (a SASI index backs each one).</summary>
-    public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; }
+    public IReadOnlyList<CassandraSearchColumn> SearchColumns { get; private set; }
+
+    /// <summary>The same mapping with other search columns (what the cluster's indexes really match).</summary>
+    /// <param name="searchColumns">The search columns.</param>
+    internal CassandraEntityConfiguration WithSearchColumns(IReadOnlyList<CassandraSearchColumn> searchColumns)
+    {
+        var copy = (CassandraEntityConfiguration)MemberwiseClone();
+        copy.SearchColumns = searchColumns;
+        return copy;
+    }
 
     /// <summary>
     ///     The optimistic-concurrency column (a version counter the entity carries), or <c>null</c>. Writes on a
@@ -78,6 +100,18 @@ public abstract class CassandraEntityConfiguration
     /// <summary>The table's <c>default_time_to_live</c> in seconds, or <c>null</c> (rows never expire by default).</summary>
     public int? DefaultTtlSeconds { get; }
 
+    /// <summary>
+    ///     The columns the store assigns on insert (<c>[StoreGenerated]</c>, or <c>Generated(...)</c>): a number of a
+    ///     sequence (a lightweight-transaction compare-and-set on <c>equantic_sequences</c>) or the store's clock
+    ///     (<c>toTimestamp(now())</c> in the <c>INSERT</c>), read back by the row's key; an update never sets them.
+    /// </summary>
+    public IReadOnlyList<CassandraGeneratedColumn> StoreGenerated { get; }
+
+    /// <summary>Whether <paramref name="column" /> is assigned by the store on insert.</summary>
+    public bool IsStoreGenerated(string column) => StoreGenerated.Any(generated => Same(generated.Column, column));
+
+    /// <summary>The column mapping a stored column name, or <c>null</c>.</summary>
+    public CassandraColumn? Column(string column) => Columns.FirstOrDefault(candidate => Same(candidate.Name, column));
     /// <summary>Whether <paramref name="column" /> is a counter column.</summary>
     public bool IsCounter(string column) => CounterColumns.Any(counter => Same(counter, column));
 
@@ -85,6 +119,14 @@ public abstract class CassandraEntityConfiguration
     public bool CanLike(string column, out CassandraSearchMode mode)
     {
         var search = SearchColumns.FirstOrDefault(candidate => Same(candidate.Column, column));
+        mode = search?.Mode ?? CassandraSearchMode.Prefix;
+        return search is not null;
+    }
+
+    /// <summary>Whether <paramref name="column" /> has a search index that matches without regard to case, and in which mode.</summary>
+    public bool CanLikeIgnoringCase(string column, out CassandraSearchMode mode)
+    {
+        var search = SearchColumns.FirstOrDefault(candidate => Same(candidate.Column, column) && candidate.CaseInsensitive);
         mode = search?.Mode ?? CassandraSearchMode.Prefix;
         return search is not null;
     }
@@ -120,7 +162,14 @@ public enum CassandraSearchMode
 /// <summary>A search-indexed column and its matching mode.</summary>
 /// <param name="Column">The column name.</param>
 /// <param name="Mode">The SASI matching mode.</param>
-public sealed record CassandraSearchColumn(string Column, CassandraSearchMode Mode);
+public sealed record CassandraSearchColumn(string Column, CassandraSearchMode Mode)
+{
+    /// <summary>
+    ///     Whether the index matches without regard to case: SASI's non-tokenizing analyzer with <c>case_sensitive: false</c>,
+    ///     on which the text tests that ignore case push down as <c>LIKE</c>.
+    /// </summary>
+    public bool CaseInsensitive { get; init; }
+}
 
 /// <summary>The typed Cassandra mapping for <typeparamref name="TEntity" />.</summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
@@ -130,9 +179,9 @@ public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfi
     internal CassandraEntityConfiguration(string tableName, IReadOnlyList<string> partitionKeys,
         IReadOnlyList<CassandraClusteringColumn> clusteringKeys, IReadOnlyList<CassandraColumn> columns, string keyColumn,
         IReadOnlyList<string>? counterColumns = null, IReadOnlyList<CassandraSearchColumn>? searchColumns = null,
-        string? concurrencyColumn = null, int? defaultTtlSeconds = null)
+        string? concurrencyColumn = null, int? defaultTtlSeconds = null, IReadOnlyList<CassandraGeneratedColumn>? storeGenerated = null)
         : base(typeof(TEntity), tableName, partitionKeys, clusteringKeys, columns, keyColumn, counterColumns, searchColumns,
-            concurrencyColumn, defaultTtlSeconds)
+            concurrencyColumn, defaultTtlSeconds, storeGenerated)
     {
     }
 }
@@ -141,6 +190,12 @@ public sealed class CassandraEntityConfiguration<TEntity> : CassandraEntityConfi
 public sealed class CassandraModel
 {
     private readonly Dictionary<Type, CassandraEntityConfiguration> _configurations = new();
+    private readonly HashSet<Type> _labelEnums = [];
+
+    /// <summary>The enums the model declared stored as their labels (<c>Enum&lt;TEnum&gt;()</c>).</summary>
+    public IReadOnlyCollection<Type> LabelEnums => _labelEnums;
+
+    internal HashSet<Type> DeclaredLabelEnums => _labelEnums;
 
     /// <summary>The registered configurations.</summary>
     public IReadOnlyDictionary<Type, CassandraEntityConfiguration> Configurations => _configurations;
@@ -163,6 +218,22 @@ public sealed class CassandraModel
     public string Explain()
     {
         var report = new System.Text.StringBuilder();
+
+        // The enums stored as labels: those the model declared, and the annotated ones its tables hold.
+        foreach (var enumType in _configurations.Values
+                     .SelectMany(configuration => configuration.Columns)
+                     .Where(column => column.CqlType == "text")
+                     .Select(column => Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType)
+                     .Where(type => type.IsEnum)
+                     .Concat(_labelEnums)
+                     .Distinct()
+                     .OrderBy(type => type.Name))
+        {
+            report.AppendLine($"{enumType.Name} -> stored as labels, text (" +
+                              string.Join(", ", Data.Modeling.EnumLabels.Of(enumType).Select(label =>
+                                  label.Key == label.Value ? label.Key : $"{label.Key} '{label.Value}'")) + ")");
+        }
+
         foreach (var configuration in _configurations.Values.OrderBy(entry => entry.EntityType.Name))
         {
             report.AppendLine($"{configuration.EntityType.Name} -> table \"{configuration.TableName}\"");
@@ -186,7 +257,19 @@ public sealed class CassandraModel
 
             foreach (var column in configuration.Columns)
             {
-                report.AppendLine($"  column: {column.Member} \"{column.Name}\" ({column.CqlType})");
+                var type = Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType;
+                var stored = type.IsEnum
+                    ? column.CqlType == "text" ? " labels" : " the enum's number"
+                    : Data.Modeling.JsonMembers.Is(type) ? " JSON text" : string.Empty;
+                var generated = configuration.StoreGenerated.FirstOrDefault(candidate => CassandraEntityConfiguration.Same(candidate.Column, column.Name)) switch
+                {
+                    { Value: Data.Modeling.StoreValue.Sequence } =>
+                        $" store-generated (sequence: lightweight-transaction compare-and-set on \"{CassandraSequences.TableName}\" row " +
+                        $"\"{CassandraSequences.SequenceName(configuration.TableName, column.Name)}\")",
+                    { Value: Data.Modeling.StoreValue.Clock } => " store-generated (clock: toTimestamp(now()) in the INSERT, read back by the row's key)",
+                    _ => string.Empty,
+                };
+                report.AppendLine($"  column: {column.Member} \"{column.Name}\" ({column.CqlType}{stored}){generated}");
             }
 
             foreach (var counter in configuration.CounterColumns)
@@ -215,13 +298,40 @@ public sealed class CassandraModelBuilder
     /// <returns>The same builder for chaining.</returns>
     public CassandraModelBuilder Entity<TEntity>(Action<CassandraEntityBuilder<TEntity>> configure) where TEntity : class
     {
-        var builder = new CassandraEntityBuilder<TEntity>();
+        var builder = new CassandraEntityBuilder<TEntity>(_model.DeclaredLabelEnums);
         configure(builder);
         _model.Add(builder.Build());
+
+        // Built again with the model, so an Enum<TEnum>() declared after the entity still lands on its columns.
+        _builds.Add(builder.Build);
         return this;
     }
 
-    internal CassandraModel Build() => _model;
+    private readonly List<Func<CassandraEntityConfiguration>> _builds = [];
+
+    /// <summary>
+    ///     Declares <typeparamref name="TEnum" /> stored as its labels, as <see cref="Data.Modeling.EnumTypeAttribute" />
+    ///     does on the enum: each member's column is <c>text</c>, written, read, filtered and set-based-updated as its
+    ///     <c>[StoredAs]</c> label (or its own name). An enum declared neither way is stored as its number (the CQL
+    ///     type of its underlying integral type).
+    /// </summary>
+    /// <typeparam name="TEnum">The enum.</typeparam>
+    /// <returns>The same builder for chaining.</returns>
+    public CassandraModelBuilder Enum<TEnum>() where TEnum : struct, System.Enum
+    {
+        _model.DeclaredLabelEnums.Add(typeof(TEnum));
+        return this;
+    }
+
+    internal CassandraModel Build()
+    {
+        foreach (var build in _builds)
+        {
+            _model.Add(build());
+        }
+
+        return _model;
+    }
 }
 
 /// <summary>Fluent configuration for one entity's Cassandra mapping.</summary>
@@ -238,9 +348,13 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     private string? _keyColumn;
     private string? _concurrencyMember;
     private int? _ttlSeconds;
+    private readonly IReadOnlySet<Type> _labelEnums;
+    private readonly Dictionary<string, Data.Modeling.StoreValue> _generated = new(StringComparer.OrdinalIgnoreCase);
 
-    internal CassandraEntityBuilder()
+    internal CassandraEntityBuilder(IReadOnlySet<Type> labelEnums)
     {
+        _labelEnums = labelEnums;
+
         // The eQuantic.Core.Data.Modeling annotations seed the builder; fluent calls override them
         // (conventions < annotations < fluent). Annotations outside the Cassandra vocabulary are ignored.
         if (Data.Modeling.EntityAttribute.NameFor(typeof(TEntity)) is { } name)
@@ -297,10 +411,18 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
                 _concurrencyMember = property.Name;
             }
 
+            if (property.GetCustomAttribute<Data.Modeling.StoreGeneratedAttribute>() is { } generated)
+            {
+                _generated[property.Name] = generated.Value;
+            }
+
             if (property.GetCustomAttribute<Data.Modeling.SearchIndexAttribute>() is { } search)
             {
                 _searchColumns.Add(new CassandraSearchColumn(property.Name,
-                    search.Mode == Data.Modeling.SearchMode.Prefix ? CassandraSearchMode.Prefix : CassandraSearchMode.Contains));
+                    search.Mode == Data.Modeling.SearchMode.Prefix ? CassandraSearchMode.Prefix : CassandraSearchMode.Contains)
+                {
+                    CaseInsensitive = search.CaseInsensitive,
+                });
             }
         }
     }
@@ -395,6 +517,24 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares a column outside the primary key whose value the store assigns on insert, as
+    ///     <see cref="Data.Modeling.StoreGeneratedAttribute" /> does: the next number of a sequence for an integral
+    ///     member (a lightweight-transaction compare-and-set on the <c>equantic_sequences</c> table, created on first
+    ///     use, which never hands out a number twice), the store's clock for a date (<c>toTimestamp(now())</c> in the
+    ///     <c>INSERT</c>), or the kind given. An <c>Add</c> reads the values back by the row's key, and a
+    ///     <c>Modify</c> never sets the column (its <c>INSERT</c> leaves it out, so the stored value stays).
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="value">What the store assigns; inferred from the member's type by default.</param>
+    public CassandraEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
+        Data.Modeling.StoreValue value = Data.Modeling.StoreValue.Inferred)
+    {
+        _generated[Data.Modeling.StoreGeneratedAttribute.OwnMember(selector.GetMemberPath(), typeof(TEntity))] = value;
+        return this;
+    }
+
+    /// <summary>
     ///     Declares a SASI search index on a text column — <c>StartsWith</c>/<c>EndsWith</c>/<c>Contains</c> and
     ///     <c>Db.Like</c> push down as native <c>LIKE</c> on it (no scan opt-in: the index serves the match).
     ///     The migration runner creates the index with <c>EnsureCollection()</c>. SASI must be enabled on the
@@ -409,6 +549,22 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         CassandraSearchMode mode = CassandraSearchMode.Contains)
     {
         _searchColumns.Add(new CassandraSearchColumn(selector.GetMemberName(), mode));
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a SASI search index on a text column, matching with or without regard to case. A case-insensitive
+    ///     index (a non-tokenizing analyzer with <c>case_sensitive: false</c>) also serves the text tests that ignore case —
+    ///     <c>string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)</c>, <c>Contains</c>/<c>StartsWith</c>/<c>EndsWith</c>
+    ///     with that comparison, and the same over <c>ToLower()</c>/<c>ToUpper()</c> — as a native <c>LIKE</c>.
+    /// </summary>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="mode">What the index matches: substrings (<see cref="CassandraSearchMode.Contains" />) or prefixes.</param>
+    /// <param name="caseInsensitive">Whether the index matches without regard to case.</param>
+    public CassandraEntityBuilder<TEntity> SearchIndex(Expression<Func<TEntity, string?>> selector, CassandraSearchMode mode,
+        bool caseInsensitive)
+    {
+        _searchColumns.Add(new CassandraSearchColumn(selector.GetMemberName(), mode) { CaseInsensitive = caseInsensitive });
         return this;
     }
 
@@ -427,11 +583,12 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         var columns = typeof(TEntity)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(property => property.CanRead && property.GetIndexParameters().Length == 0
-                               && !_unmapped.Contains(property.Name))
+                               && !_unmapped.Contains(property.Name)
+                               && !IsNavigation(property.PropertyType))
             .Select(property => new CassandraColumn(Stored(property.Name),
                 _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
                     ? "counter"
-                    : CassandraTypes.Cql(property.PropertyType)) { Member = property.Name })
+                    : CassandraTypes.Cql(property.PropertyType, IsLabelEnum)) { Member = property.Name, ClrType = property.PropertyType })
             .ToList();
 
         if (_counterColumns.Count > 0)
@@ -471,6 +628,26 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             }
         }
 
+        var generated = new List<CassandraGeneratedColumn>(_generated.Count);
+        foreach (var (member, value) in _generated)
+        {
+            var column = columns.FirstOrDefault(candidate => CassandraEntityConfiguration.Same(candidate.Member, member))
+                         ?? throw new InvalidOperationException(
+                             $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' to declare store-generated.");
+            var resolved = Data.Modeling.StoreGeneratedAttribute.Resolve(value, column.ClrType, $"{typeof(TEntity).Name}.{column.Member}");
+            var keys = _partitionKeys.Concat(_clusteringKeys.Select(key => key.Column));
+            if (keys.Any(key => CassandraEntityConfiguration.Same(key, member))
+                || _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, member))
+                || (_concurrencyMember is not null && CassandraEntityConfiguration.Same(_concurrencyMember, member)))
+            {
+                throw new InvalidOperationException(
+                    $"'{typeof(TEntity).Name}.{column.Member}' is a primary key column, a counter or the concurrency token, and " +
+                    "cannot also be declared store-generated: the store reads it back by the row's key, which the client gives.");
+            }
+
+            generated.Add(new CassandraGeneratedColumn(column.Name, column.Member, resolved));
+        }
+
         return new CassandraEntityConfiguration<TEntity>(
             _table ?? typeof(TEntity).Name,
             _partitionKeys.Select(Stored).ToList(),
@@ -480,16 +657,60 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             _counterColumns.Select(Stored).ToList(),
             _searchColumns.Select(search => search with { Column = Stored(search.Column) }).ToList(),
             _concurrencyMember is null ? null : Stored(_concurrencyMember),
-            _ttlSeconds);
+            _ttlSeconds,
+            generated);
     }
+
+    /// <summary>
+    ///     Whether a member is a navigation — another entity, or a collection of them — which a row never stores: it is
+    ///     loaded by <c>Include</c> from the related table, and counted there.
+    /// </summary>
+    private static bool IsNavigation(Type type)
+    {
+        var element = type == typeof(string) || type == typeof(byte[])
+            ? null
+            : type.IsArray
+                ? type.GetElementType()
+                : type.GetInterfaces().Append(type)
+                    .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                    ?.GetGenericArguments()[0];
+        return typeof(Data.Repository.IEntity).IsAssignableFrom(element ?? type);
+    }
+
+    /// <summary>Whether an enum is stored as its labels: declared on the model, or annotated <c>[EnumType]</c>.</summary>
+    private bool IsLabelEnum(Type enumType) =>
+        _labelEnums.Contains(enumType) || Data.Modeling.EnumTypeAttribute.For(enumType) is not null;
 }
 
 /// <summary>Maps CLR types to their CQL counterparts for <c>CREATE TABLE</c> authoring.</summary>
 internal static class CassandraTypes
 {
+    /// <summary>
+    ///     The CQL type of a member: an enum stored as its labels is <c>text</c>, any other enum the CQL type of its
+    ///     number, and a JSON member (<c>JsonDocument</c>, <c>JsonElement</c>, <c>JsonNode</c>) <c>text</c> holding its
+    ///     JSON; the rest as <see cref="Cql(Type)" /> maps it.
+    /// </summary>
+    public static string Cql(Type type, Func<Type, bool> isLabelEnum)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        if (underlying.IsEnum)
+        {
+            return isLabelEnum(underlying) ? "text" : Cql(Enum.GetUnderlyingType(underlying));
+        }
+
+        return Data.Modeling.JsonMembers.Is(underlying) ? "text" : Cql(type);
+    }
+
     public static string Cql(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;
+
+        if (underlying.IsEnum)
+        {
+            throw new NotSupportedException(
+                $"No CQL type mapping for a collection of '{underlying.Name}': an enum is mapped as a member of its own, " +
+                "not as the element of a collection.");
+        }
 
         if (underlying.IsGenericType)
         {

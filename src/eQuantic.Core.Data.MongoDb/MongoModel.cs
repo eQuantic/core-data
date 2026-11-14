@@ -13,23 +13,47 @@ namespace eQuantic.Core.Data.MongoDb;
 public sealed class MongoModel
 {
     private readonly Dictionary<Type, List<string>> _notes = new();
+    private readonly HashSet<Type> _enums = [];
 
     /// <summary>The entity types the model configured.</summary>
     public IReadOnlyCollection<Type> EntityTypes => _notes.Keys;
 
+    /// <summary>The enums the model declared stored as their labels (<c>Enum&lt;TEnum&gt;()</c>).</summary>
+    public IReadOnlyCollection<Type> LabelEnums => _enums;
+
     internal void Add(Type entityType, List<string> notes) => _notes[entityType] = notes;
+
+    internal void AddEnum(Type enumType) => _enums.Add(enumType);
 
     /// <summary>
     ///     Describes every mapping decision — collection, id member, element renames, exclusions and value
-    ///     conversions — read from the driver's class maps, the way <c>Explain()</c> describes a query. Read this
-    ///     instead of guessing what an element ended up being called.
+    ///     conversions, enums stored as their labels, JSON members and store-generated members — read from the
+    ///     driver's class maps, the way <c>Explain()</c> describes a query. Read this instead of guessing what an
+    ///     element ended up being called.
     /// </summary>
     public string Explain()
     {
         var report = new System.Text.StringBuilder();
+
+        // The enums stored as labels: those the model declared, and the annotated ones its entities hold.
+        var labelEnums = _enums
+            .Concat(_notes.Keys
+                .SelectMany(type => type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                .Select(property => Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType)
+                .Where(type => type.IsEnum && Modeling.EnumTypeAttribute.For(type) is not null))
+            .Distinct()
+            .OrderBy(type => type.Name);
+        foreach (var enumType in labelEnums)
+        {
+            report.AppendLine($"{enumType.Name} -> stored as labels, a BSON string (" +
+                              string.Join(", ", Modeling.EnumLabels.Of(enumType).Select(label =>
+                                  label.Key == label.Value ? label.Key : $"{label.Key} '{label.Value}'")) + ")");
+        }
+
         foreach (var (entityType, notes) in _notes.OrderBy(entry => entry.Key.Name))
         {
-            report.AppendLine($"{entityType.Name} -> collection \"{MongoModeling.CollectionName(entityType)}\"");
+            var collection = MongoModeling.CollectionName(entityType);
+            report.AppendLine($"{entityType.Name} -> collection \"{collection}\"");
 
             var classMap = BsonClassMap.LookupClassMap(entityType);
             if (classMap.IdMemberMap is { } id)
@@ -37,9 +61,18 @@ public sealed class MongoModel
                 report.AppendLine($"  id: {id.MemberName} \"_id\"");
             }
 
+            var generated = MongoModeling.StoreGenerated(entityType);
             foreach (var member in classMap.AllMemberMaps.Where(member => member != classMap.IdMemberMap))
             {
-                report.AppendLine($"  member: {member.MemberName} \"{member.ElementName}\"");
+                var stored = StoredValue(member.GetSerializer()) is { } kind ? $" ({kind})" : string.Empty;
+                var store = generated.FirstOrDefault(candidate => candidate.Property.Name == member.MemberName) switch
+                {
+                    { Value: Modeling.StoreValue.Sequence } sequence =>
+                        $" store-generated (sequence: $inc on \"{MongoSequences.CollectionName}\" document \"{MongoSequences.CounterId(collection, sequence.ElementName)}\")",
+                    { Value: Modeling.StoreValue.Clock } => " store-generated (clock: the server's time, read once per commit)",
+                    _ => string.Empty,
+                };
+                report.AppendLine($"  member: {member.MemberName} \"{member.ElementName}\"{stored}{store}");
             }
 
             foreach (var note in notes)
@@ -50,12 +83,35 @@ public sealed class MongoModel
 
         return report.ToString();
     }
+
+    /// <summary>How a member's serializer stores it, when it is one of the stored-value kinds (nullable unwrapped).</summary>
+    private static string? StoredValue(IBsonSerializer serializer) => serializer switch
+    {
+        IMongoStoredValueSerializer stored => stored.Describe(),
+        IChildSerializerConfigurable { ChildSerializer: IMongoStoredValueSerializer child } => child.Describe(),
+        _ => null,
+    };
 }
 
 /// <summary>Fluent builder for the <see cref="MongoModel" /> — one <c>Entity</c> call per mapped type.</summary>
 public sealed class MongoModelBuilder
 {
     private readonly MongoModel _model = new();
+
+    /// <summary>
+    ///     Declares <typeparamref name="TEnum" /> stored as its labels, as <see cref="Modeling.EnumTypeAttribute" /> does
+    ///     on the enum: each member is written, read, filtered and set-based-updated as its <c>[StoredAs]</c> label (or
+    ///     its own name), a BSON string. An enum declared neither way is stored as its number. The driver's
+    ///     serializers are global and fixed on first use, so declare it before the first read or write.
+    /// </summary>
+    /// <typeparam name="TEnum">The enum.</typeparam>
+    /// <returns>The same builder for chaining.</returns>
+    public MongoModelBuilder Enum<TEnum>() where TEnum : struct, System.Enum
+    {
+        MongoModeling.DeclareLabels<TEnum>();
+        _model.AddEnum(typeof(TEnum));
+        return this;
+    }
 
     /// <summary>
     ///     Maps <typeparamref name="TEntity" /> — collection name, id member, element renames, exclusions and
@@ -87,6 +143,14 @@ public sealed class MongoModelBuilder
             }
         });
 
+        foreach (var (member, value) in builder.GeneratedMembers)
+        {
+            MongoModeling.SetStoreGenerated(typeof(TEntity), member, value);
+        }
+
+        // Resolved now, so a member that cannot be store-generated refuses at model build, by name.
+        _ = MongoModeling.StoreGenerated(typeof(TEntity));
+
         _model.Add(typeof(TEntity), builder.Notes);
         return this;
     }
@@ -105,6 +169,7 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     internal string? CollectionName { get; private set; }
     internal List<Action<BsonClassMap<TEntity>>> Steps { get; } = [];
     internal List<string> Notes { get; } = [];
+    internal List<(string Member, Modeling.StoreValue Value)> GeneratedMembers { get; } = [];
 
     internal MongoEntityBuilder()
     {
@@ -192,6 +257,24 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
         var member = eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector);
         MongoModeling.SetTimeToLive(typeof(TEntity), member, (int)timeToLive.TotalSeconds);
         Notes.Add($"TTL: documents expire {(int)timeToLive.TotalSeconds}s after {member} (per-document TTL index)");
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a member whose value the store assigns on insert, as <see cref="Modeling.StoreGeneratedAttribute" />
+    ///     does: the next number of an atomic counter for an integral member (<c>findOneAndUpdate</c> with <c>$inc</c> on
+    ///     the <c>_sequences</c> collection, outside the open transaction, as a PostgreSQL sequence advances: a rollback
+    ///     leaves a gap), the server's clock for a date (read once per
+    ///     commit and given to every insert of it), or the kind given. The value is on the entity when the commit
+    ///     returns, and an update (a staged replace) keeps the stored value instead of writing the entity's.
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="value">What the store assigns; inferred from the member's type by default.</param>
+    public MongoEntityBuilder<TEntity> Generated<TMember>(Expression<Func<TEntity, TMember>> selector,
+        Modeling.StoreValue value = Modeling.StoreValue.Inferred)
+    {
+        GeneratedMembers.Add((Modeling.StoreGeneratedAttribute.OwnMember(eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberPath(selector), typeof(TEntity)), value));
         return this;
     }
 

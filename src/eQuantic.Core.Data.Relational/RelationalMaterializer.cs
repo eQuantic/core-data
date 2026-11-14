@@ -87,6 +87,16 @@ internal static class RelationalMaterializer
             return value;
         }
 
+        if (value is string json && Modeling.JsonMembers.Is(type))
+        {
+            return Modeling.JsonMembers.Parse(json, type);
+        }
+
+        if (type.IsEnum && value is string label)
+        {
+            return Modeling.EnumLabels.Parse(type, label);
+        }
+
         return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 
@@ -119,6 +129,12 @@ internal static class RelationalMaterializer
             return value;
         }
 
+        // A JSON document member comes back as JSON text; parsed into the member's own type.
+        if (value is string text && Modeling.JsonMembers.Is(target))
+        {
+            return Modeling.JsonMembers.Parse(text, target);
+        }
+
         // Document columns (jsonb) come back as JSON text; shape them into the member's dictionary.
         if (value is string json && typeof(System.Collections.IDictionary).IsAssignableFrom(target))
         {
@@ -128,15 +144,16 @@ internal static class RelationalMaterializer
         // A driver hands collections back as arrays; shape them into the member's List<T>.
         if (value is Array array && !target.IsArray && typeof(IEnumerable).IsAssignableFrom(target) && target.IsGenericType)
         {
-            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(target.GetGenericArguments()[0]))!;
+            var element = target.GetGenericArguments()[0];
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(element))!;
             foreach (var item in array)
             {
-                list.Add(item);
+                list.Add(ChangeValue(item, element));
             }
 
             return list;
         }
 
-        return target.IsEnum ? Enum.ToObject(target, value) : Convert.ChangeType(value, target);
+        return ChangeValue(value, target);
     }
 }

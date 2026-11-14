@@ -73,6 +73,8 @@ engine uses it — that is the difference between this engine and a wrapper:
 | `x.Region == region` from a variable (Cosmos) | — | partial evaluation resolves the captured value, and the query **pins the partition** (single-partition RU cost) |
 | `Contains`/`StartsWith` (Cassandra) | plain CQL has no LIKE | pushes down as `LIKE` **iff** the model declares a `[SearchIndex]` whose mode can serve the pattern |
 | union of two entity shapes | most stores have no cross-collection UNION | MongoDB: one aggregation with `$unionWith`; relational: native `UNION`/`UNION ALL` — see [UNION](union.md) |
+| `x.Items.Any(i => …)`, `x.Repository.WorkspaceId == w` | a filter names only the entity's own members, and three stores cannot join | relational: a correlated `EXISTS`; MongoDB, Cosmos DB, Cassandra: the related keys read first, then `IN` — see [Relations and text in filters](predicates.md) |
+| `x.Name.Equals(v, StringComparison.OrdinalIgnoreCase)` | equality follows the store's collation | `lower()` / `ILIKE`, an escaped case-insensitive regular expression, Cosmos DB's case-insensitive string functions, or a case-insensitive SASI index — see [Relations and text in filters](predicates.md#text-without-regard-to-case) |
 
 ## Explain before you run
 

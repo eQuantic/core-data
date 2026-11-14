@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.Evolution;
 using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Serializers;
 
 namespace eQuantic.Core.Data.MongoDb.Evolution;
 
@@ -11,6 +12,12 @@ namespace eQuantic.Core.Data.MongoDb.Evolution;
 ///         only truthful answer to "what is this collection's shape" is the mapping the driver will actually use
 ///         when it serializes — element names included, renames and exclusions applied. Reflecting over the type
 ///         instead would describe a shape nobody writes.
+///     </para>
+///     <para>
+///         The member's serializer also says how its values are stored: an enum the driver writes as its labels (an
+///         <c>[EnumType]</c> enum, or one the model declared with <c>Enum&lt;TEnum&gt;()</c>) is recorded as those
+///         labels, alone or as an array's elements, so switching it from its numbers reads as the change to every
+///         stored document it is. A member the store assigns on insert is recorded with what it assigns.
 ///     </para>
 ///     <para>
 ///         What this cannot describe is the collection as it <em>is</em>: documents written before a member existed
@@ -32,11 +39,12 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
     private static EntitySnapshot Describe(Type entityType)
     {
         var classMap = BsonClassMap.LookupClassMap(entityType);
+        var generated = MongoModeling.StoreGenerated(entityType);
 
         return new EntitySnapshot(entityType.FullName ?? entityType.Name,
             MongoModeling.CollectionName(entityType),
             classMap.AllMemberMaps
-                .Select(member => Describe(entityType, member))
+                .Select(member => Describe(member, generated))
                 .OrderBy(field => field.Member, StringComparer.Ordinal)
                 .ToList())
         {
@@ -44,17 +52,55 @@ public sealed class MongoModelSnapshotSource(MongoModel model) : IModelSnapshotS
         };
     }
 
-    private static FieldSnapshot Describe(Type entityType, BsonMemberMap member)
+    private static FieldSnapshot Describe(BsonMemberMap member, IReadOnlyList<MongoGeneratedMember> generated)
     {
-        var stored = member.MemberType;
-        return new FieldSnapshot(member.MemberName, member.ElementName,
-            (Nullable.GetUnderlyingType(stored) ?? stored).FullName ?? stored.Name)
+        var (storedType, labels) = StoredTypeOf(member);
+        return new FieldSnapshot(member.MemberName, member.ElementName, storedType)
         {
             // A document may always be missing a field, whatever the member's CLR type says — that is the
             // condition a migration exists to fix, not one the model can rule out.
             Nullable = true,
             PreviousNames = MemberVocabulary.PreviousNames(member.MemberInfo),
             DefaultLiteral = MemberVocabulary.DefaultLiteral(member.MemberInfo),
+            Generated = generated.FirstOrDefault(candidate => candidate.Property.Name == member.MemberName) is { } store
+                ? StoredForm.Generated(store.Value)
+                : null,
+            Labels = labels is null ? [] : LabelSnapshot.Of(labels),
         };
     }
+
+    /// <summary>
+    ///     The member's CLR type, or the labels of the enum its serializer writes as labels: the member's own (a
+    ///     nullable one unwrapped), or its array's elements.
+    /// </summary>
+    private static (string StoredType, Type? Labels) StoredTypeOf(BsonMemberMap member)
+    {
+        var serializer = member.GetSerializer();
+
+        // An array's serializer also hands out its items' as a child, so it is asked first, for its elements.
+        if (serializer is IBsonArraySerializer array)
+        {
+            if (array.TryGetItemSerializationInfo(out var item) && LabelEnumOf(item.Serializer, item.NominalType) is { } element)
+            {
+                return (StoredForm.LabelCollection(element), element);
+            }
+        }
+        else if (LabelEnumOf(serializer, member.MemberType) is { } single)
+        {
+            return (StoredForm.Labels(single), single);
+        }
+
+        var stored = member.MemberType;
+        return ((Nullable.GetUnderlyingType(stored) ?? stored).FullName ?? stored.Name, null);
+    }
+
+    /// <summary>The enum a serializer of <paramref name="valueType" /> writes as its labels, or <c>null</c>.</summary>
+    private static Type? LabelEnumOf(IBsonSerializer serializer, Type valueType) => serializer switch
+    {
+        IMongoEnumLabelSerializer labels => labels.EnumType,
+        // A nullable enum's serializer wraps the enum's own (a dictionary's wraps its values', which is not this).
+        IChildSerializerConfigurable { ChildSerializer: IMongoEnumLabelSerializer labels }
+            when Nullable.GetUnderlyingType(valueType) is not null => labels.EnumType,
+        _ => null,
+    };
 }
