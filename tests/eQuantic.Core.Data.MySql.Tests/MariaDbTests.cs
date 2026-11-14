@@ -196,6 +196,9 @@ public sealed class MariaDbTests
     [Test]
     public Task A_group_keyed_by_labels_has_by_value() => QueryPredicateScenarios.LabelGroupsKeyAndHaveByValue(NewScope);
 
+    [Test]
+    public Task A_union_ordered_by_labels_orders_by_value() => QueryPredicateScenarios.LabelUnionOrdersByValue(NewScope);
+
     // ---------------------------------------------------------------- generated keys
 
     [Test]

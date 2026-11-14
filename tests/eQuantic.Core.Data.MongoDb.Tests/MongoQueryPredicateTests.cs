@@ -166,6 +166,14 @@ public sealed class RelTicket : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>A ticket's row in a union.</summary>
+public sealed class TicketRow
+{
+    public string Title { get; set; } = "";
+
+    public RelPriority Priority { get; set; }
+}
+
 /// <summary>
 ///     The query predicates against a real MongoDB: a filter across a relation resolves the related keys first (one
 ///     aggregation per test, inside the transaction's session when one is open) and reads with <c>$in</c>/<c>$nin</c>
@@ -504,5 +512,24 @@ public sealed class MongoQueryPredicateTests : MongoIntegrationTest
         var refused = Assert.ThrowsAsync<NotSupportedException>(() =>
             grouped.GroupByAsync(x => x.Alias, g => new { Alias = g.Key, Top = g.Max(x => x.Priority) }));
         Assert.That(refused!.Message, Does.Contain("labels"));
+    }
+
+    [Test]
+    public async Task A_union_ordered_by_labels_orders_by_value()
+    {
+        await SeedTicketsAsync();
+        using var scope = NewScope();
+        var unions = (IUnionQueryRunner)scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        Query.UnionQuery<TicketRow> Union() => Query.UnionQuery.All(
+            Query.Union.Of<RelTicket>().Where(x => x.Priority <= RelPriority.Medium).Select(x => new TicketRow { Title = x.Title, Priority = x.Priority }),
+            Query.Union.Of<RelTicket>().Where(x => x.Priority > RelPriority.Medium).Select(x => new TicketRow { Title = x.Title, Priority = x.Priority }));
+
+        var ascending = await unions.UnionAsync(Union().OrderBy(row => row.Priority));
+        Assert.That(ascending.Select(row => (row.Title, row.Priority)), Is.EqualTo(new[]
+        {
+            ("t1", RelPriority.Low), ("t2", RelPriority.Medium), ("t3", RelPriority.High), ("t4", RelPriority.Urgent),
+        }), "each branch's filter compares by value, and the union orders by value");
+        Assert.That((await unions.UnionAsync(Union().OrderByDescending(row => row.Priority).Take(2))).Select(row => row.Title),
+            Is.EqualTo(new[] { "t4", "t3" }));
     }
 }

@@ -45,8 +45,10 @@ every other provider, through MongoDB's own mechanisms:
   `x.State == State.InProgress` (which the compiler turns into `(int)x.State == 1`) included. An
   ordered comparison compares the members' values, as C# does, sent as an `$in` over the labels whose
   member satisfies it, and an order by such a member sorts on the value each label stands for (an
-  `$addFields` of a `$switch`, then `$sort`), shaped includes included. An enum declared neither way
-  keeps its number. The driver's serializers are global and fixed on
+  `$addFields` of a `$switch`, then `$sort`), shaped includes and union orders included. `MinAsync`/
+  `MaxAsync` read the distinct members present and pick by value; a sum, an average and an aggregate of
+  such a member in a group are refused; a group's `HAVING` on such a key compares by value. An enum
+  declared neither way keeps its number. The driver's serializers are global and fixed on
   first use: declare `Enum<TEnum>()` before the first read or write (a late declaration refuses).
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded as the BSON value
   their JSON is: an object as a document, an array as an array, a scalar as the scalar. They come

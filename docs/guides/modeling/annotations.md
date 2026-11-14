@@ -108,8 +108,9 @@ build to refuse.
   passes as it does in C#) is membership in the labels whose member satisfies it, and
   `OrderBy(x => x.Priority)` orders by the value each label stands for — a `CASE` on the relational
   engines, a `$switch` on MongoDB, one query per member on Cosmos DB, and client-side behind
-  `.AllowClientEvaluation()` on Cassandra (see each provider). An enum without it keeps being stored as
-  its number. On the relational engines the store itself refuses another value; on the document and
+  `.AllowClientEvaluation()` on Cassandra (see each provider). `MinAsync`/`MaxAsync`, a group's key and
+  `HAVING`, and a union's order follow the same values; a sum or an average of labels is refused (see
+  [Aggregates](../querying/aggregates.md)). An enum without it keeps being stored as its number. On the relational engines the store itself refuses another value; on the document and
   wide-column engines the label is a plain string, so the guarantee is the provider's. Switching an
   existing enum from numbers to labels is a data migration, and `eqdata migrations add` says what to
   write instead of generating it (see [Migrations](../migrations/index.md)).

@@ -147,14 +147,16 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
         var collection = GetCollection<TDocument>();
         var query = _session is null ? collection.AsQueryable() : collection.AsQueryable(_session);
 
+        // The branch's filters read as every filter does: an ordered comparison of an enum stored as its labels by the
+        // members' values, text without regard to case as a regular expression.
         if (!branch.IgnoreQueryFilters && GlobalFilter<TDocument>() is { } global)
         {
-            query = query.Where(global);
+            query = query.Where((Expression<Func<TDocument, bool>>)MongoPredicates.Rendered(global));
         }
 
         foreach (var filter in branch.Filters)
         {
-            query = query.Where((Expression<Func<TDocument, bool>>)filter);
+            query = query.Where((Expression<Func<TDocument, bool>>)MongoPredicates.Rendered(filter));
         }
 
         return query.Select((Expression<Func<TDocument, TResult>>)branch.Projection);
@@ -163,13 +165,26 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
     private static IQueryable<TResult> OrderCombined<TResult>(IQueryable<TResult> combined,
         IReadOnlyList<UnionOrder> order, IReadOnlyList<string> targets)
     {
+        var missing = order.FirstOrDefault(key => !targets.Contains(key.Member, StringComparer.OrdinalIgnoreCase));
+        if (missing is not null)
+        {
+            throw new NotSupportedException($"The union projects no member '{missing.Member}' to order by.");
+        }
+
+        // A projected member holding an enum's labels orders by the value each label stands for, as C# orders the enum:
+        // the order runs as stages ranking each label ($addFields of a $switch, then $sort), which LINQ has no word for.
+        var sorts = order.Select(key =>
+        {
+            var row = Expression.Parameter(typeof(TResult), "row");
+            return new MemorySort(Expression.Lambda(Expression.PropertyOrField(row, key.Member), row), key.Descending, NullsOrder.Default);
+        }).ToList();
+        if (sorts.Any(sort => MongoStages.SortsByLabels(sort.Key)))
+        {
+            return MongoStages.Append(combined, MongoStages.Sort<TResult>(sorts));
+        }
+
         for (var index = 0; index < order.Count; index++)
         {
-            if (!targets.Contains(order[index].Member, StringComparer.OrdinalIgnoreCase))
-            {
-                throw new NotSupportedException($"The union projects no member '{order[index].Member}' to order by.");
-            }
-
             var row = Expression.Parameter(typeof(TResult), "row");
             var member = Expression.PropertyOrField(row, order[index].Member);
             var selector = Expression.Lambda(member, row);

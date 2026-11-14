@@ -186,6 +186,14 @@ public sealed class RelTicket : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A ticket's row in a union.</summary>
+public sealed class TicketRow
+{
+    public string Title { get; set; } = "";
+
+    public RelPriority Priority { get; set; }
+}
+
 /// <summary>The query-predicate entities' mapping: the navigations follow the conventions (<c>{Nav}Id</c>, <c>{Owner}Id</c>).</summary>
 internal static class QueryPredicateSchema
 {
@@ -605,5 +613,24 @@ internal static class QueryPredicateScenarios
         var refused = Assert.ThrowsAsync<NotSupportedException>(() =>
             grouped.GroupByAsync(x => x.Alias, g => new { Alias = g.Key, Top = g.Max(x => x.Priority) }));
         Assert.That(refused!.Message, Does.Contain("labels"));
+    }
+
+    /// <summary>A union ordered by a projected member stored as labels orders by the members' values.</summary>
+    public static async Task LabelUnionOrdersByValue(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+        using var scope = newScope();
+        var unions = (IUnionQueryRunner)scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        Query.UnionQuery<TicketRow> Union() => Query.UnionQuery.All(
+            Query.Union.Of<RelTicket>().Where(x => x.Priority <= RelPriority.Medium).Select(x => new TicketRow { Title = x.Title, Priority = x.Priority }),
+            Query.Union.Of<RelTicket>().Where(x => x.Priority > RelPriority.Medium).Select(x => new TicketRow { Title = x.Title, Priority = x.Priority }));
+
+        var ascending = await unions.UnionAsync(Union().OrderBy(row => row.Priority));
+        Assert.That(ascending.Select(row => (row.Title, row.Priority)), Is.EqualTo(new[]
+        {
+            ("t1", RelPriority.Low), ("t2", RelPriority.Medium), ("t3", RelPriority.High), ("t4", RelPriority.Urgent),
+        }));
+        Assert.That((await unions.UnionAsync(Union().OrderByDescending(row => row.Priority).Take(2))).Select(row => row.Title),
+            Is.EqualTo(new[] { "t4", "t3" }));
     }
 }
