@@ -122,6 +122,28 @@ public sealed class PostgreSqlDialect : SqlDialect
         $" DO UPDATE SET {string.Join(", ", assignments)} RETURNING {string.Join(", ", returning)}";
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     <c>ON CONFLICT</c> finds the target by what the insert writes, so the insert writes the entity's key when a row
+    ///     holds it (the conflict then updates that row) and the identity's next number otherwise, as an insert that leaves
+    ///     the key to the store takes. Only the branch taken runs, so an update draws no number.
+    /// </remarks>
+    public override string? GeneratedKeyUpsertValue(string quotedTable, RelationalColumn key, string value) =>
+        $"CASE WHEN EXISTS (SELECT 1 FROM {quotedTable} WHERE {Quote(key.Name)} = {value}) THEN {value} " +
+        $"ELSE nextval(pg_get_serial_sequence({TextLiteral(quotedTable)}, {TextLiteral(key.Name)})) END";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     A moment is written in UTC with its offset: a <c>timestamp with time zone</c> literal without one would be read
+    ///     in the session's time zone, where a bound value is not.
+    /// </remarks>
+    public override string Literal(object? value) => value switch
+    {
+        DateTime dateTime => $"'{(dateTime.Kind == DateTimeKind.Local ? dateTime.ToUniversalTime() : dateTime):yyyy-MM-dd HH:mm:ss.ffffff}+00'",
+        DateTimeOffset moment => $"'{moment.UtcDateTime:yyyy-MM-dd HH:mm:ss.ffffff}+00'",
+        _ => base.Literal(value),
+    };
+
+    /// <inheritdoc />
     /// <remarks><c>ON CONFLICT DO NOTHING</c> with no target leaves out a row that would take any unique key.</remarks>
     public override string? InsertSkippingDuplicatesSql(string quotedTable, string columns, IReadOnlyList<string> rows) =>
         $"WITH inserted AS (INSERT INTO {quotedTable} ({columns}) VALUES {string.Join(", ", rows)} " +

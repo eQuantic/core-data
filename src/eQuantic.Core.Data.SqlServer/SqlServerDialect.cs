@@ -213,9 +213,16 @@ public class SqlServerDialect : SqlDialect
     }
 
     /// <inheritdoc />
-    /// <remarks>SQL Server booleans are <c>bit</c>: literals inline as <c>1</c>/<c>0</c>.</remarks>
-    public override string Literal(object? value) =>
-        value is bool flag ? (flag ? "1" : "0") : base.Literal(value);
+    /// <remarks>
+    ///     SQL Server booleans are <c>bit</c>: literals inline as <c>1</c>/<c>0</c>. Text inlines as Unicode
+    ///     (<c>N'…'</c>), as a bound value travels: a plain literal would pass through the database's code page.
+    /// </remarks>
+    public override string Literal(object? value) => value switch
+    {
+        bool flag => flag ? "1" : "0",
+        string text => TextLiteral(text),
+        _ => base.Literal(value),
+    };
 
     /// <summary>The sized text type — <c>nvarchar(n)</c> on SQL Server.</summary>
     /// <param name="length">The maximum length.</param>

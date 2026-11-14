@@ -103,6 +103,36 @@ public sealed class UserAccount : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A sprint the store numbers: an <c>int</c> identity key an upsert targets.</summary>
+public sealed class Sprint : IEntity<int>
+{
+    public int Id { get; set; }
+
+    public string Board { get; set; } = "";
+
+    public string Goal { get; set; } = "";
+
+    public int GetKey() => Id;
+
+    public void SetKey(int key) => Id = key;
+}
+
+/// <summary>A runner unique by name among the active ones: a partial unique index whose predicate holds a value.</summary>
+public sealed class Runner : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Name { get; set; } = "";
+
+    public string State { get; set; } = "";
+
+    public string Host { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The write-outcome entities' mapping and migration, shared by every relational suite.</summary>
 internal static class WriteOutcomeSchema
 {
@@ -112,7 +142,9 @@ internal static class WriteOutcomeSchema
         .Entity<Job>(_ => { })
         .Entity<ItemType>(_ => { })
         .Entity<Page>(_ => { })
-        .Entity<UserAccount>(entity => entity.Table("users"));
+        .Entity<UserAccount>(entity => entity.Table("users"))
+        .Entity<Sprint>(entity => entity.Key(x => x.Id, generated: true))
+        .Entity<Runner>(_ => { });
 
     /// <summary>The tables and their unique indexes; a partial one only where the store has them.</summary>
     public static IMigrationBuilder Migrate(IMigrationBuilder migration, bool partialIndexes) => migration
@@ -132,7 +164,16 @@ internal static class WriteOutcomeSchema
         .For<Page>(page => page.EnsureCollection())
         .For<UserAccount>(user => user
             .EnsureCollection()
-            .Index(x => x.Email, options => options.Unique().Named("ix_users_email")));
+            .Index(x => x.Email, options => options.Unique().Named("ix_users_email")))
+        .For<Sprint>(sprint => sprint.EnsureCollection())
+        .For<Runner>(runner =>
+        {
+            runner.EnsureCollection();
+            if (partialIndexes)
+            {
+                runner.Index(x => x.Name, options => options.Unique().Filtered(x => x.State == "active").Named("ux_runner_active_name"));
+            }
+        });
 }
 
 /// <summary>
@@ -360,18 +401,21 @@ internal static class WriteOutcomeScenarios
         using var scope = newScope();
         var repo = Repo<UserAccount>(scope);
         await repo.AddAsync(new UserAccount { Email = email, Name = "staged" });
-        Assert.That(Assert.ThrowsAsync<DuplicateKeyException>(() => Commit(scope))!.ConstraintName, Is.EqualTo("ix_users_email"),
-            "a staged insert");
+        Taken(() => Commit(scope), "a staged insert");
 
         var upserts = (IUpsertRepository<UserAccount, Guid>)repo;
-        Assert.That(Assert.ThrowsAsync<DuplicateKeyException>(() => upserts.InsertManyAsync([new UserAccount { Email = email }]))!
-            .ConstraintName, Is.EqualTo("ix_users_email"), "a batch insert");
-        Assert.That(Assert.ThrowsAsync<DuplicateKeyException>(() =>
-                repo.UpdateManyAsync(x => x.Id == other.Id, x => new UserAccount { Email = email }))!
-            .ConstraintName, Is.EqualTo("ix_users_email"), "a set-based update");
-        Assert.That(Assert.ThrowsAsync<DuplicateKeyException>(() =>
-                upserts.UpsertAsync(new UserAccount { Email = email, Name = "upserted" }))!
-            .ConstraintName, Is.EqualTo("ix_users_email"), "an upsert on the key that takes another unique key");
+        Taken(() => upserts.InsertManyAsync([new UserAccount { Email = email }]), "a batch insert");
+        Taken(() => repo.UpdateManyAsync(x => x.Id == other.Id, x => new UserAccount { Email = email }), "a set-based update");
+        Taken(() => upserts.UpsertAsync(new UserAccount { Email = email, Name = "upserted" }),
+            "an upsert on the key that takes another unique key");
+
+        static void Taken(AsyncTestDelegate write, string path)
+        {
+            var exception = Assert.ThrowsAsync<DuplicateKeyException>(write, path)!;
+            Assert.That(exception.ConstraintName, Is.EqualTo("ix_users_email"), path);
+            Assert.That(exception.InnerException, Is.Not.Null.And.Not.InstanceOf<DuplicateKeyException>(),
+                $"{path}: the inner exception is the driver's own, not another DuplicateKeyException");
+        }
     }
 
     /// <summary>Two compare-and-sets of one queued job at the same time: one matches, the other matches nothing, and the row is the winner's.</summary>
@@ -479,6 +523,116 @@ internal static class WriteOutcomeScenarios
         Assert.That(stored.Title, Is.EqualTo("final"));
         Assert.That(stored.Locked, Is.True);
         Assert.That(stored.Body, Is.EqualTo("text"));
+    }
+
+    /// <summary>
+    ///     An upsert on a key the store generates: the row holding the entity's key is updated, and a key no row holds
+    ///     inserts a row the store numbers, as an insert of a new entity does.
+    /// </summary>
+    public static async Task UpsertOnGeneratedKey(Func<IServiceScope> newScope)
+    {
+        using var scope = newScope();
+        var upserts = Resolve<IUpsertRepository<Sprint, int>>(scope);
+        var board = "board-" + Guid.NewGuid().ToString("N");
+
+        var inserted = await upserts.UpsertAsync(new Sprint { Board = board, Goal = "first" });
+        Assert.That(inserted.Id, Is.GreaterThan(0), "a new entity takes the store's number");
+
+        var updated = await upserts.UpsertAsync(new Sprint { Id = inserted.Id, Board = board, Goal = "second" });
+        Assert.That(updated.Id, Is.EqualTo(inserted.Id), "the row holding the key is the target");
+        Assert.That(updated.Goal, Is.EqualTo("second"));
+
+        var unknown = await upserts.UpsertAsync(new Sprint { Id = int.MaxValue, Board = board, Goal = "third" });
+        Assert.That(unknown.Id, Is.Not.EqualTo(int.MaxValue).And.Not.EqualTo(inserted.Id),
+            "a key no row holds is not written: the store numbers the row");
+
+        var rows = (await Resolve<IAsyncRepository<Sprint, int>>(scope).GetFilteredAsync(x => x.Board == board))
+            .OrderBy(x => x.Id).ToList();
+        Assert.That(rows.Select(x => (x.Id, x.Goal)), Is.EqualTo(new[] { (inserted.Id, "second"), (unknown.Id, "third") }),
+            "the upsert of the stored key updated its row instead of inserting another");
+    }
+
+    /// <summary>A store that cannot hand back a key it generates refuses an upsert on one, before writing anything.</summary>
+    public static async Task UpsertOnGeneratedKeyIsRefused(Func<IServiceScope> newScope)
+    {
+        using var scope = newScope();
+        var board = "board-" + Guid.NewGuid().ToString("N");
+        Assert.ThrowsAsync<NotSupportedException>(() =>
+            Resolve<IUpsertRepository<Sprint, int>>(scope).UpsertAsync(new Sprint { Id = 1, Board = board, Goal = "first" }));
+        Assert.That(await Resolve<IAsyncRepository<Sprint, int>>(scope).GetFilteredAsync(x => x.Board == board), Is.Empty);
+    }
+
+    /// <summary>
+    ///     Twenty-five upserts of one runner through one unit of work, past the executions after which the driver prepares the
+    ///     statement and the store may plan it once for any value: each upsert after the first updates the active runner,
+    ///     because the conflict filter names the partial index's predicate every time.
+    /// </summary>
+    public static async Task ConflictFilterWithAValue(Func<IServiceScope> newScope)
+    {
+        var name = "runner-" + Guid.NewGuid().ToString("N")[..8];
+        using var scope = newScope();
+        var retired = new Runner { Name = name, State = "retired", Host = "old" };
+        await Repo<Runner>(scope).AddAsync(retired);
+        await Commit(scope);
+
+        var upserts = Resolve<IUpsertRepository<Runner, Guid>>(scope);
+        var ids = new HashSet<Guid>();
+        for (var round = 0; round < 25; round++)
+        {
+            var stored = await upserts.UpsertAsync(new Runner { Name = name, State = "active", Host = "host-" + round },
+                x => x.Name, conflictFilter: x => x.State == "active");
+            ids.Add(stored.Id);
+        }
+
+        Assert.That(ids, Has.Count.EqualTo(1), "one active runner, inserted once and updated after");
+        var rows = (await Repo<Runner>(scope).GetFilteredAsync(x => x.Name == name)).ToList();
+        Assert.That(rows, Has.Count.EqualTo(2));
+        Assert.That(rows.Single(x => x.State == "active").Host, Is.EqualTo("host-24"));
+        Assert.That(rows.Single(x => x.Id == retired.Id).Host, Is.EqualTo("old"), "the retired runner is not the target");
+    }
+
+    /// <summary>
+    ///     Two upserts of one target at the same time, each inside an explicit transaction of its own, round after round: one
+    ///     inserts and the other updates, and neither fails, whether the target is not there yet or already is.
+    /// </summary>
+    public static async Task UpsertsInExplicitTransactions(Func<IServiceScope> newScope)
+    {
+        for (var round = 0; round < 20; round++)
+        {
+            var workspace = Guid.NewGuid();
+            await RaceAsync(workspace);
+            await RaceAsync(workspace);
+
+            using var check = newScope();
+            var rows = (await Repo<Secret>(check).GetFilteredAsync(x => x.WorkspaceId == workspace)).ToList();
+            Assert.That(rows, Has.Count.EqualTo(1), $"round {round}: one row");
+            Assert.That(rows[0].Uses, Is.EqualTo(3), $"round {round}: one insert (Uses = 0) and three updates");
+        }
+
+        async Task RaceAsync(Guid workspace)
+        {
+            var scopes = Enumerable.Range(0, 2).Select(_ => newScope()).ToList();
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                var racers = scopes.Select(scope => Task.Run(async () =>
+                {
+                    var unitOfWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(scope);
+                    await unitOfWork.BeginTransactionAsync();
+                    await start.Task;
+                    await Resolve<IUpsertRepository<Secret, Guid>>(scope).UpsertAsync(
+                        new Secret { WorkspaceId = workspace, Name = "race", Value = "v" },
+                        x => new { x.WorkspaceId, x.Name }, x => new Secret { Uses = x.Uses + 1 });
+                    await unitOfWork.CommitTransactionAsync();
+                })).ToList();
+                start.SetResult();
+                await Task.WhenAll(racers);
+            }
+            finally
+            {
+                scopes.ForEach(scope => scope.Dispose());
+            }
+        }
     }
 
     /// <summary>A bulk load of a taken key fails with DuplicateKeyException.</summary>

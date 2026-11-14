@@ -329,6 +329,18 @@ public abstract class SqlDialect
         throw new NotSupportedException($"{GetType().Name} upserts with a locking read, not one statement.");
 
     /// <summary>
+    ///     What the insert of a one-statement upsert (<see cref="UpsertSql" />) writes into a store-generated key the upsert
+    ///     targets, or <c>null</c> when the statement finds the target without writing the key (SQL Server's <c>MERGE</c>
+    ///     matches its source). An upsert on a generated key updates the row holding the entity's key and, when no row holds
+    ///     it, inserts a row the store numbers, as an insert of a new entity does: the entity's key is never written into a
+    ///     new row, where it could later collide with a number the store hands out.
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="key">The generated key column.</param>
+    /// <param name="value">The bound marker of the entity's key.</param>
+    public virtual string? GeneratedKeyUpsertValue(string quotedTable, RelationalColumn key, string value) => null;
+
+    /// <summary>
     ///     The statement that inserts the rows and leaves out the ones whose key or unique key is taken, answering the
     ///     number inserted as a scalar; <c>null</c> when the dialect inserts row by row, discarding only duplicate-key
     ///     errors.
@@ -387,7 +399,8 @@ public abstract class SqlDialect
 
     /// <summary>
     ///     Renders a value as an inline SQL literal — DDL (a filtered index's predicate) cannot carry bind
-    ///     parameters. Values a dialect cannot inline are rejected with guidance.
+    ///     parameters, and an upsert's conflict filter names that predicate, which the store matches when it plans the
+    ///     statement. Values a dialect cannot inline are rejected with guidance.
     /// </summary>
     /// <param name="value">The value (already normalized by <see cref="BindValue" />).</param>
     public virtual string Literal(object? value) => value switch
@@ -397,6 +410,12 @@ public abstract class SqlDialect
         bool flag => flag ? "TRUE" : "FALSE",
         Guid guid => $"'{guid}'",
         DateTime dateTime => $"'{dateTime:yyyy-MM-dd HH:mm:ss.fffffff}'",
+        DateTimeOffset moment => $"'{moment.ToString("yyyy-MM-dd HH:mm:ss.fffffffzzz", global::System.Globalization.CultureInfo.InvariantCulture)}'",
+        // An enum stored as its labels compares with its label; any other enum is stored as its number.
+        Enum enumValue => NativeEnumOf(enumValue.GetType()) is not null
+            ? TextLiteral(Modeling.EnumLabels.Label(enumValue))
+            : Convert.ToInt64(enumValue, global::System.Globalization.CultureInfo.InvariantCulture)
+                .ToString(global::System.Globalization.CultureInfo.InvariantCulture),
         global::System.IFormattable number => number.ToString(null, global::System.Globalization.CultureInfo.InvariantCulture)!,
         _ => throw new NotSupportedException(
             $"Cannot inline a '{value.GetType().Name}' literal into DDL; simplify the filtered-index predicate."),
