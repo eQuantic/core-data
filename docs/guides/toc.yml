@@ -36,6 +36,8 @@
   items:
     - name: Pushdown and the honest gates
       href: querying/pushdown.md
+    - name: Relations and text in filters
+      href: querying/predicates.md
     - name: Sorting and paging
       href: querying/paging.md
     - name: Projections

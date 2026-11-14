@@ -106,6 +106,15 @@ it ([Querying](../querying/includes.md) has the full tables):
   sort reads as two queries — the null rows and the rest — concatenated, the window carried across
   them; on a later sort, and on continuation paging or streaming, it is refused.
 - **Pages without a total** are `OFFSET … LIMIT`; **distinct values** are `SELECT DISTINCT VALUE`.
+- **Filters across relations** (`x.Items.Any(…)`, `x.Repository.WorkspaceId == w`,
+  `x.Container == null`) resolve the related keys first — one `SELECT DISTINCT VALUE` over the related
+  container per test, cross-partition unless its partition key pins it — and the read, count or
+  set-based write takes `IN`/`NOT IN` over them; a set-based write's patch condition holds the keys.
+  Give each related entity its own container (or a filter telling its documents apart): the key read
+  takes every document the container returns. See [Relations and text in filters](../querying/predicates.md).
+- **Text ignoring case** is `STRINGEQUALS`/`CONTAINS`/`STARTSWITH`/`ENDSWITH` with the case-insensitive
+  flag; `string.Equals(a, b, comparison)` is rewritten to the instance form the SDK reads, and an
+  array's `Contains` (which C# 14 binds to a span the SDK cannot evaluate) to `Enumerable.Contains`.
 
 ## What is honestly rejected
 

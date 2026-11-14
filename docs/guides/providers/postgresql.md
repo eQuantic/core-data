@@ -16,6 +16,8 @@ the shared relational engine exercises all of it.
 | Facets | `varchar(n)`, `numeric(p,s)` |
 | Includes | reference/collection with follow-up `IN` queries, dotted nested paths; a shaped include ranks each parent's rows with `ROW_NUMBER()` |
 | Read shapes | relation counts as correlated `COUNT(*)` subqueries, native `NULLS FIRST`/`NULLS LAST`, `LIMIT`/`OFFSET` pages without a count, `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
+| Filters across relations | `x.Items.Any(…)`, `All`, `x.Repository.WorkspaceId == w`, `x.Container == null` as a correlated `EXISTS` / `NOT EXISTS` in reads, counts and set-based writes — see [Relations and text in filters](../querying/predicates.md) |
+| Text ignoring case | `lower(col) = lower(@p)` for equality, `ILIKE … ESCAPE '!'` (served by the trigram search index) for a part of it |
 | GROUP BY / HAVING / UNION | fully native |
 | Resilience | opt-in transient retry — see [Resilience](../operations/resilience.md) |
 | Upserts | `INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING`; `InsertManyAsync(…, skipDuplicates: true)` is `ON CONFLICT DO NOTHING`; `UpdateAndGetAsync` is `UPDATE … RETURNING`; a taken key (SQLSTATE `23505`) is `DuplicateKeyException` naming the constraint — see [Upserts and write outcomes](../writing/upserts.md) |

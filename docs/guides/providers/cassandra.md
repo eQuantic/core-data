@@ -123,6 +123,18 @@ labels, the JSON columns and the store-generated columns.
   select cells and groups filter as they stream back — no extra rows travel either way.
 - Aggregates (`Sum`/`Min`/`Max`/`Avg`) push down whenever the filter fully pushed; otherwise they
   aggregate client-side over the (gated) fetch.
+- **Filters across relations** resolve the related keys first — a read of the related table through
+  the same gates, **under the read's own opt-ins** (`SELECT DISTINCT` when the key is its partition
+  key) — then `IN` over them where the key serves it; a negated test (`NOT IN`) runs client-side behind
+  `.AllowClientEvaluation()`. A set-based write resolves its keys with no opt-ins, so its related read
+  has to be native, and its keys must address the written table's partition; an update restricted to
+  the partition alone updates each row it finds by its full key. See
+  [Relations and text in filters](../querying/predicates.md).
+- **Text ignoring case** pushes down as `LIKE` on a SASI index declared case-insensitive
+  (`SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true)` or
+  `[SearchIndex(CaseInsensitive = true)]`, created with a non-tokenizing, `case_sensitive: false`
+  analyzer); elsewhere it is the client-side residual. An `IN` on a column outside the primary key,
+  which CQL refuses, also runs client-side.
 
 ## Consistency
 

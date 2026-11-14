@@ -14,6 +14,8 @@ queries so they can never disagree.
 | UNION | one aggregation with **`$unionWith`** per extra branch; `Distinct` via `$group` |
 | Includes | server-side `$lookup` joins (reference and collection navigations); a shaped include runs its `$match`/`$sort`/`$skip`/`$limit` inside a `$lookup` pipeline (MongoDB 5.0+) |
 | Read shapes | relation counts as `$lookup` + `$count`, nulls placed against MongoDB's order with an is-null flag, `$skip`/`$limit` pages without a count, distinct values via `$group` — see [Querying](../querying/includes.md) |
+| Filters across relations | the related keys resolved first — one aggregation per test over the related collection (`$match`, `$group` on the key), inside the open transaction's session — then `$in`/`$nin`, in reads, counts and set-based writes — see [Relations and text in filters](../querying/predicates.md) |
+| Text ignoring case | an escaped, anchored, case-insensitive regular expression (`/^…\z/i`); `ToLower() == v` keeps C#'s meaning (a value with an upper-case letter matches nothing) |
 | Set-based writes | native operators: `$set`, `$inc`, `$mul`, `$push`, `$addToSet`, `$pull` |
 | Concurrency | `[ConcurrencyToken]` → version-filtered conditional replaces/deletes |
 | TTL | `[TimeToLive]` → per-document TTL index (from `CreatedAt` or an explicit date member) |
