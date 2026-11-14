@@ -240,6 +240,24 @@ public sealed class FilterInterpreterTests
     }
 
     [Test]
+    public void A_negated_comparison_with_a_captured_nullable_value_keeps_the_rows_whose_member_is_null()
+    {
+        // No conversion marks the lift here: both sides are already nullable, the captured value folded to a constant.
+        Priority? high = Priority.High;
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation >= high));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or));
+        var isNull = (ComparisonFilter)filter.Operands[1];
+        Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Escalation", ComparisonOperator.Equal, (object?)null)));
+    }
+
+    [Test]
+    public void A_negated_comparison_of_two_members_is_refused()
+    {
+        Assert.That(() => FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation > x.Escalation)), Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
     public void A_negated_comparison_of_a_member_that_cannot_be_null_is_the_reversed_comparison()
     {
         var filter = (ComparisonFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Priority >= Priority.High));

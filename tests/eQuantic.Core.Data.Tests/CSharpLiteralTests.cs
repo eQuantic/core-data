@@ -60,6 +60,8 @@ public sealed class CSharpLiteralTests
         LiteralAccess.Read | LiteralAccess.Write | LiteralAccess.Admin | (LiteralAccess)64,
         LiteralWide.Huge,
         (LiteralWide)(-5_000_000_001),
+        (LiteralWide)long.MinValue,
+        (LiteralOwner.Status)int.MinValue,
         LiteralUnsigned.Top,
         (LiteralUnsigned)(ulong.MaxValue - 1),
         LiteralTiny.Low,
