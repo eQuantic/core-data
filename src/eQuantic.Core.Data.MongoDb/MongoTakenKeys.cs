@@ -281,18 +281,43 @@ internal static class MongoTakenKeys
             BsonType.Null or BsonType.Undefined => "null",
             BsonType.Int32 or BsonType.Int64 => "n:" + value.ToInt64().ToString(CultureInfo.InvariantCulture),
             BsonType.Double => Number(value.AsDouble),
-            BsonType.Decimal128 => Decimal128.IsNaN(value.AsDecimal128) ? "n:NaN" : "n:" + Decimal128.ToDecimal(value.AsDecimal128)
-                .ToString(CultureInfo.InvariantCulture).TrimEnd('0').TrimEnd('.'),
+            BsonType.Decimal128 => Number(value.AsDecimal128),
             BsonType.String when _compareInfo is not null =>
                 "s:" + Convert.ToBase64String(_compareInfo.GetSortKey(value.AsString, _options).KeyData),
             BsonType.String => "s:" + value.AsString,
             _ => "b:" + value.BsonType + ":" + value.ToJson(),
         };
 
+        // A number is one key whatever its BSON type, as MongoDB's index compares them: 10, 10.0 and 10.00m are one.
         private static string Number(double value) =>
             double.IsFinite(value) && Math.Abs(value) < 7.9e27
-                ? "n:" + ((decimal)value).ToString(CultureInfo.InvariantCulture).TrimEnd('0').TrimEnd('.')
+                ? Number((decimal)value)
                 : "n:" + value.ToString("R", CultureInfo.InvariantCulture);
+
+        private static string Number(Decimal128 value)
+        {
+            if (Decimal128.IsNaN(value))
+            {
+                return "n:NaN";
+            }
+
+            try
+            {
+                return Number(Decimal128.ToDecimal(value));
+            }
+            catch (OverflowException)
+            {
+                // Past a .NET decimal (or infinite): spelt as the double of the same value is.
+                return Number(Decimal128.ToDouble(value));
+            }
+        }
+
+        /// <summary>The number without trailing fractional zeros: only a fraction's, never an integer's own (10 stays 10).</summary>
+        private static string Number(decimal value)
+        {
+            var text = value.ToString(CultureInfo.InvariantCulture);
+            return "n:" + (text.Contains('.') ? text.TrimEnd('0').TrimEnd('.') : text);
+        }
     }
 
     /// <summary>

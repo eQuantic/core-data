@@ -440,6 +440,31 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task Inserting_many_skipping_duplicates_inside_a_transaction_compares_numbers_by_value()
+    {
+        var collection = _db.Database.GetCollection<BsonDocument>("ItemType");
+        await collection.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("NextSequence"),
+            new CreateIndexOptions { Unique = true, Name = "ux_item_type_sequence" }));
+        // Written by another client as a double: to the index it is the number 10, the same key as the int 10.
+        await collection.InsertOneAsync(new BsonDocument { { "_id", "stored-ten" }, { "Name", "ten" }, { "NextSequence", 10.0 } });
+
+        using var scope = NewScope();
+        var unitOfWork = Resolve<Repository.MongoDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        var inserted = await Resolve<IUpsertRepository<ItemType, string>>(scope).InsertManyAsync(
+        [
+            new ItemType { Name = "one", NextSequence = 1 },
+            new ItemType { Name = "ten again", NextSequence = 10 },
+            new ItemType { Name = "hundred", NextSequence = 100 },
+        ], skipDuplicates: true);
+        await unitOfWork.CommitTransactionAsync();
+
+        Assert.That(inserted, Is.EqualTo(2L), "10 is taken by the stored 10.0; 1 and 100 are free");
+        using var check = NewScope();
+        Assert.That((await Repo<ItemType>(check).GetAllAsync()).Select(x => x.Name), Is.EquivalentTo(new[] { "ten", "one", "hundred" }));
+    }
+
+    [Test]
     public async Task A_unique_index_other_than_the_key_is_named_on_every_write_path()
     {
         var owner = new UserAccount { Email = "owner@example.test", Name = "owner" };
