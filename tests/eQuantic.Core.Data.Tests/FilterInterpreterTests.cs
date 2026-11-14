@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using eQuantic.Core.Data.Query;
 
 namespace eQuantic.Core.Data.Tests;
@@ -223,5 +224,79 @@ public sealed class FilterInterpreterTests
     {
         Assert.That(() => FilterInterpreter.Interpret<Sample>(x => x.TenantId == x.Name.Length),
             Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
+    public void A_negated_comparison_of_a_nullable_member_keeps_the_rows_whose_member_is_null()
+    {
+        // C# lifts the comparison, and a lifted comparison is false for null: its negation holds there.
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation >= Priority.High));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or));
+        var reversed = (ComparisonFilter)filter.Operands[0];
+        Assert.That((reversed.Member, reversed.Operator, reversed.Value), Is.EqualTo(("Escalation", ComparisonOperator.LessThan, (object)3)));
+        var isNull = (ComparisonFilter)filter.Operands[1];
+        Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Escalation", ComparisonOperator.Equal, (object?)null)));
+    }
+
+    [Test]
+    public void A_negated_comparison_of_a_member_that_cannot_be_null_is_the_reversed_comparison()
+    {
+        var filter = (ComparisonFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Priority >= Priority.High));
+
+        Assert.That((filter.Member, filter.Operator), Is.EqualTo(("Priority", ComparisonOperator.LessThan)));
+    }
+
+    [Test]
+    public void A_negated_text_equality_without_regard_to_case_keeps_the_rows_whose_member_is_null()
+    {
+        Expression<Func<Alias, bool>>[] negations =
+        [
+            x => !string.Equals(x.Name, "alpha", StringComparison.OrdinalIgnoreCase),
+            x => !x.Name!.Equals("alpha", StringComparison.OrdinalIgnoreCase),
+            x => !"alpha".Equals(x.Name, StringComparison.OrdinalIgnoreCase),
+            x => x.Name!.ToLower() != "alpha",
+            x => !(x.Name!.ToUpper() == "ALPHA"),
+        ];
+
+        foreach (var negation in negations)
+        {
+            var filter = (LogicalFilter)FilterInterpreter.Interpret(negation);
+            Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or), negation.ToString());
+            var not = (LogicalFilter)filter.Operands[0];
+            Assert.That(not.Operator, Is.EqualTo(LogicalOperator.Not), negation.ToString());
+            Assert.That(not.Operands.Single(), Is.InstanceOf<TextFilter>(), negation.ToString());
+            var isNull = (ComparisonFilter)filter.Operands[1];
+            Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Name", ComparisonOperator.Equal, (object?)null)),
+                negation.ToString());
+        }
+    }
+
+    [Test]
+    public void A_negated_text_match_that_is_not_an_equality_stays_a_negation()
+    {
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => !x.Name!.Contains("al", StringComparison.OrdinalIgnoreCase));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Not));
+        Assert.That(filter.Operands.Single(), Is.InstanceOf<TextFilter>());
+    }
+
+    [Test]
+    public void A_residual_reads_a_null_member_text_as_the_stores_do()
+    {
+        Expression<Func<Alias, bool>> folded = x => x.Name!.ToLower() != "alpha";
+        Expression<Func<Alias, bool>> instance = x => x.Name!.Equals("alpha", StringComparison.OrdinalIgnoreCase);
+        var unset = new Alias();
+
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(folded)(unset), Is.True, "null is not 'alpha', as x.Name != v says");
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(instance)(unset), Is.False, "a null member fails a text test");
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(folded)(new Alias { Name = "ALPHA" }), Is.False);
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(instance)(new Alias { Name = "Alpha" }), Is.True);
+    }
+
+    /// <summary>A member that may hold no text.</summary>
+    public sealed class Alias
+    {
+        public string? Name { get; set; }
     }
 }

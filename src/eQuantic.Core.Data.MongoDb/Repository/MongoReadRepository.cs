@@ -457,6 +457,11 @@ public abstract class MongoReadRepository<TEntity, TKey> :
             notes.Add("A placement of nulls against MongoDB's order (nulls sort as the smallest value) sorts on an is-null flag first ($addFields + $sort).");
         }
 
+        if (options is not null && ReadShapes.Sorts(options).Any(sort => MongoStages.SortsByLabels(sort.Key)))
+        {
+            notes.Add("An enum stored as its labels sorts by the value of the member each label stands for ($addFields of a $switch + $sort), as C# orders it.");
+        }
+
         if (options is { SkipCount: not null } or { TakeCount: not null })
         {
             notes.Add("Skip/Take run as $skip/$limit; no count runs.");

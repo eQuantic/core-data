@@ -197,6 +197,25 @@ public abstract partial class CosmosUnitOfWork : IQueryableUnitOfWork
 
         var configuration = Configuration<TEntity>();
         var partitionKey = configuration.GetPartitionKey(item);
+
+        // An entity carrying its concurrency token stages a delete guarded by it, as its replace is: removing an item
+        // someone else changed (412) or already removed (404) fails the commit with ConcurrencyConflictException.
+        if (configuration.GetETag(item) is { } etag)
+        {
+            _pending.Add(new CosmosPendingWrite(
+                configuration.ContainerName,
+                partitionKey,
+                async (container, cancellationToken) =>
+                {
+                    using var response = await container.DeleteItemStreamAsync(id, partitionKey,
+                        new ItemRequestOptions { IfMatchEtag = etag }, cancellationToken).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                },
+                batch => batch.DeleteItem(id, new TransactionalBatchItemRequestOptions { IfMatchEtag = etag }),
+                Guarded: true));
+            return;
+        }
+
         _pending.Add(new CosmosPendingWrite(
             configuration.ContainerName,
             partitionKey,

@@ -126,8 +126,7 @@ internal static class CassandraInclude
                              $"'{typeof(TParent).Name}' (expected [ForeignKey(\"{typeof(TParent).Name}\")] or a '{typeof(TParent).Name}Id' property).");
 
         var keys = parents.Select(key.GetValue).Where(value => value is not null).Distinct().ToList();
-        var configuration = unitOfWork.ConfigurationOf(typeof(TElement))
-                            ?? throw new InvalidOperationException($"'{typeof(TElement).Name}' is not registered in the Cassandra model.");
+        var configuration = await ReadConfigurationAsync(unitOfWork, typeof(TElement)).ConfigureAwait(false);
         var perPartitionLimit = PerPartitionLimit(configuration, foreignKey, shape);
         var elements = await InChunksAsync(configuration, foreignKey, keys, chunk => ReadAsync<TElement>(unitOfWork, configuration,
             In<TElement>(foreignKey, chunk), shape?.Filter as Expression<Func<TElement, bool>>, options, $"the include of '{navigation.Name}'",
@@ -158,8 +157,7 @@ internal static class CassandraInclude
         var localKey = ForeignKey(typeof(TParent), navigation.Name)
                        ?? throw new NotSupportedException(
                            $"Cannot include '{navigation.Name}': no '{navigation.Name}Id' property found on '{typeof(TParent).Name}'.");
-        var configuration = unitOfWork.ConfigurationOf(typeof(TTarget))
-                            ?? throw new InvalidOperationException($"'{typeof(TTarget).Name}' is not registered in the Cassandra model.");
+        var configuration = await ReadConfigurationAsync(unitOfWork, typeof(TTarget)).ConfigureAwait(false);
         var targetKey = Key(unitOfWork, typeof(TTarget));
         var ids = parents.Select(localKey.GetValue).Where(value => value is not null).Distinct().ToList();
         if (ids.Count == 0)
@@ -190,8 +188,7 @@ internal static class CassandraInclude
             return counts;
         }
 
-        var configuration = unitOfWork.ConfigurationOf(typeof(TElement))
-                            ?? throw new InvalidOperationException($"'{typeof(TElement).Name}' is not registered in the Cassandra model.");
+        var configuration = await ReadConfigurationAsync(unitOfWork, typeof(TElement)).ConfigureAwait(false);
         var foreignKey = ForeignKey(typeof(TElement), typeof(TParent).Name)
                          ?? throw new NotSupportedException(
                              $"Cannot count '{count.Navigation.Name}': no foreign key found on '{typeof(TElement).Name}' back to '{typeof(TParent).Name}'.");
@@ -258,7 +255,7 @@ internal static class CassandraInclude
             CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions), unitOfWork.CommandLogger, unitOfWork.SensitiveLogging)
             .ConfigureAwait(false);
 
-        var residuals = plan.Residual.Select(predicate => ((Expression<Func<TElement, bool>>)predicate).Compile()).ToList();
+        var residuals = plan.Residual.Select(PredicateNormalizer.CompileResidual<TElement>).ToList();
         return rows.Select(row => CassandraMapper.Materialize<TElement>(configuration, row, selected))
             .Where(element => residuals.All(residual => residual(element)))
             .ToList();
@@ -289,8 +286,7 @@ internal static class CassandraInclude
         Func<Task<IReadOnlyCollection<object?>?>>? scope = null)
         where TTarget : class
     {
-        var configuration = unitOfWork.ConfigurationOf(typeof(TTarget))
-                            ?? throw new InvalidOperationException($"'{typeof(TTarget).Name}' is not registered in the Cassandra model.");
+        var configuration = await ReadConfigurationAsync(unitOfWork, typeof(TTarget)).ConfigureAwait(false);
         var column = configuration.ColumnFor(member.Name);
         var options = Options(parentOptions, condition);
         var plan = CassandraCql.Plan(configuration, options, null, unitOfWork.GlobalFilter<TTarget>());
@@ -328,7 +324,7 @@ internal static class CassandraInclude
                   + (Filtering(plan) ? " ALLOW FILTERING" : string.Empty);
         var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, plan.Values, consistency,
             unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
-        var residuals = plan.Residual.Select(predicate => ((Expression<Func<TTarget, bool>>)predicate).Compile()).ToList();
+        var residuals = plan.Residual.Select(PredicateNormalizer.CompileResidual<TTarget>).ToList();
         return rows.Select(row => CassandraMapper.Materialize<TTarget>(configuration, row, selected))
             .Where(target => residuals.All(residual => residual(target)))
             .Select(target => member.GetValue(target))
@@ -431,7 +427,8 @@ internal static class CassandraInclude
     /// <summary>
     ///     The limit a shape pushes down as <c>PER PARTITION LIMIT</c>: when the foreign key is the related table's
     ///     whole partition key and the shape orders by the clustering columns as they are stored (or not at all), the
-    ///     first rows of each partition are the ones each parent keeps.
+    ///     first rows of each partition are the ones each parent keeps. Not for a clustering column stored as an enum's
+    ///     labels: the partition keeps it in the labels' order, and the shape asks for the members'.
     /// </summary>
     private static int? PerPartitionLimit(CassandraEntityConfiguration configuration, PropertyInfo foreignKey, IncludeShape? shape)
     {
@@ -447,9 +444,12 @@ internal static class CassandraInclude
         {
             var sort = shape.Sortings[index];
             var clustering = configuration.ClusteringKeys[index];
+            // An enum stored as its labels is clustered by the labels' text, while the shape orders the members' values.
             if (MemberOf(sort.KeySelector) is not { } member
                 || !CassandraEntityConfiguration.Same(configuration.ColumnFor(member), clustering.Column)
-                || sort.Descending != clustering.Descending)
+                || sort.Descending != clustering.Descending
+                || configuration.Column(clustering.Column) is { CqlType: "text" } stored
+                && (Nullable.GetUnderlyingType(stored.ClrType) ?? stored.ClrType).IsEnum)
             {
                 return null;
             }
@@ -528,6 +528,14 @@ internal static class CassandraInclude
 
     /// <summary>A key compared by its text, so a foreign key and the key it names match whatever their CLR types.</summary>
     private static string KeyText(object? value) => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+
+    /// <summary>
+    ///     The mapping a related read renders with: a case-insensitive match pushes down only on an index the cluster holds
+    ///     case-insensitive (<see cref="CassandraSearchIndexes" />).
+    /// </summary>
+    private static Task<CassandraEntityConfiguration> ReadConfigurationAsync(CassandraUnitOfWork unitOfWork, Type type) =>
+        CassandraSearchIndexes.VerifiedAsync(unitOfWork.GetSession(),
+            unitOfWork.ConfigurationOf(type) ?? throw new InvalidOperationException($"'{type.Name}' is not registered in the Cassandra model."));
 
     internal static PropertyInfo Key(CassandraUnitOfWork unitOfWork, Type type)
     {

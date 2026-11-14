@@ -93,6 +93,7 @@ These trigger it:
 | A label added, renamed, removed or moved in an enum stored as labels, where the store holds them | an enum type, an `ENUM(…)` or a `CHECK` lists the labels, and stored rows hold the old ones (see below) |
 | A member that becomes store-generated, changes what the store assigns, or stops being so | no operation makes a store start assigning a member, and a sequence has to start above what is already stored (see below) |
 | A key the store starts or stops numbering | an identity cannot be added to or taken off a column the same way on every engine (see below) |
+| A search index declared, dropped, or matching another way (its mode, `CaseInsensitive` turned on or off) on Cassandra, or declared or dropped on PostgreSQL | the index already built keeps matching as it was built: it has to be created, dropped or rebuilt (see below) |
 | A store-generated member added on MongoDB, Cosmos DB or Cassandra | the provider fills new inserts only, so the records already there need values, and a counter has to start above them |
 | A type change no store operation performs | `ConvertField` covers strings, numbers, booleans, dates and identifiers; anything else is yours to write |
 
@@ -252,6 +253,22 @@ only in the data elsewhere, so a label added, renamed, removed or moved is a cha
 | MongoDB · Cosmos DB · Cassandra | nothing: no line is written | every stored `'old'` rewritten as `'new'` | every record holding a removed label rewritten (the labels' reader refuses it); a move needs nothing |
 
 On PostgreSQL the type is one object however many columns use it, so its step is said once.
+
+### When a search index's declaration changes
+
+The snapshot records each search index and what it promises (`new SearchSnapshot("Name", "Contains,
+case-insensitive")`), and a declaration added, dropped or changed is a change of its own, `ChangeSearch`.
+An index the store already built does not follow its declaration, so the `#error` says what to run:
+
+| Store | Declared | Dropped | Matching another way |
+|---|---|---|---|
+| Cassandra | `.EnsureCollection()` creates the SASI index `<table>_<column>_search` | a Run step with `DROP INDEX IF EXISTS <table>_<column>_search` | the index rebuilt: that `DROP INDEX` in a Run step, then `.EnsureCollection()`, which creates it with the new options |
+| PostgreSQL | `.EnsureCollection()` creates the trigram index | a Run step with `DROP INDEX IF EXISTS "ix_<table>_<column>_search"` | nothing: the trigram index serves every mode |
+| SQL Server · MySQL · MariaDB · MongoDB · Cosmos DB | nothing: no index is built for the declaration | nothing | nothing |
+
+Until a Cassandra index is rebuilt the provider reads the cluster's schema and pushes a match that ignores
+case down only where the index really ignores case; anywhere else the match runs client-side, behind
+`.AllowClientEvaluation()`, so no row is missed in the meantime.
 
 ### Refusals
 

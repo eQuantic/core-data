@@ -133,12 +133,9 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
         if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
         {
-            var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}"
-                      + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
-                      + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
-            var rows = await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
-            return rows.First().GetValue<long>(0);
+            // An IN longer than one statement binds counts in chunks of distinct keys, each row in one of them.
+            var rows = await AggregateRowsAsync(plan, "COUNT(*)", options).ConfigureAwait(false);
+            return rows.Sum(row => row.GetValue<long>(0));
         }
 
         // Residual/split: fetch only the needed columns, de-duplicate and filter client-side, and count.
@@ -206,23 +203,29 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     public async Task<TResult?> MinAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await CqlAggregateAsync(selector, options, cancellationToken,
             column => $"MIN({column})", row => row.GetValue<TResult?>(0),
-            rows => rows.Count == 0 ? default : rows.Min(selector.Compile())).ConfigureAwait(false);
+            rows => rows.Count == 0 ? default : rows.Min(selector.Compile()),
+            values => values.Min()).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TResult?> MaxAsync<TResult>(Expression<Func<TEntity, TResult>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await CqlAggregateAsync(selector, options, cancellationToken,
             column => $"MAX({column})", row => row.GetValue<TResult?>(0),
-            rows => rows.Count == 0 ? default : rows.Max(selector.Compile())).ConfigureAwait(false);
+            rows => rows.Count == 0 ? default : rows.Max(selector.Compile()),
+            values => values.Max()).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<double> AverageAsync<TValue>(Expression<Func<TEntity, TValue>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
         await CqlAggregateAsync(selector, options, cancellationToken,
             column => $"AVG(CAST({column} AS double))", row => row.GetValue<double>(0),
-            rows => rows.Count == 0 ? 0d : rows.Average(row => Convert.ToDouble(selector.Compile()(row)))).ConfigureAwait(false);
+            rows => rows.Count == 0 ? 0d : rows.Average(row => Convert.ToDouble(selector.Compile()(row))),
+            combine: null).ConfigureAwait(false);
 
+    // combine: joins the answers of the chunks a long IN runs in (the non-null ones); null for an aggregate whose chunks
+    // cannot be joined (an average), which refuses such an IN with guidance.
     private async Task<TResult> CqlAggregateAsync<TSelected, TResult>(Expression<Func<TEntity, TSelected>> selector,
         QueryOptions<TEntity>? options, CancellationToken cancellationToken,
-        Func<string, string> aggregate, Func<Row, TResult> read, Func<List<TEntity>, TResult> clientFallback)
+        Func<string, string> aggregate, Func<Row, TResult> read, Func<List<TEntity>, TResult> clientFallback,
+        Func<IEnumerable<TResult>, TResult>? combine)
     {
         ReadShapes.RefuseRowWindow(options, "an aggregate");
         var column = SumColumn(selector);
@@ -231,16 +234,70 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
             if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
             {
-                var cql = $"SELECT {aggregate(column)} FROM {_configuration.TableName}"
-                          + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
-                          + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
-                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                    CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
-                return row.IsNull(0) ? default! : read(row);
+                if (combine is null)
+                {
+                    RefuseLongIn(plan, "AverageAsync", "an average of chunks is not the chunks' average; sum and count them instead");
+                }
+
+                var rows = (await AggregateRowsAsync(plan, aggregate(column), options).ConfigureAwait(false))
+                    .Where(row => !row.IsNull(0)).ToList();
+                return rows.Count == 0 ? default! : rows.Count == 1 ? read(rows[0]) : combine!(rows.Select(read));
             }
         }
 
         return clientFallback(await SelectAsync(options, null, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    ///     The rows of an aggregate's statement: one, or, when the plan's <c>IN</c> binds more values than one statement can
+    ///     (<see cref="CassandraStatements.MaxValues" />), one per chunk of its distinct keys, a few at a time. Each row the
+    ///     filter matches is in one chunk, so a count, a sum, a minimum and a maximum combine across the chunks' rows.
+    /// </summary>
+    private async Task<IReadOnlyList<Row>> AggregateRowsAsync(CassandraCqlPlan plan, string select, QueryOptions<TEntity>? options)
+    {
+        var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(options);
+        string Cql(string where) => $"SELECT {select} FROM {_configuration.TableName}"
+                                    + (where.Length > 0 ? $" WHERE {where}" : string.Empty)
+                                    + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+
+        if (plan.Values.Length <= CassandraStatements.MaxValues || plan.Chunks is not { } chunks)
+        {
+            return [(await CassandraStatements.ExecuteAsync(Session, Cql(plan.Where), plan.Values, consistency,
+                UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First()];
+        }
+
+        using var slots = new SemaphoreSlim(SplitQueries);
+        var executions = chunks.Alternatives.Select(async chunk =>
+        {
+            await slots.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var where = chunks.Where.Length > 0 ? $"{chunks.Where} AND {chunk.Where}" : chunk.Where;
+                return (await CassandraStatements.ExecuteAsync(Session, Cql(where), [.. chunks.Values, .. chunk.Values], consistency,
+                    UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
+            }
+            finally
+            {
+                slots.Release();
+            }
+        }).ToList();
+        return await Task.WhenAll(executions).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    ///     Refuses a read that has one answer per statement (a group, a page, an average) over an <c>IN</c> longer than one
+    ///     statement binds, with what to do instead.
+    /// </summary>
+    private static void RefuseLongIn(CassandraCqlPlan plan, string read, string reason)
+    {
+        if (plan.Values.Length > CassandraStatements.MaxValues)
+        {
+            throw new NotSupportedException(
+                $"A Cassandra statement binds at most {CassandraStatements.MaxValues.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} " +
+                $"values, and {read} would bind {plan.Values.Length.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} in one " +
+                $"statement; it cannot run in chunks ({reason}). Narrow the IN list, call " +
+                $"{read} for each part of it, or read the rows (a read of rows runs a long IN in chunks) and compute it from them.");
+        }
     }
 
     // ---------------------------------------------------------------- grouped reads
@@ -297,6 +354,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             return grouped.Select(resultSelector.Compile()).ToList();
         }
 
+        RefuseLongIn(plan, "GroupByAsync", "a group's aggregates come from one statement");
         var keys = group.Key.Select(member => ColumnNamed(member.Path, "group by")).ToList();
         ValidateGroupKeys(keys);
 
@@ -565,6 +623,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
         ReadShapes.RefuseRowWindow(options, "GetPageAsync");
         var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
+        RefuseLongIn(plan, "GetPageAsync", "a page's paging state belongs to one statement");
         if (plan.Alternatives.Count > 0)
         {
             throw new NotSupportedException(
@@ -574,7 +633,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         if (NonClusteringSort(options) is { } member)
         {
             throw new NotSupportedException(
-                $"Cassandra can only ORDER BY clustering keys; '{member}' is not one, and token paging cannot sort client-side " +
+                $"{WhyNoOrderBy(member)}, and token paging cannot sort client-side " +
                 "(each page is the cluster's). Page in the clustering order, or read the rows and sort them.");
         }
 
@@ -653,8 +712,8 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
         if (NonClusteringSort(options) is { } sorted)
         {
-            notes.Add($"'{sorted}' is not a clustering key: with .AllowClientEvaluation() the fetched rows are sorted client-side " +
-                      "(nulls placed as asked) and any limit applies after the sort.");
+            notes.Add($"{WhyNoOrderBy(sorted)}: with .AllowClientEvaluation() the fetched rows are sorted client-side " +
+                      "(nulls placed as asked, an enum by its members' values) and any limit applies after the sort.");
         }
 
         if (options is { SkipCount: not null } or { TakeCount: not null })
@@ -715,8 +774,11 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         if (plan.Chunks is { } chunks && plan.Alternatives.Count == 0)
         {
             notes.Add($"A read of rows runs the IN over {chunks.Keys} keys in {chunks.Alternatives.Count} queries of at most " +
-                      $"{CassandraCqlRenderer.InChunkSize} keys each, merged and de-duplicated by primary key client-side; a count, an " +
-                      "aggregate, a group or a page binds the whole list in one statement.");
+                      $"{CassandraCqlRenderer.InChunkSize} keys each, merged and de-duplicated by primary key client-side; a count, a " +
+                      $"sum, a minimum or a maximum binds the whole list in one statement up to " +
+                      $"{CassandraStatements.MaxValues.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} values " +
+                      "and runs it in chunks of distinct keys beyond, combining their answers; an average, a group or a page binds it in " +
+                      "one statement, and refuses a longer list.");
         }
 
         if (plan.Alternatives.Count > 0)
@@ -876,16 +938,30 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         return rows.Select(map.Compile()).ToList();
     }
 
-    /// <summary>The first sort on a member that is not a clustering key, or <c>null</c> when CQL can order the read.</summary>
+    /// <summary>
+    ///     The first sort CQL cannot order by, or <c>null</c> when it can order the read: a member that is not a clustering
+    ///     key, or one whose enum is stored as its labels, which a clustering order keeps by the labels' text while C# orders
+    ///     the members' values.
+    /// </summary>
     private string? NonClusteringSort(QueryOptions<TEntity>? options) =>
         options?.Sortings
             .Select(sort => sort.KeySelector.GetMemberName())
-            .FirstOrDefault(member => !_configuration.IsClusteringKey(_configuration.ColumnFor(member)));
+            .FirstOrDefault(member => !_configuration.IsClusteringKey(_configuration.ColumnFor(member)) || StoredAsLabels(member));
+
+    /// <summary>Whether a member's enum is stored as its labels (a <c>text</c> column).</summary>
+    private bool StoredAsLabels(string member) =>
+        _configuration.Column(_configuration.ColumnFor(member)) is { CqlType: "text" } column
+        && (Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType).IsEnum;
+
+    /// <summary>Why CQL cannot order by <paramref name="member" />.</summary>
+    private string WhyNoOrderBy(string member) => StoredAsLabels(member)
+        ? $"'{member}' is stored as the labels of an enum, which CQL orders by their text while C# orders the members' values"
+        : $"Cassandra can only ORDER BY clustering keys; '{member}' is not one";
 
     /// <summary>
-    ///     Whether the read sorts client-side: a sort on a member that is not a clustering key, which CQL cannot order by.
-    ///     The rows are fetched and sorted (nulls placed as asked), behind <c>.AllowClientEvaluation()</c> — and
-    ///     <c>.AllowFiltering()</c> when the read is not scoped to a partition, since the fetch then scans the table.
+    ///     Whether the read sorts client-side: a sort CQL cannot order by (<see cref="NonClusteringSort" />). The rows are
+    ///     fetched and sorted (nulls placed as asked, an enum by its members' values), behind <c>.AllowClientEvaluation()</c>
+    ///     — and <c>.AllowFiltering()</c> when the read is not scoped to a partition, since the fetch then scans the table.
     ///     Clustering keys are never null, so a placement of nulls on one is already honoured by CQL's order.
     /// </summary>
     private bool SortsClientSide(QueryOptions<TEntity>? options, CassandraCqlPlan plan)
@@ -898,7 +974,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         if (!CassandraCql.ClientEvaluationOptedIn(options))
         {
             throw new NotSupportedException(
-                $"Cassandra can only ORDER BY clustering keys; '{member}' is not one. Call .AllowClientEvaluation() to sort the " +
+                $"{WhyNoOrderBy(member)}. Call .AllowClientEvaluation() to sort the " +
                 "fetched rows client-side, or model the read order with a clustering key.");
         }
 
@@ -1069,7 +1145,10 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             filters.Add(await CassandraPredicates.ResolveAsync(filter, UnitOfWork, options, cancellationToken).ConfigureAwait(false));
         }
 
-        return Gated(CassandraCql.Plan(_configuration, filters), options);
+        // A case-insensitive match pushes down only on an index the cluster holds case-insensitive.
+        var configuration = await CassandraSearchIndexes.VerifiedAsync(UnitOfWork.GetSession(), _configuration, cancellationToken)
+            .ConfigureAwait(false);
+        return Gated(CassandraCql.Plan(configuration, filters), options);
     }
 
     private CassandraCqlPlan Gated(CassandraCqlPlan plan, QueryOptions<TEntity>? options)
@@ -1219,17 +1298,29 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             var plan = await GatedPlanAsync(options, null, cancellationToken).ConfigureAwait(false);
             if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0)
             {
-                var cql = $"SELECT SUM({column}) FROM {_configuration.TableName}"
-                          + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
-                          + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
-                var row = (await CassandraStatements.ExecuteAsync(Session, cql, plan.Values,
-                    CassandraQueryOptionsExtensions.ConsistencyOf(options), UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
-                return row.IsNull(0) ? default! : row.GetValue<TSum>(0);
+                var rows = (await AggregateRowsAsync(plan, $"SUM({column})", options).ConfigureAwait(false))
+                    .Where(row => !row.IsNull(0)).ToList();
+                return rows.Count switch
+                {
+                    0 => default!,
+                    1 => rows[0].GetValue<TSum>(0),
+                    _ => Added(rows.Select(row => row.GetValue<TSum>(0))),
+                };
             }
         }
 
         // Computed selector or residual filter: materialize and aggregate client-side (same behaviour as before).
         return clientSum(await SelectAsync(options, null, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>The sum of the chunks' sums, in the sum's own type (checked, as C# sums: an overflow throws).</summary>
+    private static TSum Added<TSum>(IEnumerable<TSum> sums)
+    {
+        var type = Nullable.GetUnderlyingType(typeof(TSum)) ?? typeof(TSum);
+        object total = type == typeof(double) || type == typeof(float)
+            ? sums.Sum(sum => Convert.ToDouble(sum, System.Globalization.CultureInfo.InvariantCulture))
+            : sums.Sum(sum => Convert.ToDecimal(sum, System.Globalization.CultureInfo.InvariantCulture));
+        return (TSum)Convert.ChangeType(total, type, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>The single column a <c>SUM</c> can push down, or null for a computed selector.</summary>
@@ -1259,9 +1350,9 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
         {
             var member = sort.KeySelector.GetMemberName();
             var column = _configuration.ColumnFor(member);
-            if (!_configuration.IsClusteringKey(column))
+            if (!_configuration.IsClusteringKey(column) || StoredAsLabels(member))
             {
-                throw new NotSupportedException($"Cassandra can only ORDER BY clustering keys; '{member}' is not one.");
+                throw new NotSupportedException($"{WhyNoOrderBy(member)}.");
             }
 
             parts.Add($"{column} {(sort.Direction == SortDirection.Descending ? "DESC" : "ASC")}");
@@ -1282,7 +1373,7 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     }
 
     private static List<Func<TEntity, bool>> Compile(IReadOnlyList<LambdaExpression> residual) =>
-        residual.Select(predicate => ((Expression<Func<TEntity, bool>>)predicate).Compile()).ToList();
+        residual.Select(PredicateNormalizer.CompileResidual<TEntity>).ToList();
 
     /// <summary>The first-segment columns the map reads from the entity, or null when it needs the whole entity.</summary>
     private static IReadOnlyCollection<string>? MapColumns(LambdaExpression map)

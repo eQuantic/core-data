@@ -25,7 +25,13 @@ translation asks the same contract**:
   its `[StoredAs]` label (or its name) as a JSON string. The labels are a type-level converter of
   the provider's serializer, which the SDK's LINQ translation asks for every constant, so filters
   compare labels — `(int)x.State == 1`, the compiler's own shape, included — and so do patches.
-  An enum declared neither way keeps its number.
+  An ordered comparison (`x.Priority >= Priority.Medium`) compares the members' values, as C# does: it is
+  sent as membership in the labels whose member satisfies it. An `ORDER BY` would order the labels' text
+  and Cosmos DB orders by property paths alone, so a read **ordered by such a member** reads one query per
+  member, in the order of their values (and one for the rows whose member is null, where they go),
+  concatenated with the window carried across them — on the first sort of an entity or mapped read; a
+  later sort, paging by continuation and streaming refuse it with that reason. An enum declared neither
+  way keeps its number.
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded in the document as
   the JSON they hold (object, array or scalar), come back equal, and `null` stays `null`.
 - **Sequence** — an atomic server-side counter: one item per `<container>.<property>` in the

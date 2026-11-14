@@ -437,12 +437,15 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
             }
         }
 
+        // One counter per collection this unit of work writes (its CollectionName<TEntity>(), overridden or not) and element:
+        // two units that keep an entity in two collections number each one on its own.
         foreach (var counter in inserts
                      .Where(insert => insert.Member.Value == Modeling.StoreValue.Sequence)
-                     .GroupBy(insert => MongoSequences.CounterId(MongoModeling.CollectionName(insert.EntityType), insert.Member.ElementName)))
+                     .GroupBy(insert => (Collection: CollectionNameOf(insert.EntityType), insert.Member.ElementName)))
         {
             var count = counter.Count();
-            var last = await MongoSequences.AdvanceAsync(Database, counter.Key, count, cancellationToken).ConfigureAwait(false);
+            var last = await MongoSequences.AdvanceAsync(Database, counter.Key.Collection, counter.Key.ElementName, count, cancellationToken)
+                .ConfigureAwait(false);
             var next = last - count + 1;
             foreach (var insert in counter)
             {

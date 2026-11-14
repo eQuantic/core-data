@@ -35,7 +35,18 @@ internal static class CosmosPartitionKeyInference
             }
 
             var entityType = (filter as LambdaExpression)?.Parameters is [{ } parameter, ..] ? parameter.Type : null;
-            var node = ExpressionSerializer.Default.ToNode(filter);
+            ExpressionNode node;
+            try
+            {
+                node = ExpressionSerializer.Default.ToNode(filter);
+            }
+            catch (ExpressionSerializationException)
+            {
+                // A filter the node model cannot hold (a delegate inside it) pins no partition here; the translation that
+                // follows says what is wrong with it (a relation's condition held in a delegate, which it refuses by name).
+                continue;
+            }
+
             var body = node is LambdaNode lambda ? lambda.Body : node;
             if (TryFind(body, entityType, field, out var value))
             {

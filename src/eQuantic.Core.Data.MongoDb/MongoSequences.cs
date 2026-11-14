@@ -7,8 +7,10 @@ namespace eQuantic.Core.Data.MongoDb;
 
 /// <summary>
 ///     What the store assigns a store-generated member on MongoDB. A sequence is an atomic counter: one document per
-///     collection and element in the <see cref="CollectionName" /> collection, advanced with <c>findOneAndUpdate</c>
-///     and <c>$inc</c> (upserted on first use) and acknowledged by a majority of the replica set, so no two inserts ever
+///     collection and element in the <see cref="CollectionName" /> collection, named after the collection the unit of
+///     work keeps the entity in (its <c>CollectionName&lt;TEntity&gt;()</c>, overridden or not), advanced with
+///     <c>findOneAndUpdate</c> and <c>$inc</c> (created on first use, above the highest number the collection holds) and
+///     acknowledged by a majority of the replica set, so no two inserts ever
 ///     take the same number, a failover included (a <c>w:1</c> acknowledgement can be rolled back with the primary that
 ///     gave it, and the number handed out again). It advances outside the unit of work's transaction, as a PostgreSQL
 ///     sequence does: a transaction that rolls back leaves the numbers it took unused, a gap, and concurrent
@@ -26,31 +28,61 @@ public static class MongoSequences
     public static string CounterId(string collection, string element) => $"{collection}.{element}";
 
     /// <summary>
-    ///     Advances a counter by <paramref name="count" /> in one atomic step and returns its new value: the numbers
-    ///     <c>value - count + 1</c> through <c>value</c> are the caller's, and nobody else's.
+    ///     Advances the counter of <paramref name="element" /> in <paramref name="collection" /> by <paramref name="count" /> in
+    ///     one atomic step and returns its new value: the numbers <c>value - count + 1</c> through <c>value</c> are the
+    ///     caller's, and nobody else's. A counter's first use starts it above the highest number the collection already
+    ///     holds (one written before the member was store-generated, or by a counter of another name, as a unit of work
+    ///     that renames its collections had before its counter took the collection's name), so no number is handed out twice.
     /// </summary>
-    internal static async Task<long> AdvanceAsync(IMongoDatabase database, string counterId, long count,
+    internal static async Task<long> AdvanceAsync(IMongoDatabase database, string collection, string element, long count,
         CancellationToken cancellationToken)
     {
         var counters = Counters(database);
+        var counterId = CounterId(collection, element);
         var filter = Builders<BsonDocument>.Filter.Eq("_id", counterId);
         var update = Builders<BsonDocument>.Update.Inc("value", count);
-        var options = new FindOneAndUpdateOptions<BsonDocument> { IsUpsert = true, ReturnDocument = ReturnDocument.After };
+        var options = new FindOneAndUpdateOptions<BsonDocument> { ReturnDocument = ReturnDocument.After };
 
         for (var attempt = 0; ; attempt++)
         {
-            try
+            // No session: the counter never joins the caller's transaction (see the type's remarks).
+            var counter = await counters.FindOneAndUpdateAsync(filter, update, options, cancellationToken).ConfigureAwait(false);
+            if (counter is not null)
             {
-                // No session: the counter never joins the caller's transaction (see the type's remarks).
-                var counter = await counters.FindOneAndUpdateAsync(filter, update, options, cancellationToken).ConfigureAwait(false);
                 return counter["value"].ToInt64();
             }
-            catch (MongoCommandException exception) when (exception.Code == 11000 && attempt == 0)
+
+            if (attempt > 0)
             {
-                // Two first uses raced to upsert the counter and this one lost the insert: the counter exists now,
-                // and the next $inc advances it.
+                throw new InvalidOperationException($"The counter '{counterId}' in '{CollectionName}' was created and is gone again.");
+            }
+
+            var highest = await HighestAsync(database, collection, element, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await counters.InsertOneAsync(new BsonDocument { { "_id", counterId }, { "value", highest } },
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            catch (MongoWriteException exception) when (exception.WriteError.Category == ServerErrorCategory.DuplicateKey)
+            {
+                // Two first uses raced to create the counter and this one lost: the counter exists now, and the next $inc
+                // advances it.
             }
         }
+    }
+
+    /// <summary>The highest number the collection holds in the element (0 when none): where a new counter starts.</summary>
+    private static async Task<long> HighestAsync(IMongoDatabase database, string collection, string element,
+        CancellationToken cancellationToken)
+    {
+        var numbers = database.GetCollection<BsonDocument>(collection);
+        var highest = await numbers.Find(Builders<BsonDocument>.Filter.Type(element, BsonType.Int32)
+                                         | Builders<BsonDocument>.Filter.Type(element, BsonType.Int64))
+            .Sort(Builders<BsonDocument>.Sort.Descending(element))
+            .Project(Builders<BsonDocument>.Projection.Include(element).Exclude("_id"))
+            .Limit(1)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return highest is null ? 0 : Math.Max(0, highest[element].ToInt64());
     }
 
     /// <summary>

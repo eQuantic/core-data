@@ -82,8 +82,13 @@ acknowledging a full-table fetch takes two signatures, deliberately.
 
 - **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, gives the member a
   `text` column holding its `[StoredAs]` label (or its name). Writes, reads, filters (the
-  compiler's `(int)x.State == 1` included) and set-based updates bind the label. Any other enum is
-  stored as its number, in the CQL type of its underlying integral type.
+  compiler's `(int)x.State == 1` included) and set-based updates bind the label. An ordered comparison
+  compares the members' values, as C# does: on the primary key it is an `IN` over the labels whose member
+  satisfies it (a lightweight transaction's condition too); elsewhere it runs client-side, behind
+  `.AllowClientEvaluation()`. A clustering order keeps the labels' text, so a read **ordered by such a
+  member** — a clustering key included — sorts client-side by the members' values, behind
+  `.AllowClientEvaluation()`. Any other enum is stored as its number, in the CQL type of its underlying
+  integral type.
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are `text` columns holding their
   JSON; they come back equal, and `null` stays `null`.
 - **Sequence** — Cassandra counters cannot be read atomically after an increment, so a sequence is a
@@ -162,9 +167,11 @@ labels, the JSON columns and the store-generated columns.
 - **Long `IN` lists** — a resolved relation's keys, an include's parents, a long `ids.Contains(x.Id)`
   on the primary key — run in chunks of 100 keys wherever rows are read or written: a query per chunk,
   a few at a time, merged and de-duplicated by primary key (as an OR split is), and a set-based write's
-  keyed `DELETE`, `UPDATE`, count and row read per chunk. A count, an aggregate, a group or a page has
-  one answer per statement, so it binds the whole list in one — refused past the 65,535 values one
-  statement can bind.
+  keyed `DELETE`, `UPDATE`, count and row read per chunk. A count, a sum, a minimum or a maximum binds
+  the whole list in one statement up to the 65,535 values one statement can bind, and past them runs in
+  chunks of its distinct keys (each row in one chunk) whose answers it combines. An average, a group or a
+  page has one answer per statement that chunks cannot make, so past those 65,535 values it is refused,
+  saying to narrow the list, run it per part, or read the rows (which run in chunks) and compute it.
 - **Plain writes and lightweight transactions on the same rows** are ordered by their timestamps: a
   plain write (a commit, a keyed set-based update or delete) carries the client's clock — the driver's
   default — and a lightweight transaction (a conditional or row-by-row set-based write, an upsert) the
@@ -174,7 +181,9 @@ labels, the JSON columns and the store-generated columns.
 - **Text ignoring case** pushes down as `LIKE` on a SASI index declared case-insensitive
   (`SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true)` or
   `[SearchIndex(CaseInsensitive = true)]`, created with a non-tokenizing, `case_sensitive: false`
-  analyzer); elsewhere it is the client-side residual. An `IN` on a column outside the primary key,
+  analyzer) **when the cluster's schema says the index is so**: the read checks `system_schema.indexes`,
+  and a declaration changed on an index already built (which keeps matching as it was built until it is
+  rebuilt) never pushes a `LIKE` down. Elsewhere it is the client-side residual. An `IN` on a column outside the primary key,
   which CQL refuses, also runs client-side.
 
 ## Consistency

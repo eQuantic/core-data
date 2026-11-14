@@ -181,6 +181,15 @@ public sealed class MariaDbTests
     [Test]
     public Task A_self_referencing_relation_inside_a_transaction() => QueryPredicateScenarios.SelfReferencingRelationInsideATransaction(NewScope);
 
+    [Test]
+    public Task Labels_compare_and_order_by_their_members_values() => QueryPredicateScenarios.LabelsCompareAndOrderByValue(NewScope);
+
+    [Test]
+    public Task A_negated_text_equality_keeps_the_rows_whose_member_is_null() => QueryPredicateScenarios.NegatedTextEqualityKeepsNull(NewScope);
+
+    [Test]
+    public void A_relation_condition_in_a_delegate_is_refused() => QueryPredicateScenarios.RelationConditionInADelegateIsRefused(NewScope);
+
     // ---------------------------------------------------------------- generated keys
 
     [Test]

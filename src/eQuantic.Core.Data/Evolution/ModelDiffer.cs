@@ -20,8 +20,9 @@ namespace eQuantic.Core.Data.Evolution;
 ///         and a member that becomes store-generated, changes what the store assigns, or stops being so, reported
 ///         as <see cref="ModelChangeKind.ChangeGeneration" />. So do an enum whose labels changed
 ///         (<see cref="ModelChangeKind.ChangeLabels" />, compared only where both versions recorded them) and a key
-///         the store starts or stops numbering (<see cref="ModelChangeKind.ChangeKeyGeneration" />). None is ever
-///         generated as a step; the migration says what the step must do.
+///         the store starts or stops numbering (<see cref="ModelChangeKind.ChangeKeyGeneration" />), and a search index
+///         whose declaration changed (<see cref="ModelChangeKind.ChangeSearch" />), which the index already built does not
+///         follow. None is ever generated as a step; the migration says what the step must do.
 ///     </para>
 /// </summary>
 public static class ModelDiffer
@@ -131,6 +132,8 @@ public static class ModelDiffer
             });
         }
 
+        CompareSearch(before, after, changes);
+
         var dropped = before.Fields.Where(field => !carried.Contains(field.Member)).ToList();
         var added = changes
             .Where(change => change.Kind == ModelChangeKind.AddField && change.EntityType == after.EntityType)
@@ -151,6 +154,36 @@ public static class ModelDiffer
                 Member = field.Member,
                 From = field.Name,
                 AmbiguousRenameHint = hint,
+            });
+        }
+    }
+
+    /// <summary>
+    ///     A search index whose declaration changed: added, removed, or matching another way (turning
+    ///     <c>CaseInsensitive</c> on or off included). The index the store already built keeps matching as it was built, so
+    ///     the change is reported for the migration to say what has to be rebuilt.
+    /// </summary>
+    private static void CompareSearch(EntitySnapshot before, EntitySnapshot after, List<ModelChange> changes)
+    {
+        var members = after.Search.Select(search => search.Member)
+            .Concat(before.Search.Select(search => search.Member))
+            .Distinct(StringComparer.Ordinal);
+        foreach (var member in members)
+        {
+            var was = before.Search.FirstOrDefault(search => search.Member == member)?.Mode;
+            var now = after.Search.FirstOrDefault(search => search.Member == member)?.Mode;
+            if (string.Equals(was, now, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            changes.Add(new ModelChange(ModelChangeKind.ChangeSearch, after.EntityType)
+            {
+                Member = member,
+                From = was,
+                To = now,
+                Collection = after.Collection,
+                Field = (after.Field(member) ?? before.Field(member))?.Name ?? member,
             });
         }
     }

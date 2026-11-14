@@ -17,6 +17,21 @@ public sealed class TenantPrefixedUnitOfWork(IServiceProvider serviceProvider, I
     protected override string CollectionName<TEntity>() => Prefix + base.CollectionName<TEntity>();
 }
 
+/// <summary>A note the store numbers (a sequence, by annotation), and nothing else: no enum whose serializer it would fix.</summary>
+public sealed class NumberedNote : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Text { get; set; } = "";
+
+    [Modeling.StoreGenerated]
+    public long Number { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
 /// <summary>
 ///     A unit of work that overrides <c>CollectionName&lt;TEntity&gt;()</c>, against a real MongoDB: every read that joins
 ///     another collection — a plain include, a shaped include, a relation count, a filter across a relation — reads the
@@ -108,5 +123,36 @@ public sealed class MongoCollectionNameOverrideTests : MongoIntegrationTest
 
         Assert.That((await Repo<ShapePackage>(scope).GetFilteredAsync(x => x.Versions!.Any(v => v.Label == "2.0.0"))).Single().Id,
             Is.EqualTo(package.Id), "as a filter across the relation does");
+    }
+
+    [Test]
+    public async Task A_counter_is_named_after_the_collection_the_unit_of_work_keeps_the_entity_in()
+    {
+        await Seed(new NumberedNote { Text = "a" }, new NumberedNote { Text = "b" });
+
+        var counters = await _database.GetCollection<BsonDocument>(MongoSequences.CollectionName).Find(FilterDefinition<BsonDocument>.Empty).ToListAsync();
+        Assert.That(counters.Select(counter => (counter["_id"].AsString, counter["value"].ToInt64())),
+            Is.EqualTo(new[] { (TenantPrefixedUnitOfWork.Prefix + nameof(NumberedNote) + ".Number", 2L) }),
+            "the counter of the collection the unit of work writes, never the one the type would name");
+
+        // A unit of work that keeps the entity under the type's own name numbers its collection with a counter of its own.
+        using var plain = new MongoTestDatabase(MongoTestServer.Client, _database.DatabaseNamespace.DatabaseName, []);
+        var note = new NumberedNote { Text = "c" };
+        await plain.Resolve<IAsyncRepository<NumberedNote, string>>().AddAsync(note);
+        await plain.Resolve<IUnitOfWork>().CommitAsync();
+        Assert.That(note.Number, Is.EqualTo(1L), "another collection, another counter");
+    }
+
+    [Test]
+    public async Task A_new_counter_starts_above_the_numbers_its_collection_already_holds()
+    {
+        // Numbers a counter of another name handed out before this one took the collection's name.
+        await _database.GetCollection<BsonDocument>(TenantPrefixedUnitOfWork.Prefix + nameof(NumberedNote))
+            .InsertOneAsync(new BsonDocument { { "_id", Guid.NewGuid().ToString("N") }, { "Text", "old" }, { "Number", 41L } });
+
+        var note = new NumberedNote { Text = "new" };
+        await Seed(note);
+
+        Assert.That(note.Number, Is.EqualTo(42L), "no number is handed out twice");
     }
 }

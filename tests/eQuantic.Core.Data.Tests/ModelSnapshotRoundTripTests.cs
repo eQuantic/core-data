@@ -116,6 +116,38 @@ public sealed class ModelSnapshotRoundTripTests
     }
 
     [Test]
+    public void A_snapshot_holding_any_text_compiles_and_reads_back_as_that_text()
+    {
+        const string sqlDefault = "default CASE\n    WHEN \"kind\" = 'a\\b' THEN 1\r\n\tELSE 0\u0001\u2028END";
+        var model = new ModelSnapshot("postgresql",
+        [
+            new EntitySnapshot("Shop.Order", "orders \"main\"",
+            [
+                new FieldSnapshot("Id", "id", "System.Guid"),
+                new FieldSnapshot("Kind", "kind", "System.Int32") { Generated = sqlDefault, DefaultLiteral = "\"line\nbreak\"" },
+                new FieldSnapshot("Note", "note\tcol", "System.String") { PreviousNames = ["old\\note", "\u0085older"] },
+            ]) { Keys = ["Id"] },
+        ]);
+
+        var read = Load(ModelSnapshotWriter.Write(model, "Shop.Migrations"));
+
+        Assert.That(read.For("Shop.Order")!.Field("Kind")!.Generated, Is.EqualTo(sqlDefault), "a SQL default over several lines");
+        Assert.That(read.For("Shop.Order")!.Field("Kind")!.DefaultLiteral, Is.EqualTo("\"line\nbreak\""));
+        Assert.That(read.For("Shop.Order")!.Collection, Is.EqualTo("orders \"main\""));
+        Assert.That(read.For("Shop.Order")!.Field("Note")!.Name, Is.EqualTo("note\tcol"));
+        Assert.That(read.For("Shop.Order")!.Field("Note")!.PreviousNames, Is.EqualTo(new[] { "old\\note", "\u0085older" }));
+        Assert.That(ModelDiffer.Compare(read, model).IsEmpty, Is.True);
+    }
+
+    [Test]
+    public void A_default_of_any_text_renders_as_a_literal_that_compiles_to_it()
+    {
+        Assert.That(CSharpLiteral.Render("a\nb\t\"c\"\\\u0007\u2029"), Is.EqualTo("\"a\\nb\\t\\\"c\\\"\\\\\\u0007\\u2029\""));
+        Assert.That(CSharpLiteral.Render('\n'), Is.EqualTo("'\\n'"));
+        Assert.That(CSharpLiteral.Render('\''), Is.EqualTo("'\\''"));
+    }
+
+    [Test]
     public void The_written_file_carries_the_generation_only_where_there_is_one()
     {
         var written = ModelSnapshotWriter.Write(Current(numberGenerated: "sequence"), "Shop.Migrations");

@@ -102,8 +102,14 @@ build to refuse.
   multi-value key transparently, and partition inference declines (fans out) rather than guessing.
 - **`[EnumType]` means "the store holds the labels and nothing else".** Each member's label is its
   `[StoredAs]` name, or its own name. Filters and set-based updates compare and write labels, including
-  the `(int)x.State == 1` shape the compiler produces. An enum without it keeps being stored as its
-  number. On the relational engines the store itself refuses another value; on the document and
+  the `(int)x.State == 1` shape the compiler produces. The enum still **compares and orders by its
+  members' values**, as C# does, never by the labels' text nor by the order PostgreSQL or MySQL declared
+  them in: `x.Priority >= Priority.Medium` (on a nullable member too, and under a negation, where a null
+  passes as it does in C#) is membership in the labels whose member satisfies it, and
+  `OrderBy(x => x.Priority)` orders by the value each label stands for — a `CASE` on the relational
+  engines, a `$switch` on MongoDB, one query per member on Cosmos DB, and client-side behind
+  `.AllowClientEvaluation()` on Cassandra (see each provider). An enum without it keeps being stored as
+  its number. On the relational engines the store itself refuses another value; on the document and
   wide-column engines the label is a plain string, so the guarantee is the provider's. Switching an
   existing enum from numbers to labels is a data migration, and `eqdata migrations add` says what to
   write instead of generating it (see [Migrations](../migrations/index.md)).

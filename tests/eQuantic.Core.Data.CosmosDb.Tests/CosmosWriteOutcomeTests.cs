@@ -890,6 +890,49 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task A_delete_with_a_stale_token_is_a_ConcurrencyConflictException_and_deletes_nothing()
+    {
+        var product = CosmosProduct.New("Guarded delete", Partition, 1, 1m);
+        using (var seed = NewScope())
+        {
+            await RepoOf<CosmosProduct>(seed).AddAsync(product);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var stale = (await RepoOf<CosmosProduct>(scope).GetAsync(product.Id))!;
+        using (var other = NewScope())
+        {
+            var current = (await RepoOf<CosmosProduct>(other).GetAsync(product.Id))!;
+            current.Quantity = 2;
+            await RepoOf<CosmosProduct>(other).ModifyAsync(current);
+            await Commit(other);
+        }
+
+        await RepoOf<CosmosProduct>(scope).RemoveAsync(stale);
+        var conflict = Assert.ThrowsAsync<ConcurrencyConflictException>(() => Commit(scope),
+            "removing an item someone else changed is a conflict, as concurrency.md promises");
+        Assert.That((conflict!.Expected, conflict.Affected), Is.EqualTo((1L, 0L)));
+        using (var check = NewScope())
+        {
+            Assert.That((await RepoOf<CosmosProduct>(check).GetAsync(product.Id))!.Quantity, Is.EqualTo(2), "the other writer's change stands");
+        }
+
+        // Inside a transaction the guarded delete joins the batch, and the batch refuses it whole.
+        var unitOfWork = Resolve<Repository.CosmosDefaultUnitOfWork>(scope);
+        await unitOfWork.BeginTransactionAsync();
+        await RepoOf<CosmosProduct>(scope).RemoveAsync(stale);
+        await unitOfWork.CommitAsync();
+        Assert.ThrowsAsync<ConcurrencyConflictException>(() => unitOfWork.CommitTransactionAsync());
+
+        using var fresh = NewScope();
+        var current2 = (await RepoOf<CosmosProduct>(fresh).GetAsync(product.Id))!;
+        await RepoOf<CosmosProduct>(fresh).RemoveAsync(current2);
+        await Commit(fresh);
+        Assert.That(await RepoOf<CosmosProduct>(fresh).GetAsync(product.Id), Is.Null, "a delete with the current token removes it");
+    }
+
+    [Test]
     public async Task A_token_guarded_write_of_a_removed_document_is_a_ConcurrencyConflictException()
     {
         var product = CosmosProduct.New("Removed", Partition, 1, 1m);

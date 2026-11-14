@@ -125,8 +125,13 @@ internal static class MongoPredicates
 
     // ---------------------------------------------------------------- text without regard to case
 
-    /// <summary>Normalizes the expression and rewrites its case-insensitive text tests into regular expressions.</summary>
-    internal static Expression Rewrite(Expression expression) => new CaseInsensitiveText().Visit(PredicateNormalizer.Normalize(expression));
+    /// <summary>
+    ///     Normalizes the expression, rewrites its case-insensitive text tests into regular expressions, and its ordered
+    ///     comparisons of an enum stored as labels into an <c>$in</c> over the labels whose member satisfies them, since the
+    ///     server would compare the labels' text where C# compares the members' values.
+    /// </summary>
+    internal static Expression Rewrite(Expression expression) =>
+        EnumOrder.RewriteComparisons(new CaseInsensitiveText().Visit(PredicateNormalizer.Normalize(expression)), MongoModeling.IsLabelEnum);
 
     /// <summary>
     ///     <c>string.Equals(x.Name, v, OrdinalIgnoreCase)</c>, <c>x.Name.Equals/Contains/StartsWith/EndsWith(v, OrdinalIgnoreCase)</c>

@@ -49,7 +49,7 @@ internal static class CosmosPredicates
     /// <summary>The query ready for the SDK: normalized, and each relation resolved into the related keys (read first).</summary>
     public static async Task<IQueryable<T>> ReadyAsync<T>(IQueryable<T> query, CosmosUnitOfWork unitOfWork, CancellationToken cancellationToken)
     {
-        var expression = Rewrite(query.Expression);
+        var expression = Rewrite(query.Expression, unitOfWork);
         expression = await RelationPredicates.ResolveQueryAsync(expression, Navigations(unitOfWork), Keys(unitOfWork), cancellationToken)
             .ConfigureAwait(false);
         return ReferenceEquals(expression, query.Expression) ? query : query.Provider.CreateQuery<T>(expression);
@@ -58,16 +58,17 @@ internal static class CosmosPredicates
     /// <summary>The filter ready for a set-based write: normalized, and each relation resolved into the related keys.</summary>
     public static async Task<Expression<Func<T, bool>>> ReadyAsync<T>(Expression<Func<T, bool>> filter, CosmosUnitOfWork unitOfWork,
         CancellationToken cancellationToken) =>
-        await RelationPredicates.ResolveAsync((Expression<Func<T, bool>>)Rewrite(filter), Navigations(unitOfWork), Keys(unitOfWork),
+        await RelationPredicates.ResolveAsync((Expression<Func<T, bool>>)Rewrite(filter, unitOfWork), Navigations(unitOfWork), Keys(unitOfWork),
             cancellationToken).ConfigureAwait(false);
 
     /// <summary>A predicate the SDK translates on its own (an include's filter, a count's): normalized.</summary>
-    public static Expression<Func<T, bool>> Rendered<T>(Expression<Func<T, bool>> predicate) => (Expression<Func<T, bool>>)Rewrite(predicate);
+    public static Expression<Func<T, bool>> Rendered<T>(Expression<Func<T, bool>> predicate, CosmosUnitOfWork unitOfWork) =>
+        (Expression<Func<T, bool>>)Rewrite(predicate, unitOfWork);
 
     /// <summary>The query with every relation replaced by an empty key list, for a plan that runs nothing.</summary>
     public static IQueryable<T> Unresolved<T>(IQueryable<T> query, CosmosUnitOfWork unitOfWork)
     {
-        var expression = RelationPredicates.ResolveQueryAsync(Rewrite(query.Expression), Navigations(unitOfWork),
+        var expression = RelationPredicates.ResolveQueryAsync(Rewrite(query.Expression, unitOfWork), Navigations(unitOfWork),
             (_, _, _, _) => Task.FromResult<IReadOnlyCollection<object?>>([]), CancellationToken.None).GetAwaiter().GetResult();
         return ReferenceEquals(expression, query.Expression) ? query : query.Provider.CreateQuery<T>(expression);
     }
@@ -127,10 +128,46 @@ internal static class CosmosPredicates
         return values;
     }
 
+    /// <summary>
+    ///     Whether a filter tests text without regard to case (<c>Equals</c>, <c>Contains</c>, <c>StartsWith</c>, <c>EndsWith</c>
+    ///     with a comparison that ignores case, or over <c>ToLower()</c>/<c>ToUpper()</c>): what a patch's condition must
+    ///     not carry, since the condition evaluator answers it with a refusal that reads as "no longer matches".
+    /// </summary>
+    /// <param name="filter">The filter, as the SDK translates it.</param>
+    public static bool TestsTextIgnoringCase(Expression filter)
+    {
+        var finder = new TextIgnoringCase();
+        finder.Visit(filter);
+        return finder.Found;
+    }
+
+    private sealed class TextIgnoringCase : ExpressionVisitor
+    {
+        public bool Found { get; private set; }
+
+        protected override Expression VisitMethodCall(MethodCallExpression node)
+        {
+            if (node.Method.DeclaringType == typeof(string)
+                && (node.Method.Name is nameof(string.ToLower) or nameof(string.ToUpper) or nameof(string.ToLowerInvariant) or nameof(string.ToUpperInvariant)
+                    || (node.Method.Name is nameof(string.Equals) or nameof(string.Contains) or nameof(string.StartsWith) or nameof(string.EndsWith)
+                        && node.Arguments.Any(argument => argument.Type == typeof(StringComparison)))))
+            {
+                Found = true;
+            }
+
+            return base.VisitMethodCall(node);
+        }
+    }
+
     // ---------------------------------------------------------------- rewriting
 
-    /// <summary>Normalizes the expression for the SDK's translation.</summary>
-    private static Expression Rewrite(Expression expression) => new SdkShapes().Visit(PredicateNormalizer.Normalize(expression));
+    /// <summary>
+    ///     Normalizes the expression for the SDK's translation, and rewrites each ordered comparison of an enum stored as its
+    ///     labels into membership in the labels whose member satisfies it, since Cosmos DB would compare the labels' text
+    ///     where C# compares the members' values.
+    /// </summary>
+    private static Expression Rewrite(Expression expression, CosmosUnitOfWork unitOfWork) =>
+        EnumOrder.RewriteComparisons(new SdkShapes().Visit(PredicateNormalizer.Normalize(expression)), unitOfWork.EntityModel.IsLabelEnum);
 
     /// <summary>
     ///     <c>string.Equals(a, b, comparison)</c> → <c>member.Equals(value, comparison)</c> (the SDK reads only the instance
@@ -142,6 +179,65 @@ internal static class CosmosPredicates
         private static readonly MethodInfo InstanceEquals = typeof(string).GetMethod(nameof(string.Equals), [typeof(string), typeof(StringComparison)])!;
         private static readonly MethodInfo ToLower = typeof(string).GetMethod(nameof(string.ToLower), Type.EmptyTypes)!;
         private static readonly MethodInfo ToUpper = typeof(string).GetMethod(nameof(string.ToUpper), Type.EmptyTypes)!;
+
+        /// <summary>
+        ///     The negation of a text equality without regard to case (<c>!string.Equals(x.Name, v, OrdinalIgnoreCase)</c>,
+        ///     its instance forms, <c>!(x.Name.ToLower() == v)</c>) also holds where the member is null or absent: C# answers
+        ///     false to the equality there, as Cosmos DB's <c>STRINGEQUALS</c> and <c>LOWER</c> do not (they answer undefined,
+        ///     and so does its negation).
+        /// </summary>
+        protected override Expression VisitUnary(UnaryExpression node)
+        {
+            var visited = base.VisitUnary(node);
+            return visited is UnaryExpression { NodeType: ExpressionType.Not, Operand: var operand } negation && TextEquality(operand) is { } member
+                ? Expression.OrElse(negation, NullOrAbsent(member))
+                : visited;
+        }
+
+        /// <summary><c>x.Name.ToLower() != v</c> holds where the member is null or absent, as <c>x.Name != v</c> does.</summary>
+        protected override Expression VisitBinary(BinaryExpression node)
+        {
+            var visited = base.VisitBinary(node);
+            return visited is BinaryExpression { NodeType: ExpressionType.NotEqual } inequality
+                   && (Folded(inequality.Left) ?? Folded(inequality.Right)) is { } member
+                   && (!Reads(inequality.Left) || !Reads(inequality.Right))
+                ? Expression.OrElse(inequality, NullOrAbsent(member))
+                : visited;
+        }
+
+        /// <summary>The member a text equality that ignores case tests, or <c>null</c>.</summary>
+        private static Expression? TextEquality(Expression expression) => expression switch
+        {
+            MethodCallExpression { Method.Name: nameof(string.Equals), Object: { } receiver, Arguments: [var argument, var comparison] } call
+                when call.Method.DeclaringType == typeof(string) && IgnoresCase(comparison) =>
+                Reads(receiver) && !Reads(argument) ? receiver : Reads(argument) && !Reads(receiver) ? argument : null,
+            BinaryExpression { NodeType: ExpressionType.Equal } equality when !Reads(equality.Left) || !Reads(equality.Right) =>
+                Folded(equality.Left) ?? Folded(equality.Right),
+            _ => null,
+        };
+
+        /// <summary>The member of <c>x.Name.ToLower()</c> / <c>ToUpper()</c>, or <c>null</c>.</summary>
+        private static Expression? Folded(Expression expression) =>
+            expression is MethodCallExpression { Object: { } member, Arguments.Count: 0, Method.Name: nameof(string.ToLower) or nameof(string.ToUpper) } call
+            && call.Method.DeclaringType == typeof(string) && Reads(member)
+                ? member
+                : null;
+
+        private static bool IgnoresCase(Expression expression) =>
+            !Reads(expression)
+            && (expression is ConstantExpression constant
+                ? constant.Value
+                : Expression.Lambda(Expression.Convert(expression, typeof(object))).Compile(preferInterpretation: true).DynamicInvoke())
+            is StringComparison.OrdinalIgnoreCase or StringComparison.InvariantCultureIgnoreCase or StringComparison.CurrentCultureIgnoreCase;
+
+        /// <summary><c>!IS_DEFINED(member) || IS_NULL(member)</c>.</summary>
+        private static Expression NullOrAbsent(Expression member)
+        {
+            var boxed = Expression.Convert(member, typeof(object));
+            return Expression.OrElse(
+                Expression.Not(Expression.Call(typeof(CosmosLinqExtensions), nameof(CosmosLinqExtensions.IsDefined), null, boxed)),
+                Expression.Call(typeof(CosmosLinqExtensions), nameof(CosmosLinqExtensions.IsNull), null, boxed));
+        }
 
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {

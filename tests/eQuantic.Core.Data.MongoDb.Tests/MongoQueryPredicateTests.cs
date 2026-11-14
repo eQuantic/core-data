@@ -129,6 +129,44 @@ public sealed class RelCompany : IEntity<string>
 }
 
 /// <summary>
+///     A priority stored as its labels, whose three orders all differ: the members' values (low, medium, high, urgent), the
+///     labels' text (a_urgent, high, low, medium) and the declaration order (high, low, a_urgent, medium).
+/// </summary>
+[Modeling.EnumType]
+public enum RelPriority
+{
+    [Modeling.StoredAs("high")]
+    High = 3,
+
+    [Modeling.StoredAs("low")]
+    Low = 1,
+
+    [Modeling.StoredAs("a_urgent")]
+    Urgent = 4,
+
+    [Modeling.StoredAs("medium")]
+    Medium = 2,
+}
+
+/// <summary>A ticket: a priority stored as its labels, an escalation that may be unset, and an alias that may hold no text.</summary>
+public sealed class RelTicket : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    public string Title { get; set; } = "";
+
+    public RelPriority Priority { get; set; } = RelPriority.Low;
+
+    public RelPriority? Escalation { get; set; }
+
+    public string? Alias { get; set; }
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
+/// <summary>
 ///     The query predicates against a real MongoDB: a filter across a relation resolves the related keys first (one
 ///     aggregation per test, inside the transaction's session when one is open) and reads with <c>$in</c>/<c>$nin</c>
 ///     over them, in reads, counts and set-based writes; text without regard to case is an escaped case-insensitive regular
@@ -353,5 +391,75 @@ public sealed class MongoQueryPredicateTests : MongoIntegrationTest
         Assert.That(await repo.DeleteManyAsync(x => names.Contains(x.Name)), Is.EqualTo(1L), "c3 was renamed");
         Assert.That((await repo.GetAllAsync()).Select(x => (x.Name, x.Rank)).OrderBy(x => x.Rank),
             Is.EqualTo(new[] { ("listed", 3), ("c1", 11), ("listed", 12) }));
+    }
+
+    private Task SeedTicketsAsync() => Seed(
+        new RelTicket { Title = "t1", Priority = RelPriority.Low, Alias = "Alpha" },
+        new RelTicket { Title = "t2", Priority = RelPriority.Medium, Escalation = RelPriority.Low },
+        new RelTicket { Title = "t3", Priority = RelPriority.High, Escalation = RelPriority.Urgent, Alias = "beta" },
+        new RelTicket { Title = "t4", Priority = RelPriority.Urgent, Escalation = RelPriority.Medium, Alias = "ALPHA" });
+
+    private async Task<string[]> TicketTitles(System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter)
+    {
+        using var scope = NewScope();
+        return (await Repo<RelTicket>(scope).GetFilteredAsync(filter)).Select(x => x.Title).Order().ToArray();
+    }
+
+    private async Task<string[]> OrderedTitles(QueryOptions<RelTicket> options)
+    {
+        using var scope = NewScope();
+        return (await Repo<RelTicket>(scope).GetAllAsync(options)).Select(x => x.Title).ToArray();
+    }
+
+    [Test]
+    public async Task Labels_compare_and_order_by_their_members_values()
+    {
+        await SeedTicketsAsync();
+        var medium = RelPriority.Medium;
+
+        Assert.That(await TicketTitles(x => x.Priority >= RelPriority.Medium), Is.EqualTo(new[] { "t2", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Priority < RelPriority.High), Is.EqualTo(new[] { "t1", "t2" }));
+        Assert.That(await TicketTitles(x => medium < x.Priority), Is.EqualTo(new[] { "t3", "t4" }), "a captured value, on the left");
+        Assert.That(await TicketTitles(x => x.Priority == RelPriority.Medium), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(x => x.Priority != RelPriority.Medium), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Priority > RelPriority.Urgent), Is.Empty, "no member is above the highest");
+        Assert.That(await TicketTitles(x => x.Escalation >= RelPriority.Medium), Is.EqualTo(new[] { "t3", "t4" }),
+            "a nullable member: null is not >= anything");
+        Assert.That(await TicketTitles(x => !(x.Escalation >= RelPriority.Medium)), Is.EqualTo(new[] { "t1", "t2" }),
+            "under a negation null passes, as in C#");
+
+        Assert.That(await OrderedTitles(new QueryOptions<RelTicket>().OrderBy(x => x.Priority)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+        Assert.That(await OrderedTitles(new QueryOptions<RelTicket>().OrderByDescending(x => x.Priority)), Is.EqualTo(new[] { "t4", "t3", "t2", "t1" }));
+        Assert.That(await OrderedTitles(new QueryOptions<RelTicket>().OrderByDescending(x => x.Priority).Take(2)), Is.EqualTo(new[] { "t4", "t3" }));
+        Assert.That(await OrderedTitles(new QueryOptions<RelTicket>().OrderBy(x => x.Escalation, NullsOrder.Last)),
+            Is.EqualTo(new[] { "t2", "t4", "t3", "t1" }));
+
+        using var scope = NewScope();
+        var repo = Repo<RelTicket>(scope);
+        Assert.That(await repo.CountAsync(new QueryOptions<RelTicket>().Where(x => x.Priority >= RelPriority.Medium)), Is.EqualTo(3L));
+        Assert.That(await repo.UpdateManyAsync(x => x.Priority >= RelPriority.High, x => new RelTicket { Alias = "hot" }), Is.EqualTo(2L));
+        Assert.That(await TicketTitles(x => x.Alias == "hot"), Is.EqualTo(new[] { "t3", "t4" }));
+    }
+
+    [Test]
+    public async Task A_negated_text_equality_keeps_the_rows_whose_member_is_null()
+    {
+        await SeedTicketsAsync();
+
+        Assert.That(await TicketTitles(x => string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t1", "t4" }));
+        Assert.That(await TicketTitles(x => !string.Equals(x.Alias, "alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !x.Alias!.Equals("alpha", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !"alpha".Equals(x.Alias, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() != "alpha"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
+    }
+
+    [Test]
+    public void A_relation_condition_in_a_delegate_is_refused()
+    {
+        using var scope = NewScope();
+        Func<RelMention, bool> live = m => m.DeletedAt == null;
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => Repo<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(live)));
+        Assert.That(refusal!.Message, Does.Contain("'Mentions.Any'").And.Contain("Write the lambda inline"));
     }
 }

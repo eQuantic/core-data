@@ -112,6 +112,12 @@ A relation test compares the related rows with **values**: one that also reads t
 members (`x.Items.Any(i => i.OwnerId == x.Id)`) is refused with the reason, and so is a collection
 navigation used otherwise than through `Any`/`All` (`x.Items.Count > 0`).
 
+The condition is **written inline**: `x.Items.Any(i => i.Done)`. A condition held in a delegate — a
+`Func<Item, bool>` variable, a compiled expression (`expr.Compile()`), a method group — has no body the
+store could run, and dropping it would answer another question (whether any row is related at all), so
+`Any`, `All` and a relation count (`x.Items.Count(f)`) refuse it with a `NotSupportedException` naming
+the navigation (`'Items.Any'`) and saying to write the lambda inline.
+
 ## Text without regard to case
 
 | You write | It matches |
@@ -119,6 +125,13 @@ navigation used otherwise than through `Any`/`All` (`x.Items.Count > 0`).
 | `string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)`, `x.Name.Equals(v, …IgnoreCase)` | the whole text, whatever the case |
 | `x.Name.Contains(v, …IgnoreCase)`, `StartsWith`, `EndsWith` | a part of it, whatever the case |
 | `x.Name.ToLower() == v`, `x.Name.ToUpper().StartsWith(v)` (and `Contains`, `EndsWith`, `Equals`) | the member's lower- or upper-cased text against the value **as it is** — as in C#, `ToLower() == "ACME"` matches nothing |
+
+A **negated equality** keeps the rows whose member is null, on every store, as C# does:
+`!string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)` is true for a null `Name`, and
+`!x.Name.Equals(v, …IgnoreCase)`, `!v.Equals(x.Name, …IgnoreCase)`, `x.Name.ToLower() != v` and
+`!(x.Name.ToUpper() == V)` read the same way, as `x.Name != v` does (`(NOT … OR col IS NULL)` on the
+relational engines, `IS_NULL`/`IS_DEFINED` on Cosmos DB, the residual on Cassandra, where a null member's
+text fails a text test and stays null when folded instead of throwing).
 
 `InvariantCultureIgnoreCase` reads as `OrdinalIgnoreCase`. The value's wildcard characters are
 **literal** on every store (`%`, `_`, `[`, a regular expression's metacharacters), escaped where the
@@ -132,12 +145,22 @@ collation, as equality does.
 | MySQL / MariaDB | `LOWER(col) = LOWER(@p)`, `LIKE … ESCAPE '!'` | as SQL Server; the default collations also ignore accents, so `é` matches `e` under them |
 | MongoDB | an escaped, anchored, case-insensitive regular expression (`{ name: /^acme corp\z/i }`) | a case-insensitive regular expression scans the index (or the collection): it cannot seek |
 | Cosmos DB | `STRINGEQUALS`, `CONTAINS`, `STARTSWITH`, `ENDSWITH` with their case-insensitive flag (`LOWER`/`UPPER` for the folded forms) | a case-insensitive comparison scans (the index, or the documents of the query's scope) where a case-sensitive one seeks: its RU charge follows what it scans |
-| Cassandra | a `LIKE` on a SASI index the member declares case-insensitive (`SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true)`, or `[SearchIndex(CaseInsensitive = true)]`) | the index serves the match; elsewhere — no such index, a literal `%` in the value (SASI's `LIKE` has no escape), a mode that cannot serve the position — the test runs client-side behind `.AllowClientEvaluation()` |
+| Cassandra | a `LIKE` on a SASI index the member declares case-insensitive (`SearchIndex(x => x.Name, CassandraSearchMode.Contains, caseInsensitive: true)`, or `[SearchIndex(CaseInsensitive = true)]`) **and the cluster holds case-insensitive** | the index serves the match; elsewhere — no such index, an index the cluster holds case-sensitive, a literal `%` in the value (SASI's `LIKE` has no escape), a mode that cannot serve the position — the test runs client-side behind `.AllowClientEvaluation()` |
+
+On Cassandra the declaration alone never pushes a match that ignores case down: the read looks up the
+index in `system_schema.indexes` (the SASI index on the column, as `EnsureCollection()` names it) and
+takes the declaration only where that index has the non-tokenizing analyzer, `case_sensitive: false`
+and a mode that serves the declared one. A declaration turned case-insensitive on an index that already
+exists changes nothing on the cluster until the index is rebuilt — the migration's `#error` says how —
+and a `LIKE` on the old index would miss every row whose case differs. An index found case-insensitive
+is remembered for the session; one that is not is read again by the next read that needs it.
 
 On Cosmos DB a set-based write's patch carries the filter as its condition; where the store cannot
 evaluate a function there (the emulator refuses `STRINGEQUALS` in a patch condition), each item is
 patched under the `_etag` of a read that still finds it matching — the same compare-and-set, in two
-round trips.
+round trips. A filter that tests text without regard to case is **never** sent as a patch's condition:
+the emulator answers a case-insensitive `CONTAINS` or `STARTSWITH` there with 412, which reads as "no
+longer matches" and would patch nothing; such a filter always takes the `_etag` path.
 
 ## An array's `Contains`
 

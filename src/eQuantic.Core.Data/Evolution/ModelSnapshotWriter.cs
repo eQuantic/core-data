@@ -155,6 +155,5 @@ public static class ModelSnapshotWriter
 
     private static string Bool(bool value) => value ? "true" : "false";
 
-    private static string Literal(string value) =>
-        "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    private static string Literal(string value) => CSharpLiteral.Render(value)!;
 }

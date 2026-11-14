@@ -231,6 +231,20 @@ internal static class MongoModeling
         }
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, byte> DeclaredLabels = new();
+
+    /// <summary>
+    ///     Whether <paramref name="type" /> (nullable unwrapped) is an enum stored as its labels: annotated with
+    ///     <see cref="EnumTypeAttribute" />, or declared by <c>Enum&lt;TEnum&gt;()</c> on a model builder. Asking never
+    ///     fixes a serializer, as a lookup through the driver would.
+    /// </summary>
+    /// <param name="type">A CLR type.</param>
+    public static bool IsLabelEnum(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsEnum && (EnumTypeAttribute.For(underlying) is not null || DeclaredLabels.ContainsKey(underlying));
+    }
+
     /// <summary>
     ///     Declares <typeparamref name="TEnum" /> stored as its labels. The driver's serializers are global and fixed on
     ///     first use, so an enum the driver has already serialized as its number cannot change now: that refuses,
@@ -242,6 +256,7 @@ internal static class MongoModeling
         try
         {
             BsonSerializer.TryRegisterSerializer(new MongoEnumLabelSerializer<TEnum>());
+            DeclaredLabels.TryAdd(typeof(TEnum), 0);
         }
         catch (MongoDB.Bson.BsonSerializationException exception)
         {

@@ -43,7 +43,10 @@ every other provider, through MongoDB's own mechanisms:
   its `[StoredAs]` label (or its name) as a BSON string. It is the member's serializer, so the
   LINQ pipeline, the filter of a set-based write and its `$set` all compare and write labels —
   `x.State == State.InProgress` (which the compiler turns into `(int)x.State == 1`) included. An
-  enum declared neither way keeps its number. The driver's serializers are global and fixed on
+  ordered comparison compares the members' values, as C# does, sent as an `$in` over the labels whose
+  member satisfies it, and an order by such a member sorts on the value each label stands for (an
+  `$addFields` of a `$switch`, then `$sort`), shaped includes included. An enum declared neither way
+  keeps its number. The driver's serializers are global and fixed on
   first use: declare `Enum<TEnum>()` before the first read or write (a late declaration refuses).
 - **JSON members** — `JsonDocument`, `JsonElement` and `JsonNode` are embedded as the BSON value
   their JSON is: an object as a document, an array as an array, a scalar as the scalar. They come
@@ -51,8 +54,12 @@ every other provider, through MongoDB's own mechanisms:
   `$schema`, `$id`, `$ref`) are stored as they are by every write — an insert, a replace, a modify of
   the members named, an upsert, a set-based update — on MongoDB 5.0 or later; an earlier server
   refuses such names on any write, an insert included.
-- **Sequence** — an atomic counter: one document per `<collection>.<element>` in `_sequences`,
-  advanced by `findOneAndUpdate` with `$inc` (upserted on first use), one `$inc` per counter for a
+- **Sequence** — an atomic counter: one document per `<collection>.<element>` in `_sequences`, the
+  collection being the one the unit of work keeps the entity in (its `CollectionName<TEntity>()`,
+  overridden or not, so two units that keep an entity in two collections number each on its own),
+  advanced by `findOneAndUpdate` with `$inc` (created on first use above the highest number the
+  collection already holds, so a counter that takes over a collection numbered before never repeats
+  one of its numbers), one `$inc` per counter for a
   whole commit, acknowledged by a majority of the replica set (a `w:1` acknowledgement can be rolled
   back by a failover, and the number handed out again). No number is ever handed out twice. The
   counter advances **outside** the open transaction, as a PostgreSQL sequence's `nextval` does:

@@ -141,7 +141,15 @@ public static class ReadShapes
         return ordered.ToList();
     }
 
-    private static Func<T, object?> Boxed<T>(LambdaExpression key)
+    // A sort key compiles once per key expression (once per shape, however many parents it pages), not once per call.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LambdaExpression,
+        System.Collections.Concurrent.ConcurrentDictionary<Type, Delegate>> Compiled = new();
+
+    private static Func<T, object?> Boxed<T>(LambdaExpression key) =>
+        (Func<T, object?>)Compiled.GetValue(key, static _ => new System.Collections.Concurrent.ConcurrentDictionary<Type, Delegate>())
+            .GetOrAdd(typeof(T), static (_, key) => Compile<T>(key), key);
+
+    private static Func<T, object?> Compile<T>(LambdaExpression key)
     {
         var parameter = Expression.Parameter(typeof(T), "row");
         var body = new Rebind(key.Parameters[0], parameter.Type == key.Parameters[0].Type

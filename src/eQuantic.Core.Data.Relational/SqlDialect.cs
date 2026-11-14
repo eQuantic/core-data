@@ -74,6 +74,26 @@ public abstract class SqlDialect
               $"ELSE {(nulls == eQuantic.Core.Data.Repository.Options.NullsOrder.First ? 1 : 0)} END, {term}";
     }
 
+    /// <summary>
+    ///     What an <c>ORDER BY</c> sorts a column by: the column itself, or, for an enum stored as its labels, the value of
+    ///     the member each label stands for (<c>CASE col WHEN 'low' THEN 1 WHEN 'medium' THEN 2 … END</c>), as C# orders the
+    ///     enum. The labels' text (MySQL, SQL Server) or the order PostgreSQL declared its enum type in would not; a null
+    ///     column stays null, so a placement of nulls applies as it does to the column.
+    /// </summary>
+    /// <param name="column">The column sorted by.</param>
+    /// <param name="quotedColumn">The column as the statement names it (quoted, qualified when it must be).</param>
+    public string SortKey(RelationalColumn column, string quotedColumn)
+    {
+        if (column.Converter is not null || NativeEnumOf(column.StoredType) is not { } native)
+        {
+            return quotedColumn;
+        }
+
+        var ranks = EnumOrder.Ranks(native.EnumType).Select(rank =>
+            $"WHEN {TextLiteral(rank.Key)} THEN {rank.Value.ToString(global::System.Globalization.CultureInfo.InvariantCulture)}");
+        return $"CASE {quotedColumn} {string.Join(" ", ranks)} END";
+    }
+
     /// <summary>The literal for an always-false predicate (an empty <c>IN</c>); some dialects have no <c>FALSE</c>.</summary>
     public virtual string FalseLiteral => "FALSE";
 

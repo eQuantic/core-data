@@ -419,4 +419,43 @@ public sealed class ModelDifferTests
 
         Assert.That(() => ModelDiffer.Compare(before, after), Throws.InvalidOperationException);
     }
+
+    // ---- search indexes ----------------------------------------------------------------------------
+
+    private static EntitySnapshot Searched(params SearchSnapshot[] search) =>
+        new(Order, "orders", [Field("Id", "id", "System.Guid"), Field("Name", "name_col")]) { Keys = ["Id"], Search = search };
+
+    [Test]
+    public void A_search_index_turned_case_insensitive_is_a_change()
+    {
+        var difference = ModelDiffer.Compare(
+            Snapshot(Searched(new SearchSnapshot("Name", "Contains")), "cassandra"),
+            Snapshot(Searched(new SearchSnapshot("Name", "Contains, case-insensitive")), "cassandra"));
+
+        var change = difference.Changes.Single();
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeSearch));
+        Assert.That((change.Member, change.From, change.To, change.Collection, change.Field),
+            Is.EqualTo(("Name", "Contains", "Contains, case-insensitive", "orders", "name_col")));
+    }
+
+    [Test]
+    public void A_search_index_turned_case_sensitive_again_is_a_change()
+    {
+        var difference = ModelDiffer.Compare(
+            Snapshot(Searched(new SearchSnapshot("Name", "Prefix, case-insensitive")), "cassandra"),
+            Snapshot(Searched(new SearchSnapshot("Name", "Prefix")), "cassandra"));
+
+        Assert.That(difference.Changes.Single().Kind, Is.EqualTo(ModelChangeKind.ChangeSearch));
+    }
+
+    [Test]
+    public void A_search_index_declared_or_dropped_is_a_change_and_an_unchanged_one_is_not()
+    {
+        var plain = Snapshot(Searched(), "cassandra");
+        var searched = Snapshot(Searched(new SearchSnapshot("Name", "Contains")), "cassandra");
+
+        Assert.That(ModelDiffer.Compare(plain, searched).Changes.Single().From, Is.Null);
+        Assert.That(ModelDiffer.Compare(searched, plain).Changes.Single().To, Is.Null);
+        Assert.That(ModelDiffer.Compare(searched, searched).IsEmpty, Is.True);
+    }
 }

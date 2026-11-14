@@ -232,6 +232,14 @@ public static class MigrationWriter
                 decisions.Add(MigrationDecisions.KeyGeneration(provider, entityType, change));
                 break;
 
+            case ModelChangeKind.ChangeSearch:
+                if (MigrationDecisions.Search(provider, entityType, change) is { } search)
+                {
+                    decisions.Add(search);
+                }
+
+                break;
+
             case ModelChangeKind.DropCollection:
             default:
                 break;
@@ -270,6 +278,5 @@ public static class MigrationWriter
     private static string Escape(string value) =>
         value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
-    private static string Literal(string value) =>
-        "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    private static string Literal(string value) => CSharpLiteral.Render(value)!;
 }
