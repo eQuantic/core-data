@@ -38,6 +38,7 @@ repository only to add domain-specific query methods.
 |---|---|
 | `IUnitOfWork` | `Commit`/`CommitAsync`, `RollbackChanges`, repository factories |
 | `IQueryableUnitOfWork` | The provider-backed unit of work repositories are built over |
+| `ILockingUnitOfWork` | `AcquireLockAsync(name, timeout)` — a named lock, held until its handle is disposed or, inside a transaction, until the transaction ends; every provider, each through its own mechanism — see [Named locks](../writing/locks.md) |
 
 Writes **stage** on the unit of work and flush on `Commit` — see
 [The lean write model](write-model.md). One unit of work per scope (per request in a web app) is

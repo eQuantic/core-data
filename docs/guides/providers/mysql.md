@@ -15,6 +15,10 @@ truth lives.
 ## Capabilities
 
 - Atomic batched commit in a transaction, identity readback.
+- Named locks through `GET_LOCK`, a **session** lock no transaction releases: inside a transaction the
+  engine releases it right after the commit or rollback, outside one on dispose. Lock names are
+  **server-wide**, and MySQL rounds its wait to whole seconds (MariaDB does not) — see
+  [Named locks](../writing/locks.md).
 - Concurrency tokens, composite keys, facets (`varchar(n)`, `decimal(p,s)`), converters,
   navigations/includes, GROUP BY/HAVING, UNION/UNION ALL — the full
   [relational engine surface](../concepts/contracts.md).

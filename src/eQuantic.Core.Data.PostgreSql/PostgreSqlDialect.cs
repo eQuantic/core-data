@@ -22,6 +22,9 @@ public sealed class PostgreSqlDialect : SqlDialect
     public override string System => "postgresql";
 
     /// <inheritdoc />
+    public override SqlNamedLocks NamedLocks => PostgreSqlNamedLocks.Instance;
+
+    /// <inheritdoc />
     public override string Quote(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 
     /// <inheritdoc />

@@ -51,7 +51,8 @@ internal static class AddMigrationCommand
         }
 
         Directory.CreateDirectory(directory);
-        File.WriteAllText(migrationPath, MigrationWriter.Write(difference, options.Name, namespaceName, stamp));
+        var migration = MigrationWriter.Write(difference, options.Name, namespaceName, stamp);
+        File.WriteAllText(migrationPath, migration);
         File.WriteAllText(Path.Combine(directory, "DataModelSnapshot.g.cs"),
             ModelSnapshotWriter.Write(current, namespaceName));
 
@@ -61,8 +62,11 @@ internal static class AddMigrationCommand
 
         Summarize(difference);
 
-        var decisions = difference.Changes.Count(change => change.NeedsValue) +
-                        difference.Changes.Count(change => change.AmbiguousRenameHint is not null);
+        // Counted from the file itself: every decision it hands back is one #error line, whatever raised it — a
+        // missing value, an undeclared rename, a dropped collection, a conversion no store performs faithfully.
+        var decisions = migration
+            .Split('\n')
+            .Count(line => line.StartsWith("#error ", StringComparison.Ordinal));
 
         if (decisions > 0)
         {
@@ -101,6 +105,12 @@ internal static class AddMigrationCommand
         ModelChangeKind.RenameField => $"rename {change.From} to {change.To}",
         ModelChangeKind.ConvertField => $"convert {change.Member} from {change.From} to {change.To}",
         ModelChangeKind.ChangeFacets => $"resize {change.Member} from {change.From} to {change.To}",
+        ModelChangeKind.ChangeGeneration =>
+            $"store-generated {change.Member}: {change.From ?? "written by the application"} to " +
+            $"{change.To ?? "written by the application"} — needs a step",
+        ModelChangeKind.ChangeLabels => $"relabel {change.Member} from ({change.From}) to ({change.To})",
+        ModelChangeKind.ChangeKeyGeneration =>
+            $"key {change.Member}: {(change.To is null ? "given by the application" : "numbered by the store")} — needs a step",
         _ => change.Kind.ToString(),
     };
 

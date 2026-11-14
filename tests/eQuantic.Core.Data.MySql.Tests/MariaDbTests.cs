@@ -1,3 +1,4 @@
+using eQuantic.Core.Data.Evolution;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.MySql.Extensions;
 using eQuantic.Core.Data.MySql.Repository;
@@ -227,6 +228,34 @@ public sealed class MariaDbTests
         Assert.That(first.Number, Is.GreaterThan(0L), "the sequence object numbered it");
         Assert.That(first.IssuedAt, Is.Not.EqualTo(default(DateTime)));
         Assert.That((await repo.GetAsync(second.Id))!.Number, Is.EqualTo(second.Number), "each value went to its own member");
+    }
+
+    [Test]
+    public async Task A_schema_the_engine_created_reports_no_drift()
+    {
+        // Receipt's table is created the same way as below, and creating it again changes nothing, so the order the
+        // tests run in does not matter.
+        await _scope!.ServiceProvider.GetRequiredService<IMigrationExecutor>()
+            .ApplyAsync([new EnsureCollectionOperation(typeof(Receipt))]);
+        var source = _scope.ServiceProvider.GetRequiredService<IDatabaseSnapshotSource>();
+
+        var report = DriftComparer.Compare(source.Expect(), await source.ObserveAsync());
+
+        Assert.That(report.Findings, Is.Empty,
+            "labels in an ENUM, JSON as LONGTEXT, a sequence's default and the clock's must read as the dialect wrote them");
+    }
+
+    [Test]
+    public async Task Members_added_as_store_generated_are_filled_in_the_rows_already_there()
+    {
+        // A table of its own in the fixture's database, which the shared model does not map. As root: MariaDB 10.10
+        // refuses the ALTER that fills a column defaulting to a sequence's next value ("ALTER command denied … for
+        // table stamps_number_seq") to a user holding ALL PRIVILEGES on the database, and runs it for root.
+        var root = new MySqlConnector.MySqlConnectionStringBuilder(_container!.GetConnectionString()) { UserID = "root" }
+            .ConnectionString;
+        var services = new ServiceCollection();
+        services.AddMariaDbDatabase(root, StoreGeneratedAdditionScenario.Configure);
+        await StoreGeneratedAdditionScenario.RunAsync(root, services);
     }
 
     private ShapeStore Shapes => new(type => _scope!.ServiceProvider.GetRequiredService(type), Commit, _commands);

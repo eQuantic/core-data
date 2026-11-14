@@ -70,6 +70,7 @@ public static class CosmosServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(TUnitOfWork), typeof(TUnitOfWork), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(ILockingUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
 
         services.TryAdd(new ServiceDescriptor(typeof(IRepository<,>), typeof(CosmosRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<,>), typeof(CosmosRepository<,>), lifetime));

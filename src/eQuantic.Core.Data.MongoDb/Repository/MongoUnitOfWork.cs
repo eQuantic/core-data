@@ -19,7 +19,7 @@ namespace eQuantic.Core.Data.MongoDb.Repository;
 ///     Explicit multi-document transactions are a separate concern: open one with
 ///     <see cref="BeginTransactionAsync" /> and the commit flushes inside it.
 /// </summary>
-public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
+public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly IMongoClient Client;
@@ -477,6 +477,8 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         {
             await _session.CommitTransactionAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     /// <summary>Aborts the active transaction and discards staged writes.</summary>
@@ -488,6 +490,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         }
 
         RollbackChanges();
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------- repositories / sets
@@ -553,6 +556,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
         if (disposing)
         {
+            ReleaseNamedLocks();
             _session?.Dispose();
         }
 

@@ -91,5 +91,6 @@ The same message discipline as queries: what, why, and the way out.
 
 Everything above is the authoring surface, and it stays the surface: the `eqdata` tool compares your
 model against a snapshot committed beside it and writes one of these classes, which you then read and
-edit. It also checks a live database for having stopped matching the model — the one question the
+edit. What it cannot write faithfully — an enum switched between its numbers and its labels, a member
+that becomes store-generated — it hands back as a decision the build refuses until you write the step. It also checks a live database for having stopped matching the model — the one question the
 migration history cannot answer. See [Generating and drift checking](tooling.md).

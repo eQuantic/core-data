@@ -341,6 +341,12 @@ public abstract class SqlDialect
     /// <summary>The clause appended to a <c>SELECT</c> that locks the rows it reads until the transaction ends.</summary>
     public virtual string ForUpdateClause => " FOR UPDATE";
 
+    /// <summary>
+    ///     How this engine takes a named lock (<c>ILockingUnitOfWork.AcquireLockAsync</c>), or <c>null</c> when it has
+    ///     no lock of its own: the unit of work then refuses, rather than imitate one with a table.
+    /// </summary>
+    public virtual SqlNamedLocks? NamedLocks => null;
+
     /// <summary>The DDL adding a column to an existing table (added nullable, matching create-table semantics).</summary>
     /// <param name="quotedTable">The quoted table.</param>
     /// <param name="quotedColumn">The quoted column.</param>

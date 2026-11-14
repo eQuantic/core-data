@@ -15,6 +15,13 @@ internal interface IMongoStoredValueSerializer
     string Describe();
 }
 
+/// <summary>A serializer that stores an enum as its labels: which enum, for the model snapshot.</summary>
+internal interface IMongoEnumLabelSerializer
+{
+    /// <summary>The enum it stores as labels.</summary>
+    Type EnumType { get; }
+}
+
 /// <summary>
 ///     Stores an enum declared stored as its labels (<see cref="EnumTypeAttribute" />, or <c>Enum&lt;TEnum&gt;()</c> on
 ///     the model builder) as a BSON string: each member's <c>[StoredAs]</c> label, or its own name. Filters, sorts and
@@ -22,9 +29,12 @@ internal interface IMongoStoredValueSerializer
 ///     that holds anything other than a label fails loudly, naming the enum.
 /// </summary>
 /// <typeparam name="TEnum">The enum.</typeparam>
-internal sealed class MongoEnumLabelSerializer<TEnum> : StructSerializerBase<TEnum>, IMongoStoredValueSerializer
+internal sealed class MongoEnumLabelSerializer<TEnum> : StructSerializerBase<TEnum>, IMongoStoredValueSerializer,
+    IMongoEnumLabelSerializer
     where TEnum : struct, Enum
 {
+    public Type EnumType => typeof(TEnum);
+
     public override TEnum Deserialize(BsonDeserializationContext context, BsonDeserializationArgs args)
     {
         var reader = context.Reader;

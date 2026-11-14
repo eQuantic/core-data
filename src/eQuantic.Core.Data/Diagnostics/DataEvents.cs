@@ -32,4 +32,7 @@ public static class DataEvents
 
     /// <summary>An optimistic-concurrency commit lost its race (nothing was applied). Warning.</summary>
     public static readonly EventId ConcurrencyConflict = new(10301, nameof(ConcurrencyConflict));
+
+    /// <summary>A named lock could not be released explicitly (the store frees it when its session ends or its lease runs out). Warning.</summary>
+    public static readonly EventId LockReleaseFailed = new(10401, nameof(LockReleaseFailed));
 }

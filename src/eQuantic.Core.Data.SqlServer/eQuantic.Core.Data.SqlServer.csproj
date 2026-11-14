@@ -27,6 +27,8 @@
     <ItemGroup>
         
         <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.2" />
+        <!-- SqlClient 6.0.2 brings System.Security.Cryptography.Pkcs 9.0.4 (GHSA-846f-f764-76mx); the patched one wins. -->
+        <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     </ItemGroup>
 

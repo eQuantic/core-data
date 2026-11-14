@@ -12,6 +12,7 @@ the shared relational engine exercises all of it.
 | Search | `[SearchIndex]` → **GIN trigram** (`pg_trgm`): `Contains`/`EndsWith` stop scanning |
 | Indexes | filtered (partial) with typed predicates, GIN, composite with directions, unique |
 | Concurrency | versioned token (`int`/`long`/`Guid`) — see [Concurrency](../writing/concurrency.md) |
+| Named locks | advisory locks on a SHA-256-derived `bigint`: `pg_try_advisory_xact_lock` inside a transaction (the commit or rollback releases it), `pg_try_advisory_lock` on a pinned session outside one; polled, so a wait never aborts the transaction — see [Named locks](../writing/locks.md) |
 | Composite keys | `Key(x => new { … })`, tuple point-lookups, composite `PRIMARY KEY` DDL |
 | Facets | `varchar(n)`, `numeric(p,s)` |
 | Includes | reference/collection with follow-up `IN` queries, dotted nested paths; a shaped include ranks each parent's rows with `ROW_NUMBER()` |

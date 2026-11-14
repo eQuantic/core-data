@@ -41,7 +41,7 @@ public static class RelationalServiceCollectionExtensions
 
     /// <summary>
     ///     Registers only the unit of work (concrete plus the <see cref="IUnitOfWork" />/
-    ///     <see cref="IQueryableUnitOfWork" /> facades) — AOT-safe, all concrete/closed. The base of the
+    ///     <see cref="IQueryableUnitOfWork" />/<see cref="ILockingUnitOfWork" /> facades) — AOT-safe, all concrete/closed. The base of the
     ///     NativeAOT registration path: this once, then <see cref="AddRelationalRepository{TEntity, TKey}" /> per
     ///     entity, instead of the open-generic <see cref="AddRelationalRepositories{TUnitOfWork}(IServiceCollection, ServiceLifetime)" />.
     /// </summary>
@@ -80,6 +80,7 @@ public static class RelationalServiceCollectionExtensions
     {
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(ILockingUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         return services;
     }
 

@@ -10,6 +10,7 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
 | Atomic commit | batched flush in a transaction; identity keys via `OUTPUT INSERTED` |
 | Filtered indexes | fully supported, typed predicates (`o.Filtered(x => x.Quantity > 0)`) |
 | Concurrency | versioned token — see [Concurrency](../writing/concurrency.md) |
+| Named locks | `sp_getapplock` (exclusive), owned by the transaction inside one and by a pinned session outside one, waiting on the server; result codes checked — see [Named locks](../writing/locks.md) |
 | Composite keys / facets / converters / includes | full relational engine surface |
 | Filters across relations | a correlated `EXISTS` / `NOT EXISTS` in reads, counts and set-based writes (`UPDATE … OUTPUT INSERTED` included) — see [Relations and text in filters](../querying/predicates.md) |
 | Text ignoring case | `LOWER(col) = LOWER(@p)` and `LOWER(col) LIKE LOWER(@p) ESCAPE '!'`, with `%`, `_` **and `[`** escaped (SQL Server's `LIKE` reads `[` as a character class) |

@@ -18,7 +18,7 @@ namespace eQuantic.Core.Data.Relational.Repository;
 ///     transaction (<see cref="BeginTransactionAsync" />) spans multiple commits: each commit flushes into it —
 ///     visible to this unit of work's own reads — and <see cref="CommitTransactionAsync" /> makes it durable.
 /// </summary>
-public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
+public abstract partial class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly DbDataSource DataSource;
@@ -622,6 +622,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
         await _transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         await _transaction.DisposeAsync().ConfigureAwait(false);
         _transaction = null;
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     /// <summary>Rolls the transaction back and discards staged writes.</summary>
@@ -634,6 +635,8 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
             await _transaction.DisposeAsync().ConfigureAwait(false);
             _transaction = null;
         }
+
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------- repositories / sets
@@ -840,6 +843,7 @@ public abstract class RelationalUnitOfWork : IQueryableUnitOfWork, IUnionQueryRu
 
         if (disposing)
         {
+            ReleaseNamedLocks();
             _transaction?.Dispose();
             _connection?.Dispose();
         }
