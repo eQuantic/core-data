@@ -11,8 +11,9 @@ namespace eQuantic.Core.Data.Cassandra.Repository;
 ///     The native Apache Cassandra unit of work. Entity writes (a Cassandra <c>INSERT</c> is an upsert, so
 ///     <c>Add</c>/<c>Modify</c>/<c>Merge</c> all map to it, plus <c>Remove</c>) are buffered as CQL statements and
 ///     flushed on <see cref="CommitAsync(System.Threading.CancellationToken)" /> — executed concurrently, no change
-///     tracking. An explicit transaction defers its writes and runs them as one atomic <c>LOGGED BATCH</c> on
-///     <see cref="CommitTransactionAsync" />.
+///     tracking; the lightweight transactions among them (a concurrency token's writes) run one at a time per partition,
+///     pinned to the session's serial consistency (<see cref="CassandraLightweightTransactions" />). An explicit
+///     transaction defers its writes and runs them as one atomic <c>LOGGED BATCH</c> on <see cref="CommitTransactionAsync" />.
 /// </summary>
 public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
 {
@@ -94,7 +95,7 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
             return;
         }
 
-        GuardCounters<TEntity>(configuration);
+        GuardCounters(typeof(TEntity), configuration);
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         _pending.Add(new PendingStatement(() => CassandraMapper.BuildInsert(configuration, item), false)
@@ -105,15 +106,18 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
     }
 
     /// <summary>
-    ///     Inserts the item only if no row with its primary key exists (<c>INSERT … IF NOT EXISTS</c>), at once, with
-    ///     what the store assigns its store-generated columns, read back when the insert applied.
+    ///     Inserts each item only if no row with its primary key exists (<c>INSERT … IF NOT EXISTS</c>), at once, and answers
+    ///     which applied, in order. Every number the items' sequences hand out is reserved first, in one compare-and-set per
+    ///     sequence (an item that does not apply leaves its number unused: a gap, never a repeat). The inserts are lightweight
+    ///     transactions, run one at a time per partition; an applied one's clock columns are read back at the serial
+    ///     consistency it ran at. A transaction that times out under contention is settled by a serial read of its row: the
+    ///     row the item wrote means it applied, another row means the key was taken, and no row means it is tried again.
     /// </summary>
-    internal async Task<bool> InsertIfNotExistsAsync<TEntity>(TEntity item) where TEntity : class
+    internal async Task<bool[]> InsertIfNotExistsAsync<TEntity>(IReadOnlyList<TEntity> items) where TEntity : class
     {
         var configuration = Configuration<TEntity>();
-        GuardCounters<TEntity>(configuration);
-
-        var statement = new PendingStatement(() =>
+        GuardCounters(typeof(TEntity), configuration);
+        var inserts = items.Select(item => (Item: item, Statement: new PendingStatement(() =>
         {
             var (cql, values) = CassandraMapper.BuildInsert(configuration, item);
             return (cql + " IF NOT EXISTS", values);
@@ -121,26 +125,62 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
         {
             Generating = configuration.StoreGenerated.Count > 0 ? item : null,
             Configuration = configuration,
-        };
+            Partition = CassandraMapper.PartitionText(configuration, item),
+        })).ToList();
 
-        await AssignSequencesAsync([statement]).ConfigureAwait(false);
-        var (insert, parameters) = statement.Build();
-        var rows = await CassandraStatements.ExecuteAsync(Session, insert, parameters, null, CommandLogger, SensitiveLogging).ConfigureAwait(false);
-        var applied = rows.First().GetValue<bool>("[applied]");
-        if (applied)
+        await AssignSequencesAsync(inserts.Select(insert => insert.Statement).ToList()).ConfigureAwait(false);
+        return await CassandraLightweightTransactions.PerPartitionAsync(inserts, insert => insert.Statement.Partition!, async insert =>
         {
-            await ReadBackAsync([statement], null).ConfigureAwait(false);
-        }
+            for (var attempt = 1; ; attempt++)
+            {
+                var (cql, values) = insert.Statement.Build();
+                try
+                {
+                    var rows = await CassandraStatements.ExecuteConditionalAsync(Session, cql, values, null, CommandLogger, SensitiveLogging)
+                        .ConfigureAwait(false);
+                    var applied = rows.First().GetValue<bool>("[applied]");
+                    if (applied)
+                    {
+                        await ReadBackAsync(insert.Statement, null).ConfigureAwait(false);
+                    }
 
-        return applied;
+                    return applied;
+                }
+                catch (Exception exception) when (CassandraLightweightTransactions.IsTimedOut(exception) && attempt < SettleAttempts)
+                {
+                    // Its outcome unknown: the serial read settles it. The row this insert wrote is the item's (its own
+                    // values), and then it applied; another row took the key; no row means it did not apply, and it runs again.
+                    var (read, keyValues) = CassandraMapper.BuildRead(configuration, insert.Item);
+                    var row = (await CassandraStatements.ExecuteSerialAsync(Session, read, keyValues, CommandLogger, SensitiveLogging)
+                        .ConfigureAwait(false)).FirstOrDefault();
+                    if (row is not null)
+                    {
+                        if (!CassandraMapper.HoldsInsert(configuration, CassandraMapper.Materialize<TEntity>(configuration, row), insert.Item))
+                        {
+                            return false;
+                        }
+
+                        CassandraMapper.AssignReadBack(configuration, insert.Item, row);
+                        return true;
+                    }
+
+                    await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
+                }
+            }
+        }).ConfigureAwait(false);
     }
 
-    private static void GuardCounters<TEntity>(CassandraEntityConfiguration configuration)
+    private const int SettleAttempts = 50;
+
+    /// <summary>Refuses an insert into a counter table: Cassandra writes a counter only by increments, never by an insert.</summary>
+    /// <param name="entityType">The entity.</param>
+    /// <param name="configuration">Its mapping.</param>
+    internal static void GuardCounters(Type entityType, CassandraEntityConfiguration configuration)
     {
         if (configuration.CounterColumns.Count > 0)
         {
             throw new NotSupportedException(
-                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through " +
+                $"'{entityType.Name}' maps counter columns; a counter table has no inserts — mutate it through " +
                 "UpdateMany increments (x => new ... { N = x.N + n }).");
         }
     }
@@ -148,12 +188,7 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
     internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
     {
         var configuration = Configuration<TEntity>();
-        if (configuration.CounterColumns.Count > 0)
-        {
-            throw new NotSupportedException(
-                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through " +
-                "UpdateMany increments (x => new ... { N = x.N + n }).");
-        }
+        GuardCounters(typeof(TEntity), configuration);
 
         // Cassandra writes are upserts, so both stamps apply: CreatedAt only when unset, UpdatedAt always.
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
@@ -174,12 +209,16 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
                 {
                     Generating = item,
                     Configuration = configuration,
+                    Partition = CassandraMapper.PartitionText(configuration, item),
                 });
                 return;
             }
 
             var conditional = CassandraMapper.BuildConditionalUpsert(configuration, item);
-            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, true));
+            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, true)
+            {
+                Partition = CassandraMapper.PartitionText(configuration, item),
+            });
             return;
         }
 
@@ -201,7 +240,10 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
         {
             GuardConditionalInTransaction<TEntity>();
             var conditional = CassandraMapper.BuildConditionalDelete(configuration, item);
-            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, conditional.Cql.Contains(" IF ", StringComparison.Ordinal)));
+            _pending.Add(new PendingStatement(conditional.Cql, conditional.Values, conditional.Cql.Contains(" IF ", StringComparison.Ordinal))
+            {
+                Partition = CassandraMapper.PartitionText(configuration, item),
+            });
             return;
         }
 
@@ -274,15 +316,26 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
 
         // Each distinct CQL text (one per entity shape) is prepared once per session and bound per write; a TTL
         // applies to this flush's inserts only (deletes carry none). A conditional (LWT) write answers whether it
-        // applied — an unapplied one means another writer won since the entity was read.
-        var results = await Task.WhenAll(statements.Select(async statement =>
+        // applied — an unapplied one means another writer won since the entity was read. The plain writes run all at
+        // once; the conditional ones one at a time per partition, so no two of them contend in one partition's Paxos.
+        async Task<int> ExecuteAsync(PendingStatement statement)
         {
             var (cql, values) = WithTtl(statement.Build(), ttlSeconds);
-            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
-            return statement.Conditional && rows.FirstOrDefault() is { } row && !row.GetValue<bool>("[applied]") ? 0 : 1;
-        })).ConfigureAwait(false);
+            if (!statement.Conditional)
+            {
+                await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
+                return 1;
+            }
 
-        var applied = results.Sum();
+            var rows = await CassandraStatements.ExecuteConditionalAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging)
+                .ConfigureAwait(false);
+            return rows.FirstOrDefault() is { } row && !row.GetValue<bool>("[applied]") ? 0 : 1;
+        }
+
+        var plain = Task.WhenAll(statements.Where(statement => !statement.Conditional).Select(ExecuteAsync));
+        var conditional = CassandraLightweightTransactions.PerPartitionAsync(statements.Where(statement => statement.Conditional).ToList(),
+            statement => statement.Partition ?? string.Empty, ExecuteAsync);
+        var applied = (await plain.ConfigureAwait(false)).Sum() + (await conditional.ConfigureAwait(false)).Sum();
         if (applied != statements.Count)
         {
             throw new ConcurrencyConflictException(statements.Count, applied);
@@ -360,7 +413,7 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
         sets.Add($"{token} = ?");
         cql = $"UPDATE {configuration.TableName} SET {string.Join(", ", sets)} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))} IF {token} = ?";
         values.Add(current);
-        _pending.Add(new PendingStatement(cql, values.ToArray(), true));
+        _pending.Add(new PendingStatement(cql, values.ToArray(), true) { Partition = CassandraMapper.PartitionText(configuration, item) });
     }
 
     private static object? Read(object entity, string member) =>
@@ -394,15 +447,27 @@ public abstract partial class CassandraUnitOfWork : IQueryableUnitOfWork
         }
     }
 
-    /// <summary>Reads each inserted row's store-generated values back by its key, onto its entity.</summary>
-    private async Task ReadBackAsync(IReadOnlyList<PendingStatement> statements, ConsistencyLevel? consistency)
+    /// <summary>Reads each inserted row's clock columns back by its key, onto its entity.</summary>
+    private Task ReadBackAsync(IReadOnlyList<PendingStatement> statements, ConsistencyLevel? consistency) =>
+        Task.WhenAll(statements.Select(statement => ReadBackAsync(statement, consistency)));
+
+    /// <summary>
+    ///     Reads an inserted row's clock columns back by its key, onto its entity (nothing when it has none: a sequence's
+    ///     number is on the entity already). A lightweight transaction's row is read at the serial consistency it ran at, so
+    ///     the read sees what the transaction committed; a plain insert's at <paramref name="consistency" />.
+    /// </summary>
+    private async Task ReadBackAsync(PendingStatement statement, ConsistencyLevel? consistency)
     {
-        await Task.WhenAll(statements.Where(statement => statement.Generating is not null).Select(async statement =>
+        if (statement.Generating is null || CassandraMapper.BuildReadBack(statement.Configuration!, statement.Generating) is not { } readBack)
         {
-            var (cql, values) = CassandraMapper.BuildReadBack(statement.Configuration!, statement.Generating!);
-            var rows = await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
-            CassandraMapper.AssignReadBack(statement.Configuration!, statement.Generating!, rows.FirstOrDefault());
-        })).ConfigureAwait(false);
+            return;
+        }
+
+        var (cql, values) = readBack;
+        var rows = statement.Conditional
+            ? await CassandraStatements.ExecuteSerialAsync(Session, cql, values, CommandLogger, SensitiveLogging).ConfigureAwait(false)
+            : await CassandraStatements.ExecuteAsync(Session, cql, values, consistency, CommandLogger, SensitiveLogging).ConfigureAwait(false);
+        CassandraMapper.AssignReadBack(statement.Configuration!, statement.Generating, rows.FirstOrDefault());
     }
 
     private static (string Cql, object?[] Values) WithTtl((string Cql, object?[] Values) statement, int? ttlSeconds) =>
@@ -566,6 +631,12 @@ internal sealed class PendingStatement
 
     /// <summary>That entity's mapping.</summary>
     public CassandraEntityConfiguration? Configuration { get; init; }
+
+    /// <summary>
+    ///     The partition a lightweight transaction writes, as text (<see cref="CassandraMapper.PartitionText(CassandraEntityConfiguration, object)" />): the commit
+    ///     runs a partition's transactions one at a time.
+    /// </summary>
+    public string? Partition { get; init; }
 }
 
 /// <summary>The strongly-typed unit of work a consumer derives for its keyspace.</summary>

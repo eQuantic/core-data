@@ -11,6 +11,34 @@ namespace eQuantic.Core.Data.Cassandra;
 /// </summary>
 internal static class CassandraCqlRenderer
 {
+    /// <summary>
+    ///     How many keys one statement's <c>IN</c> binds when the provider can split it: a longer list runs as one statement
+    ///     per chunk. One <c>IN</c> over many partitions makes one coordinator fetch them all, and a statement binds at most
+    ///     <see cref="CassandraStatements.MaxValues" /> values: a key list the provider read (a relation's keys, an include's
+    ///     parents) has no bound of its own.
+    /// </summary>
+    public const int InChunkSize = 100;
+
+    /// <summary>
+    ///     Whether the filter is an <c>IN</c> this renderer pushes down (on a primary-key column, no <c>null</c> among its
+    ///     values) that holds more keys than one chunk.
+    /// </summary>
+    public static bool IsChunkable(CassandraEntityConfiguration configuration, QueryFilter filter) =>
+        filter is InFilter { Values.Count: > InChunkSize } inFilter
+        && inFilter.Values.All(value => value is not null)
+        && configuration.Columns.Any(column => CassandraEntityConfiguration.Same(column.Member, inFilter.Member))
+        && configuration.IsKey(configuration.ColumnFor(inFilter.Member));
+
+    /// <summary>The <c>IN</c> rendered in chunks of <see cref="InChunkSize" /> keys, each clause with its stored values.</summary>
+    public static IReadOnlyList<(string Cql, object?[] Values)> InChunks(CassandraEntityConfiguration configuration, InFilter filter)
+    {
+        var column = Column(configuration, filter.Member);
+        return filter.Values.Chunk(InChunkSize)
+            .Select(chunk => ($"{column} IN ({string.Join(", ", chunk.Select(_ => "?"))})",
+                chunk.Select(value => Stored(configuration, column, value)).ToArray()))
+            .ToList();
+    }
+
     public static (string Cql, object?[] Values, bool RequiresAllowFiltering) Render(CassandraEntityConfiguration configuration, QueryFilter filter)
     {
         var clauses = new List<string>();

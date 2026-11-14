@@ -72,10 +72,10 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     public long DeleteMany(Expression<Func<TEntity, bool>> filter) => DeleteManyAsync(filter).GetAwaiter().GetResult();
 
     /// <remarks>
-    ///     A filter on the primary key alone is one <c>DELETE</c>, counting the rows it found first. A filter on other
-    ///     members too becomes a lightweight transaction per row: the rows the key finds are read, and each is deleted
-    ///     <c>IF</c> the other members still hold — the count is the deletes Cassandra applied. A soft-delete entity's
-    ///     delete stamps <c>DeletedAt</c> instead.
+    ///     A filter on the primary key alone is one <c>DELETE</c> (one per chunk of a long <c>IN</c>), counting the rows it
+    ///     found first. A filter on other members too becomes a lightweight transaction per row: the rows the key finds are
+    ///     read, and each is deleted <c>IF</c> the other members still hold — one partition's transactions one at a time — and
+    ///     the count is the deletes Cassandra applied. A soft-delete entity's delete stamps <c>DeletedAt</c> instead.
     /// </remarks>
     public async Task<long> DeleteManyAsync(Expression<Func<TEntity, bool>> filter, CancellationToken cancellationToken = default)
     {
@@ -100,9 +100,13 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 throw new NotSupportedException("Cassandra DELETE requires the partition key; it cannot filter on non-key columns.");
             }
 
-            var count = await CountAsync(split.KeyWhere, split.KeyValues, cancellationToken).ConfigureAwait(false);
-            await CassandraStatements.ExecuteAsync(_session, $"DELETE FROM {_configuration.TableName} WHERE {split.KeyWhere}",
-                split.KeyValues, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            var count = await CountAsync(split, cancellationToken).ConfigureAwait(false);
+            foreach (var (where, values) in split.KeyChunks)
+            {
+                await CassandraStatements.ExecuteAsync(_session, $"DELETE FROM {_configuration.TableName} WHERE {where}",
+                    values, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            }
+
             return count;
         }
 
@@ -112,7 +116,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         var condition = string.Join(" AND ", split.Conditions.Select(clause => clause.Cql));
         var global = _unitOfWork.GlobalFilter<TEntity>();
         var matches = (global is null ? filter : filter.AndAlso(global)).Compile();
-        var applied = await Task.WhenAll(rows.Select(async row =>
+        var applied = await PerPartitionAsync(rows, async row =>
         {
             object?[] values = [.. KeyValues(row, keys), .. split.Conditions.SelectMany(clause => clause.Values)];
             var cql = $"DELETE FROM {_configuration.TableName} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))} IF {condition}";
@@ -139,12 +143,12 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                     return 0L;
                 }
 
-                await BackoffAsync(attempt).ConfigureAwait(false);
+                await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
             }
 
             throw new InvalidOperationException(
                 $"A row of '{_configuration.TableName}' kept contending while it was being deleted; {ConditionalAttempts} attempts did not settle.");
-        })).ConfigureAwait(false);
+        }).ConfigureAwait(false);
         return applied.Sum();
     }
 
@@ -152,26 +156,28 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         UpdateManyAsync(filter, updateExpression).GetAwaiter().GetResult();
 
     /// <remarks>
-    ///     A filter on the primary key alone, with an update CQL applies in place, is one <c>UPDATE</c>, counting the rows
-    ///     it found first (Cassandra's <c>UPDATE</c> is an upsert: a row deleted in between is written again). A filter on
-    ///     other members too — or an update CQL cannot apply in place, such as <c>x.N + 1</c> on a column that is not a
-    ///     counter — becomes a lightweight transaction per row: the rows the key finds are read, and each is updated
-    ///     <c>IF</c> the other members still hold (and, for a value computed from the row, <c>IF</c> it still holds what
-    ///     was read). The count is the updates Cassandra applied.
+    ///     A filter on the primary key alone, with an update CQL applies in place, is one <c>UPDATE</c> (one per chunk of a
+    ///     long <c>IN</c>), counting the rows it found first (Cassandra's <c>UPDATE</c> is an upsert: a row deleted in between
+    ///     is written again). A filter on other members too — or an update CQL cannot apply in place, such as <c>x.N + 1</c>
+    ///     on a column that is not a counter — becomes a lightweight transaction per row: the rows the key finds are read,
+    ///     and each is updated <c>IF</c> the other members still hold (and, for a value computed from the row, <c>IF</c> it
+    ///     still holds what was read), one partition's transactions one at a time. The count is the updates Cassandra
+    ///     applied. No update assigns the primary key or a store-generated column, whichever path it takes.
     /// </remarks>
     public async Task<long> UpdateManyAsync(Expression<Func<TEntity, bool>> filter,
         Expression<Func<TEntity, TEntity>> updateExpression, CancellationToken cancellationToken = default)
     {
+        var assignments = Assignments(updateExpression);
+        GuardAssignments(assignments, "An update");
         var prepared = await PrepareAsync(filter, "UPDATE", cancellationToken).ConfigureAwait(false);
         if (prepared.RowTests.Count > 0)
         {
-            return (await UpdateConditionallyAsync(prepared.Split!, prepared.Filter, Assignments(updateExpression), cancellationToken,
+            return (await UpdateConditionallyAsync(prepared.Split!, prepared.Filter, assignments, cancellationToken,
                 prepared).ConfigureAwait(false)).Count;
         }
 
         filter = prepared.Filter;
         var split = CassandraConditions.Split(_configuration, filter, _unitOfWork.GlobalFilter<TEntity>());
-        var assignments = Assignments(updateExpression);
         if (split.Conditions.Count == 0 && !NeedsReadOfRow(assignments))
         {
             if (split.KeyWhere.Length == 0)
@@ -193,10 +199,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 return keyed.Count;
             }
 
-            var count = await CountAsync(split.KeyWhere, split.KeyValues, cancellationToken).ConfigureAwait(false);
-            await CassandraStatements.ExecuteAsync(_session,
-                $"UPDATE {_configuration.TableName} SET {set} WHERE {split.KeyWhere}", setValues.Concat(split.KeyValues).ToArray(), null,
-                _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            var count = await CountAsync(split, cancellationToken).ConfigureAwait(false);
+            foreach (var (where, values) in split.KeyChunks)
+            {
+                await CassandraStatements.ExecuteAsync(_session,
+                    $"UPDATE {_configuration.TableName} SET {set} WHERE {where}", [.. setValues, .. values], null,
+                    _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+            }
+
             return count;
         }
 
@@ -220,31 +230,84 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     }
 
     /// <summary>
-    ///     A set-based write's filter prepared: normalized, and each test across a relation resolved into the related keys
-    ///     (read first; a write carries no opt-ins, so the related read has to be one the table serves natively). A resolved
-    ///     test the key restriction or a lightweight transaction's <c>IF</c> can hold (an <c>IN</c> on the key) stays in the
-    ///     filter, and the write finds its rows by it as by any other. One they cannot hold — a negated relation, a
-    ///     <c>NOT IN</c> — is a <b>row test</b>: the rows the rest of the filter finds (under the write's partition) are read, a
-    ///     row whose key the related read returned is left out, and each other row is written by its full key in a lightweight
-    ///     transaction that also holds every column the test read at the value read.
+    ///     A set-based write's filter prepared: normalized, and each test across a relation resolved into the related keys,
+    ///     read first. A write carries no opt-ins, so each related read is partition-scoped or refused: by the relation's own
+    ///     condition (<c>x.Repo.WorkspaceId == w</c> reads the repositories of one workspace's partition), or — when the rest
+    ///     of the filter names the write's partition — by the rows the write finds: the related table is read for their keys
+    ///     by its partition key, in chunks (<c>x.Space == s &amp;&amp; !x.Runs.Any()</c> reads the runs of the items of space
+    ///     <c>s</c>). Any other related read would read a whole table. A resolved test the key restriction or a lightweight
+    ///     transaction's <c>IF</c> can hold (an <c>IN</c> on the key) stays in the filter, and the write finds its rows by it
+    ///     as by any other. One they cannot hold — a negated relation, a <c>NOT IN</c> — is a <b>row test</b>: the rows the
+    ///     rest of the filter finds (under the write's partition) are read, a row whose key the related read returned is left
+    ///     out, and each other row is written by its full key in a lightweight transaction that also holds every column the
+    ///     test read at the value read. A negated test resolved for the rows the write found holds only for those rows: one
+    ///     the write meets later (inserted in between) is left alone, since its related rows were never read.
     /// </summary>
     private async Task<PreparedWrite> PrepareAsync(Expression<Func<TEntity, bool>> filter, string statement, CancellationToken cancellationToken)
     {
         var normalized = PredicateNormalizer.Normalize(filter);
         var parameter = normalized.Parameters[0];
         var navigations = CassandraPredicates.Navigations(_unitOfWork);
-        var pushed = new List<Expression>();
-        var rowTests = new List<Expression>();
+        var plain = new List<Expression>();
+        var crossing = new List<Expression>();
         foreach (var conjunct in Conjuncts(normalized.Body))
         {
             var lambda = Expression.Lambda<Func<TEntity, bool>>(conjunct, parameter);
-            if (RelationPredicates.Find(lambda, navigations).Count == 0)
+            (RelationPredicates.Find(lambda, navigations).Count == 0 ? plain : crossing).Add(conjunct);
+        }
+
+        if (crossing.Count == 0)
+        {
+            return new PreparedWrite(Expression.Lambda<Func<TEntity, bool>>(plain.Aggregate(Expression.AndAlso), parameter), null, [], []);
+        }
+
+        // The rows the rest of the filter finds, read once and only when a relation's read needs them as its scope.
+        IReadOnlyList<global::Cassandra.Row>? candidates = null;
+        async Task<IReadOnlyList<global::Cassandra.Row>?> CandidatesAsync()
+        {
+            if (candidates is not null || plain.Count == 0)
             {
-                pushed.Add(conjunct);
-                continue;
+                return candidates;
             }
 
-            var resolved = await CassandraPredicates.ResolveAsync(lambda, _unitOfWork, null, cancellationToken).ConfigureAwait(false);
+            var split = CassandraConditions.Split(_configuration,
+                Expression.Lambda<Func<TEntity, bool>>(plain.Aggregate(Expression.AndAlso), parameter), _unitOfWork.GlobalFilter<TEntity>());
+            return split.PinsPartition ? candidates = await KeyedRowsAsync(split, cancellationToken).ConfigureAwait(false) : null;
+        }
+
+        var held = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scopeTests = new List<Func<TEntity, bool>>();
+        async Task<IReadOnlyCollection<object?>?> ScopeAsync(RelationPredicate relation)
+        {
+            if (relation.Navigation.Owner != typeof(TEntity) || await CandidatesAsync().ConfigureAwait(false) is not { } rows)
+            {
+                return null;
+            }
+
+            var ownerKey = relation.Navigation.OwnerKey;
+            var scope = rows.Select(row => ownerKey.GetValue(CassandraMapper.Materialize<TEntity>(_configuration, row)))
+                .Where(value => value is not null).Distinct().ToList();
+            if (relation.Negated)
+            {
+                // No related row among the ones read for these keys says nothing of a key outside them.
+                var known = new HashSet<string>(scope.Select(KeyText), StringComparer.Ordinal);
+                scopeTests.Add(entity => ownerKey.GetValue(entity) is not { } value || known.Contains(KeyText(value)));
+                var column = _configuration.ColumnFor(ownerKey.Name);
+                if (!_configuration.IsKey(column) && _configuration.Column(column) is not null)
+                {
+                    held.Add(column);
+                }
+            }
+
+            return scope;
+        }
+
+        var pushed = new List<Expression>(plain);
+        var rowTests = new List<Expression>();
+        foreach (var conjunct in crossing)
+        {
+            var resolved = await CassandraPredicates.ResolveForWriteAsync(Expression.Lambda<Func<TEntity, bool>>(conjunct, parameter),
+                _unitOfWork, ScopeAsync, cancellationToken).ConfigureAwait(false);
             (Splits(resolved) ? pushed : rowTests).Add(resolved.Body);
         }
 
@@ -261,10 +324,9 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 "leaves rows out of the ones the rest of the filter finds, so the filter has to name the partition key too.");
         }
 
-        var split = CassandraConditions.Split(_configuration,
+        var keyed = CassandraConditions.Split(_configuration,
             Expression.Lambda<Func<TEntity, bool>>(pushed.Aggregate(Expression.AndAlso), parameter), _unitOfWork.GlobalFilter<TEntity>());
-        RequireConditionalWrite(split, statement);
-        var held = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        RequireConditionalWrite(keyed, statement);
         new ColumnReader(parameter, member =>
         {
             var column = _configuration.ColumnFor(member);
@@ -273,9 +335,12 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 held.Add(column);
             }
         }).Visit(Expression.Lambda(rowTests.Aggregate(Expression.AndAlso), parameter));
-        return new PreparedWrite(whole, split,
-            rowTests.Select(test => Expression.Lambda<Func<TEntity, bool>>(test, parameter).Compile()).ToList(), held.ToList());
+        return new PreparedWrite(whole, keyed,
+            [.. rowTests.Select(test => Expression.Lambda<Func<TEntity, bool>>(test, parameter).Compile()), .. scopeTests], held.ToList());
     }
+
+    /// <summary>A key compared by its text, whatever its CLR type.</summary>
+    private static string KeyText(object? value) => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
 
     private bool Splits(Expression<Func<TEntity, bool>> filter)
     {
@@ -326,7 +391,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         var global = _unitOfWork.GlobalFilter<TEntity>();
         var matches = (global is null ? prepared.Filter : prepared.Filter.AndAlso(global)).Compile();
         var rows = await KeyedRowsAsync(split, cancellationToken).ConfigureAwait(false);
-        var deleted = await Task.WhenAll(rows.Select(async row =>
+        var deleted = await PerPartitionAsync(rows, async row =>
         {
             for (var attempt = 1; attempt <= ConditionalAttempts; attempt++)
             {
@@ -361,12 +426,12 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 }
 
                 row = fresh;
-                await BackoffAsync(attempt).ConfigureAwait(false);
+                await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
             }
 
             throw new InvalidOperationException(
                 $"A row of '{_configuration.TableName}' kept changing while it was being deleted; {ConditionalAttempts} attempts did not settle.");
-        })).ConfigureAwait(false);
+        }).ConfigureAwait(false);
         return deleted.Sum();
     }
 
@@ -413,23 +478,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         Expression<Func<TEntity, bool>> filter, IReadOnlyList<UpdateAssignment> assignments, CancellationToken cancellationToken,
         PreparedWrite? prepared = null)
     {
+        GuardAssignments(assignments, "An update");
         RequireConditionalWrite(split, "UPDATE");
-        foreach (var assignment in assignments)
-        {
-            var column = _configuration.ColumnFor(assignment.Name);
-            if (_configuration.IsKey(column) || _configuration.IsStoreGenerated(column))
-            {
-                throw new NotSupportedException(
-                    $"An update cannot assign '{assignment.Name}': the primary key identifies the row, and the store assigns a store-generated column.");
-            }
-        }
-
         var global = _unitOfWork.GlobalFilter<TEntity>();
         var matches = (global is null ? filter : filter.AndAlso(global)).Compile();
         var keys = CassandraMapper.PrimaryKey(_configuration);
         var rows = await KeyedRowsAsync(split, cancellationToken).ConfigureAwait(false);
 
-        var updated = await Task.WhenAll(rows.Select(async row =>
+        var updated = await PerPartitionAsync(rows, async row =>
         {
             for (var attempt = 1; attempt <= ConditionalAttempts; attempt++)
             {
@@ -480,34 +536,34 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                     return next;
                 }
 
-                // Not applied: the row stopped matching, went away, or changed what a value was computed from. Read it
-                // again: when it still matches, compute again; otherwise it is not this update's.
+                // Not applied, or timed out with its outcome unknown: read the row again at the serial consistency. A
+                // timed-out transaction counts only for what the read proves (see Settle). Then, when the row still matches,
+                // compute again; otherwise it is not this update's.
                 var fresh = await ReadRowAsync(row, keys).ConfigureAwait(false);
-                if (fresh is null)
+                var freshEntity = fresh is null ? null : CassandraMapper.Materialize<TEntity>(_configuration, fresh);
+                if (timeout is not null)
                 {
-                    return null;
+                    switch (Settle(freshEntity, current, next, assignments, bumpsVersion: false))
+                    {
+                        case Outcome.Applied:
+                            return next;
+                        case Outcome.Unknown:
+                            throw Unsettled(timeout);
+                    }
                 }
 
-                var freshEntity = CassandraMapper.Materialize<TEntity>(_configuration, fresh);
-                if (timeout is not null && Settled(freshEntity, next, assignments, timeout))
-                {
-                    // A timed-out transaction (its outcome unknown) that the serial read finds applied: the row holds what
-                    // this update writes. A value computed from the row is never taken for applied this way — see Settled.
-                    return next;
-                }
-
-                if (!matches(freshEntity))
+                if (fresh is null || !matches(freshEntity!))
                 {
                     return null;
                 }
 
                 row = fresh;
-                await BackoffAsync(attempt).ConfigureAwait(false);
+                await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
             }
 
             throw new InvalidOperationException(
                 $"A row of '{_configuration.TableName}' kept changing while it was being updated; {ConditionalAttempts} attempts did not settle.");
-        })).ConfigureAwait(false);
+        }).ConfigureAwait(false);
 
         return updated.Where(entity => entity is not null).Select(entity => entity!).ToList();
     }
@@ -533,35 +589,53 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     }
 
     /// <summary>
-    ///     The rows the key restriction finds, read at the serial consistency a lightweight transaction writes at — or, when
-    ///     the restriction names several partitions (Cassandra takes a serial read of one partition at a time), at the
-    ///     session's consistency: each row's own transaction still checks its condition before it writes.
+    ///     The rows the key restriction finds (a chunk of a long <c>IN</c> at a time), read at the serial consistency a
+    ///     lightweight transaction writes at — or, when the restriction names several partitions (Cassandra takes a serial
+    ///     read of one partition at a time), at the session's consistency: each row's own transaction still checks its
+    ///     condition before it writes.
     /// </summary>
     private async Task<List<global::Cassandra.Row>> KeyedRowsAsync(CassandraConditions split, CancellationToken cancellationToken)
     {
-        ConsistencyLevel? consistency = ConsistencyLevel.Serial;
-        for (var attempt = 1; ; attempt++)
+        var found = new List<global::Cassandra.Row>();
+        foreach (var (where, values) in split.KeyChunks)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
+            var serial = true;
+            for (var attempt = 1; ; attempt++)
             {
-                var rows = await CassandraStatements.ExecuteAsync(_session,
-                    $"SELECT * FROM {_configuration.TableName} WHERE {split.KeyWhere}", split.KeyValues, consistency,
-                    _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
-                return rows.ToList();
-            }
-            catch (InvalidQueryException exception) when (consistency is not null
-                                                          && exception.Message.Contains("one partition", StringComparison.OrdinalIgnoreCase))
-            {
-                consistency = null;
-            }
-            catch (Exception exception) when (exception is ReadTimeoutException or WriteTimeoutException && attempt < ConditionalAttempts)
-            {
-                // A serial read takes part in Paxos, and times out under the same contention: read again.
-                await BackoffAsync(attempt).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    var cql = $"SELECT * FROM {_configuration.TableName} WHERE {where}";
+                    var rows = serial
+                        ? await CassandraStatements.ExecuteSerialAsync(_session, cql, values, _unitOfWork.CommandLogger,
+                            _unitOfWork.SensitiveLogging).ConfigureAwait(false)
+                        : await CassandraStatements.ExecuteAsync(_session, cql, values, null, _unitOfWork.CommandLogger,
+                            _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+                    found.AddRange(rows);
+                    break;
+                }
+                catch (InvalidQueryException exception) when (serial
+                                                              && exception.Message.Contains("one partition", StringComparison.OrdinalIgnoreCase))
+                {
+                    serial = false;
+                }
+                catch (Exception exception) when (exception is ReadTimeoutException or WriteTimeoutException && attempt < ConditionalAttempts)
+                {
+                    // A serial read takes part in Paxos, and times out under the same contention: read again.
+                    await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
+                }
             }
         }
+
+        return found;
     }
+
+    /// <summary>
+    ///     Runs a lightweight transaction per row: one partition's rows one after the other, so no two of them contend in
+    ///     its Paxos, and several partitions side by side (<see cref="CassandraLightweightTransactions.PerPartitionAsync{TItem,TResult}" />).
+    /// </summary>
+    private Task<TResult[]> PerPartitionAsync<TResult>(IReadOnlyList<global::Cassandra.Row> rows, Func<global::Cassandra.Row, Task<TResult>> run) =>
+        CassandraLightweightTransactions.PerPartitionAsync(rows, row => CassandraMapper.PartitionText(_configuration, row), run);
 
     private Task<global::Cassandra.Row?> ReadRowAsync(global::Cassandra.Row row, IReadOnlyList<string> keys) =>
         ReadRowAsync(KeyValues(row, keys), keys);
@@ -581,14 +655,14 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         {
             try
             {
-                var rows = await CassandraStatements.ExecuteAsync(_session,
+                var rows = await CassandraStatements.ExecuteSerialAsync(_session,
                     $"SELECT * FROM {_configuration.TableName} WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))}",
-                    keyValues, ConsistencyLevel.Serial, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
+                    keyValues, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
                 return rows.FirstOrDefault();
             }
             catch (Exception exception) when (exception is ReadTimeoutException or WriteTimeoutException && attempt < ConditionalAttempts)
             {
-                await BackoffAsync(attempt).ConfigureAwait(false);
+                await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
             }
         }
     }
@@ -626,12 +700,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             }
         }
 
-        if (_configuration.CounterColumns.Count > 0)
-        {
-            throw new NotSupportedException(
-                $"'{typeof(TEntity).Name}' maps counter columns; a counter table has no inserts — mutate it through UpdateMany increments.");
-        }
-
+        CassandraUnitOfWork.GuardCounters(typeof(TEntity), _configuration);
         EntityLifecycle.StampForInsert(entity, _unitOfWork.Conventions, _unitOfWork.Services);
         if (_configuration.ConcurrencyColumn is { } token && Convert.ToInt64(Member(entity, _configuration.MemberFor(token)) ?? 0L) == 0)
         {
@@ -655,21 +724,21 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             global::Cassandra.Row? inserted;
             try
             {
-                inserted = (await CassandraStatements.ExecuteAsync(_session, insert + " IF NOT EXISTS", insertValues, null,
+                inserted = (await CassandraStatements.ExecuteConditionalAsync(_session, insert + " IF NOT EXISTS", insertValues, null,
                     _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false)).First();
             }
-            catch (WriteTimeoutException timeout) when (timeout.WriteType == "CAS")
+            catch (Exception exception) when (CassandraLightweightTransactions.IsTimedOut(exception))
             {
                 // Timed out under contention, its outcome unknown: a serial read settles it. The row this insert wrote is
                 // the entity's (its own values), and then the insert applied; any other row makes this the update.
                 inserted = await ReadRowAsync(entity, keys).ConfigureAwait(false);
                 if (inserted is null)
                 {
-                    await BackoffAsync(attempt).ConfigureAwait(false);
+                    await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
                     continue;
                 }
 
-                if (Inserted(CassandraMapper.Materialize<TEntity>(_configuration, inserted), entity))
+                if (CassandraMapper.HoldsInsert(_configuration, CassandraMapper.Materialize<TEntity>(_configuration, inserted), entity))
                 {
                     CassandraMapper.AssignReadBack(_configuration, entity, inserted);
                     return entity;
@@ -678,10 +747,10 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
 
             if (inserted.Length > 0 && inserted.GetColumn("[applied]") is not null && inserted.GetValue<bool>("[applied]"))
             {
-                if (_configuration.StoreGenerated.Count > 0)
+                // The clock the coordinator filled, read at the serial consistency the insert ran at.
+                if (CassandraMapper.BuildReadBack(_configuration, entity) is var (readBack, readBackValues))
                 {
-                    var (readBack, readBackValues) = CassandraMapper.BuildReadBack(_configuration, entity);
-                    var read = await CassandraStatements.ExecuteAsync(_session, readBack, readBackValues, ConsistencyLevel.Serial,
+                    var read = await CassandraStatements.ExecuteSerialAsync(_session, readBack, readBackValues,
                         _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
                     CassandraMapper.AssignReadBack(_configuration, entity, read.FirstOrDefault());
                 }
@@ -703,7 +772,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                 return written;
             }
 
-            await BackoffAsync(attempt).ConfigureAwait(false);
+            await CassandraLightweightTransactions.BackoffAsync(attempt).ConfigureAwait(false);
         }
 
         throw new InvalidOperationException(
@@ -746,15 +815,9 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
             }
         }
 
+        GuardAssignments(assignments, "An upsert's update");
         foreach (var assignment in assignments)
         {
-            var column = _configuration.ColumnFor(assignment.Name);
-            if (_configuration.IsKey(column) || _configuration.IsStoreGenerated(column))
-            {
-                throw new NotSupportedException(
-                    $"An upsert's update cannot assign '{assignment.Name}': the primary key identifies the row, and the store assigns a store-generated column.");
-            }
-
             UpdateApplication.Apply(next, assignment);
         }
 
@@ -800,14 +863,25 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
                   $"WHERE {string.Join(" AND ", keys.Select(key => $"{key} = ?"))} " +
                   (conditions.Count == 0 ? "IF EXISTS" : $"IF {string.Join(" AND ", conditions)}");
         var (applied, timeout) = await TryConditionalAsync(cql, [.. values, .. KeyValues(row, keys), .. conditionValues]).ConfigureAwait(false);
-        if (timeout is not null && await ReadRowAsync(row, keys).ConfigureAwait(false) is { } settled
-                                && Settled(CassandraMapper.Materialize<TEntity>(_configuration, settled), next, assignments, timeout))
+        if (timeout is null)
         {
-            // Timed out, and the serial read finds the row holding what this update writes.
-            return next;
+            return applied == true ? next : null;
         }
 
-        return applied == true ? next : null;
+        // Timed out, its outcome unknown: the serial read decides, as far as it proves anything (see Settle). A row that is
+        // gone sends the upsert back to its insert.
+        if (await ReadRowAsync(row, keys).ConfigureAwait(false) is not { } settled)
+        {
+            return null;
+        }
+
+        return Settle(CassandraMapper.Materialize<TEntity>(_configuration, settled), existing, next, assignments,
+                bumpsVersion: _configuration.ConcurrencyColumn is not null) switch
+            {
+                Outcome.Applied => next,
+                Outcome.NotApplied => null,
+                _ => throw Unsettled(timeout),
+            };
     }
 
     // ---------------------------------------------------------------- lightweight transactions under contention
@@ -821,61 +895,93 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
     {
         try
         {
-            var result = await CassandraStatements.ExecuteAsync(_session, cql, values, null, _unitOfWork.CommandLogger,
+            var result = await CassandraStatements.ExecuteConditionalAsync(_session, cql, values, null, _unitOfWork.CommandLogger,
                 _unitOfWork.SensitiveLogging).ConfigureAwait(false);
             return (result.First().GetValue<bool>("[applied]"), null);
         }
-        catch (WriteTimeoutException timeout) when (timeout.WriteType == "CAS")
+        catch (WriteTimeoutException timeout) when (CassandraLightweightTransactions.IsTimedOut(timeout))
         {
             return (null, timeout);
         }
     }
 
-    /// <summary>
-    ///     Whether a row read after a timed-out update holds what the update writes — and so the update applied, or one
-    ///     with the same effect did. Only an update of values set outright is settled this way, and written again when it
-    ///     did not apply: a value computed from the row (<c>x.N + 1</c>, the bumped version) cannot tell this update's write
-    ///     from another's of the same sum, nor a later write over it from no write at all, so its timeout reaches the
-    ///     caller as a <see cref="TimeoutException" /> with the driver's inside.
-    /// </summary>
-    private bool Settled(TEntity stored, TEntity next, IReadOnlyList<UpdateAssignment> assignments, WriteTimeoutException timeout)
+    /// <summary>What the serial read after a timed-out update proves about it.</summary>
+    private enum Outcome
     {
-        if (assignments.Any(assignment => assignment is not SetAssignment) || _configuration.ConcurrencyColumn is not null)
-        {
-            throw new TimeoutException(
-                $"A lightweight transaction on '{_configuration.TableName}' timed out under contention, and Cassandra cannot say " +
-                "whether it applied: a value it computed from the row (an increment, the version) is not written a second time. " +
-                "Read the row and decide.", timeout);
-        }
+        /// <summary>The row holds what the update writes: it applied, or one with the same effect did.</summary>
+        Applied,
 
-        return assignments.All(assignment => Same(Member(stored, assignment.Name), Member(next, assignment.Name)));
+        /// <summary>It did not apply, and the write may be decided again from the row read.</summary>
+        NotApplied,
+
+        /// <summary>Nothing the read shows tells whether it applied.</summary>
+        Unknown,
     }
 
-    /// <summary>Whether a row read after a timed-out insert is the entity's: every column it wrote holds its value.</summary>
-    private bool Inserted(TEntity stored, TEntity entity) =>
-        _configuration.Columns
-            .Where(column => !_configuration.IsStoreGenerated(column.Name))
-            .All(column => Same(Member(stored, column.Member), Member(entity, column.Member)));
-
-    /// <summary>Equality of two values as Cassandra stores them: timestamps to the millisecond, collections by their items.</summary>
-    private static bool Same(object? left, object? right) => (left, right) switch
+    /// <summary>
+    ///     What a row read at the serial consistency after an update timed out proves (<paramref name="stored" />, <c>null</c>
+    ///     when the row is gone; <paramref name="read" /> is the row the update was computed from, <paramref name="next" />
+    ///     what it writes). The serial read completes or abandons for good the round the update left, so the row is what the
+    ///     transactions decided.
+    ///     <list type="bullet">
+    ///         <item>
+    ///             An update of values set outright: the row holding them is this update's effect (it applied, or one with the
+    ///             same effect did); otherwise it did not land, and it is written again while the row matches.
+    ///         </item>
+    ///         <item>
+    ///             A value computed from the row (<c>x.N + 1</c>, a bumped version) cannot tell this update's write from
+    ///             another's of the same sum, nor a later write over it from no write at all — a value can come back to what
+    ///             it was. Only a version the update conditions on and bumps proves anything: versions only grow, so a row
+    ///             still at the version read was not written by it, and the update is decided again. Anything else is
+    ///             <see cref="Outcome.Unknown" />, and its timeout reaches the caller (<see cref="Unsettled" />).
+    ///         </item>
+    ///     </list>
+    /// </summary>
+    private Outcome Settle(TEntity? stored, TEntity read, TEntity next, IReadOnlyList<UpdateAssignment> assignments, bool bumpsVersion)
     {
-        (null, null) => true,
-        (DateTime a, DateTime b) => Math.Abs((a.ToUniversalTime() - b.ToUniversalTime()).TotalMilliseconds) < 1,
-        (DateTimeOffset a, DateTimeOffset b) => Math.Abs((a - b).TotalMilliseconds) < 1,
-        (System.Collections.IEnumerable a, System.Collections.IEnumerable b) when left is not string =>
-            a.Cast<object?>().SequenceEqual(b.Cast<object?>()),
-        _ => Equals(left, right),
-    };
+        if (!bumpsVersion && assignments.All(assignment => assignment is SetAssignment))
+        {
+            return stored is not null && assignments.All(assignment =>
+                CassandraMapper.Same(Member(stored, assignment.Name), Member(next, assignment.Name)))
+                ? Outcome.Applied
+                : Outcome.NotApplied;
+        }
 
-    /// <summary>A jittered pause after a lost race, so contending transactions stop proposing in lockstep.</summary>
-    private static Task BackoffAsync(int attempt) => Task.Delay(Random.Shared.Next(1, 10 * Math.Min(attempt, 10) + 2));
+        if (bumpsVersion && stored is not null && _configuration.ConcurrencyColumn is { } token
+            && Convert.ToInt64(Member(stored, _configuration.MemberFor(token)) ?? 0L) == Convert.ToInt64(Member(read, _configuration.MemberFor(token)) ?? 0L))
+        {
+            return Outcome.NotApplied;
+        }
+
+        return Outcome.Unknown;
+    }
+
+    /// <summary>The timeout of a transaction whose outcome no read can prove, for the caller to decide.</summary>
+    private TimeoutException Unsettled(WriteTimeoutException timeout) => new(
+        $"A lightweight transaction on '{_configuration.TableName}' timed out under contention, and Cassandra cannot say " +
+        "whether it applied: a value it computed from the row (an increment, the version) is not written a second time. " +
+        "Read the row and decide.", timeout);
+
+    /// <summary>Refuses an update that assigns the primary key (it identifies the row) or a store-generated column (the store assigns it).</summary>
+    private void GuardAssignments(IEnumerable<UpdateAssignment> assignments, string what)
+    {
+        foreach (var assignment in assignments)
+        {
+            var column = _configuration.ColumnFor(assignment.Name);
+            if (_configuration.IsKey(column) || _configuration.IsStoreGenerated(column))
+            {
+                throw new NotSupportedException(
+                    $"{what} cannot assign '{assignment.Name}': the primary key identifies the row, and the store assigns a store-generated column.");
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- inserts skipping duplicates (immediate)
 
     /// <summary>
-    ///     Inserts every entity with a lightweight transaction (<c>INSERT … IF NOT EXISTS</c>), concurrently, and counts
-    ///     the inserts Cassandra applied. A primary key already stored is not applied: with
+    ///     Inserts every entity with a lightweight transaction (<c>INSERT … IF NOT EXISTS</c>), one partition's one at a time,
+    ///     and counts the inserts Cassandra applied; every number their sequences hand out is reserved first, in one
+    ///     compare-and-set per sequence. A primary key already stored is not applied: with
     ///     <paramref name="skipDuplicates" /> the entity is left out; without it the call fails with
     ///     <see cref="DuplicateKeyException" /> once every insert has answered — each is its own write, so the others
     ///     stay written.
@@ -896,7 +1002,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var applied = await Task.WhenAll(entities.Select(entity => _unitOfWork.InsertIfNotExistsAsync(entity))).ConfigureAwait(false);
+        var applied = await _unitOfWork.InsertIfNotExistsAsync(entities).ConfigureAwait(false);
         var inserted = applied.LongCount(insert => insert);
         if (!skipDuplicates && inserted < entities.Count)
         {
@@ -909,10 +1015,19 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         return inserted;
     }
 
-    private async Task<long> CountAsync(string where, object?[] values, CancellationToken cancellationToken)
+    /// <summary>The rows the key restriction finds, counted on the cluster (a chunk of a long <c>IN</c> at a time).</summary>
+    private async Task<long> CountAsync(CassandraConditions split, CancellationToken cancellationToken)
     {
-        var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}" + (where.Length > 0 ? $" WHERE {where}" : string.Empty);
-        var rows = await CassandraStatements.ExecuteAsync(_session, cql, values, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
-        return rows.First().GetValue<long>(0);
+        var count = 0L;
+        foreach (var (where, values) in split.KeyChunks)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var cql = $"SELECT COUNT(*) FROM {_configuration.TableName}" + (where.Length > 0 ? $" WHERE {where}" : string.Empty);
+            var rows = await CassandraStatements.ExecuteAsync(_session, cql, values, null, _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging)
+                .ConfigureAwait(false);
+            count += rows.First().GetValue<long>(0);
+        }
+
+        return count;
     }
 }

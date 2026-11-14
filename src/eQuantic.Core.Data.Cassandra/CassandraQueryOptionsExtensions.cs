@@ -100,7 +100,30 @@ internal sealed record CassandraCqlPlan(
 {
     /// <summary>Human-readable description of the residual conjunction (empty when fully pushed down).</summary>
     public string ResidualText => string.Join(" AND ", Residual.Select(residual => residual.Body.ToString()));
+
+    /// <summary>
+    ///     The same read with its longest pushed <c>IN</c> split in chunks of <see cref="CassandraCqlRenderer.InChunkSize" />
+    ///     keys, when it holds more than one chunk and the plan has no OR split: the common conjunction without it, and one
+    ///     alternative per chunk. <c>null</c> when nothing is split.
+    /// </summary>
+    public CassandraCqlChunks? Chunks { get; init; }
+
+    /// <summary>
+    ///     The plan a read of rows runs: one query per chunk of its longest <c>IN</c> (as alternatives, merged and
+    ///     de-duplicated by primary key), or this plan when nothing is split. A count, an aggregate, a group or a page binds
+    ///     the whole list in one statement instead, as it has one answer per statement.
+    /// </summary>
+    public CassandraCqlPlan Chunked() => Chunks is { } chunks && Alternatives.Count == 0
+        ? this with { Where = chunks.Where, Values = chunks.Values, Alternatives = chunks.Alternatives, Chunks = null }
+        : this;
 }
+
+/// <summary>A plan's longest <c>IN</c> split in chunks: the common conjunction without it, and one alternative per chunk.</summary>
+/// <param name="Where">The conjunction without the split <c>IN</c>.</param>
+/// <param name="Values">Its bound values.</param>
+/// <param name="Alternatives">One <c>IN</c> per chunk.</param>
+/// <param name="Keys">How many keys the split <c>IN</c> holds.</param>
+internal sealed record CassandraCqlChunks(string Where, object?[] Values, IReadOnlyList<CassandraCqlAlternative> Alternatives, int Keys);
 
 /// <summary>Builds CQL <c>WHERE</c> fragments and pushdown plans from a <see cref="QueryOptions{TEntity}" />.</summary>
 internal static class CassandraCql
@@ -121,8 +144,8 @@ internal static class CassandraCql
     public static CassandraCqlPlan Plan<TEntity>(CassandraEntityConfiguration configuration, IEnumerable<Expression<Func<TEntity, bool>>> filters)
         where TEntity : class
     {
-        var clauses = new List<string>();
-        var values = new List<object?>();
+        var clauses = new List<(string Cql, object?[] Values)>();
+        var chunkable = new List<(int Clause, InFilter Filter)>();
         var residual = new List<LambdaExpression>();
         var alternatives = new List<CassandraCqlAlternative>();
         var requiresFiltering = false;
@@ -152,8 +175,12 @@ internal static class CassandraCql
                 {
                     if (rendered.Cql.Length > 0)
                     {
-                        clauses.Add(rendered.Cql);
-                        values.AddRange(rendered.Values);
+                        if (interpreted is InFilter inFilter && CassandraCqlRenderer.IsChunkable(configuration, inFilter))
+                        {
+                            chunkable.Add((clauses.Count, inFilter));
+                        }
+
+                        clauses.Add((rendered.Cql, rendered.Values));
                         requiresFiltering |= rendered.RequiresAllowFiltering;
                         partitionScoped |= CassandraCqlRenderer.PinsPartition(configuration, interpreted);
                     }
@@ -172,7 +199,22 @@ internal static class CassandraCql
             }
         }
 
-        return new CassandraCqlPlan(string.Join(" AND ", clauses), values.ToArray(), requiresFiltering, residual, alternatives, partitionScoped);
+        CassandraCqlChunks? chunks = null;
+        if (alternatives.Count == 0 && chunkable.Count > 0)
+        {
+            var (index, filter) = chunkable.MaxBy(candidate => candidate.Filter.Values.Count);
+            var common = clauses.Where((_, position) => position != index).ToList();
+            chunks = new CassandraCqlChunks(string.Join(" AND ", common.Select(clause => clause.Cql)),
+                common.SelectMany(clause => clause.Values).ToArray(),
+                CassandraCqlRenderer.InChunks(configuration, filter).Select(chunk => new CassandraCqlAlternative(chunk.Cql, chunk.Values)).ToList(),
+                filter.Values.Count);
+        }
+
+        return new CassandraCqlPlan(string.Join(" AND ", clauses.Select(clause => clause.Cql)),
+            clauses.SelectMany(clause => clause.Values).ToArray(), requiresFiltering, residual, alternatives, partitionScoped)
+        {
+            Chunks = chunks,
+        };
     }
 
     /// <summary>

@@ -17,13 +17,20 @@ namespace eQuantic.Core.Data.Cassandra;
 internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues, bool PinsPartition,
     IReadOnlyList<(string Cql, object?[] Values)> Conditions, bool NamesEveryKey = false)
 {
+    /// <summary>
+    ///     The key restriction as the statements that run it carry it: itself, or — when its longest <c>IN</c> holds more
+    ///     keys than one chunk (<see cref="CassandraCqlRenderer.InChunkSize" />) — one restriction per chunk of that <c>IN</c>,
+    ///     each run by a statement of its own.
+    /// </summary>
+    public IReadOnlyList<(string Where, object?[] Values)> KeyChunks { get; init; } = [(KeyWhere, KeyValues)];
+
     /// <summary>Splits the filter (and the global filter) into the key restriction and the conditions.</summary>
     public static CassandraConditions Split<TEntity>(CassandraEntityConfiguration configuration,
         Expression<Func<TEntity, bool>> filter, Expression<Func<TEntity, bool>>? globalFilter)
         where TEntity : class
     {
-        var keyClauses = new List<string>();
-        var keyValues = new List<object?>();
+        var keyClauses = new List<(string Cql, object?[] Values)>();
+        var chunkable = new List<(int Clause, InFilter Filter)>();
         var conditions = new List<(string Cql, object?[] Values)>();
         var pinsPartition = false;
         var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -37,8 +44,12 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
                 if (OnKeyOnly(configuration, conjunct)
                     && CassandraCqlRenderer.TryRender(configuration, conjunct, out var rendered))
                 {
-                    keyClauses.Add(rendered.Cql);
-                    keyValues.AddRange(rendered.Values);
+                    if (conjunct is InFilter chunked && CassandraCqlRenderer.IsChunkable(configuration, chunked))
+                    {
+                        chunkable.Add((keyClauses.Count, chunked));
+                    }
+
+                    keyClauses.Add((rendered.Cql, rendered.Values));
                     pinsPartition |= CassandraCqlRenderer.PinsPartition(configuration, conjunct);
                     if (conjunct is ComparisonFilter { Operator: ComparisonOperator.Equal } equal)
                     {
@@ -57,7 +68,22 @@ internal sealed record CassandraConditions(string KeyWhere, object?[] KeyValues,
         }
 
         var namesEveryKey = CassandraMapper.PrimaryKey(configuration).All(named.Contains);
-        return new CassandraConditions(string.Join(" AND ", keyClauses), keyValues.ToArray(), pinsPartition, conditions, namesEveryKey);
+        var split = new CassandraConditions(string.Join(" AND ", keyClauses.Select(clause => clause.Cql)),
+            keyClauses.SelectMany(clause => clause.Values).ToArray(), pinsPartition, conditions, namesEveryKey);
+        if (chunkable.Count == 0)
+        {
+            return split;
+        }
+
+        var (index, longest) = chunkable.MaxBy(candidate => candidate.Filter.Values.Count);
+        return split with
+        {
+            KeyChunks = CassandraCqlRenderer.InChunks(configuration, longest).Select(chunk =>
+            {
+                var clauses = keyClauses.Select((clause, position) => position == index ? chunk : clause).ToList();
+                return (string.Join(" AND ", clauses.Select(clause => clause.Cql)), clauses.SelectMany(clause => clause.Values).ToArray());
+            }).ToList(),
+        };
     }
 
     private static IEnumerable<QueryFilter> Conjuncts(QueryFilter filter) =>

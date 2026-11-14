@@ -47,7 +47,7 @@ public class CassandraRepository<TEntity, TKey> :
     public async Task<bool> AddIfNotExistsAsync(TEntity item, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return await UnitOfWork.InsertIfNotExistsAsync(item).ConfigureAwait(false);
+        return (await UnitOfWork.InsertIfNotExistsAsync<TEntity>([item]).ConfigureAwait(false))[0];
     }
 
     // ---------------------------------------------------------------- staged entity writes (flushed on commit)

@@ -712,6 +712,13 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
             notes.Add("Rows are fetched without a CQL LIMIT and filtered client-side; LIMIT/Take applies after the residual.");
         }
 
+        if (plan.Chunks is { } chunks && plan.Alternatives.Count == 0)
+        {
+            notes.Add($"A read of rows runs the IN over {chunks.Keys} keys in {chunks.Alternatives.Count} queries of at most " +
+                      $"{CassandraCqlRenderer.InChunkSize} keys each, merged and de-duplicated by primary key client-side; a count, an " +
+                      "aggregate, a group or a page binds the whole list in one statement.");
+        }
+
         if (plan.Alternatives.Count > 0)
         {
             notes.Add($"Runs as {plan.Alternatives.Count} parallel single-partition queries (OR branches: "
@@ -922,10 +929,14 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
 
     // ---------------------------------------------------------------- query plumbing
 
+    /// <summary>How many of a split read's queries run at once.</summary>
+    private const int SplitQueries = 8;
+
     private async Task<List<TEntity>> SelectAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
         Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null, int? offset = null)
     {
-        var plan = await GatedPlanAsync(options, extraFilter, cancellationToken).ConfigureAwait(false);
+        // A read of rows runs a long IN in chunks, one query each, as it runs an OR split.
+        var plan = (await GatedPlanAsync(options, extraFilter, cancellationToken).ConfigureAwait(false)).Chunked();
         var residuals = Compile(plan.Residual);
         var clientSort = SortsClientSide(options, plan);
         if (clientSort && mapColumns is not null)
@@ -993,23 +1004,33 @@ public abstract class CassandraReadRepository<TEntity, TKey> :
     }
 
     /// <summary>
-    ///     Executes an OR-split plan: one native partition query per branch, in parallel, merged and
-    ///     de-duplicated by primary key. A per-branch LIMIT keeps the global top-N correct (every merged top-N
-    ///     row is inside some branch's top-N); the merge re-applies order and limit client-side.
+    ///     Executes an OR-split plan (or a long <c>IN</c> in chunks): one native query per branch, a few at a time,
+    ///     merged and de-duplicated by primary key. A per-branch LIMIT keeps the global top-N correct (every merged
+    ///     top-N row is inside some branch's top-N); the merge re-applies order and limit client-side.
     /// </summary>
     private async Task<List<TEntity>> SelectSplitAsync(CassandraCqlPlan plan, List<Func<TEntity, bool>> residuals,
         HashSet<string>? selected, QueryOptions<TEntity>? options, int? limit, QueryOptions<TEntity>? sorting)
     {
         var pushLimit = limit.HasValue && residuals.Count == 0;
         var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(sorting);
-        var executions = plan.Alternatives.Select(alternative =>
+        using var slots = new SemaphoreSlim(SplitQueries);
+        var executions = plan.Alternatives.Select(async alternative =>
         {
             var where = plan.Where.Length > 0 ? $"{plan.Where} AND {alternative.Where}" : alternative.Where;
             object?[] values = pushLimit
                 ? [.. plan.Values, .. alternative.Values, limit!.Value]
                 : [.. plan.Values, .. alternative.Values];
-            return CassandraStatements.ExecuteAsync(Session,
-                SelectCql(selected, where, plan.RequiresAllowFiltering, options, pushLimit), values, consistency);
+            await slots.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                return await CassandraStatements.ExecuteAsync(Session,
+                    SelectCql(selected, where, plan.RequiresAllowFiltering, options, pushLimit), values, consistency,
+                    UnitOfWork.CommandLogger, UnitOfWork.SensitiveLogging).ConfigureAwait(false);
+            }
+            finally
+            {
+                slots.Release();
+            }
         }).ToList();
 
         var rowSets = await Task.WhenAll(executions).ConfigureAwait(false);

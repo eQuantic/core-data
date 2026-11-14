@@ -47,7 +47,7 @@ filtered as one (`x.Address.City == …`). Both entities are registered in the m
 | PostgreSQL, SQL Server, MySQL, MariaDB | a **correlated `EXISTS`** (`NOT EXISTS` for `!Any`, `All` and `== null`) in the statement's own `WHERE` — one statement, inside the transaction | the same `EXISTS` in the `UPDATE`/`DELETE` — one statement; on MySQL and MariaDB, when the relation reads the written table itself, the matching keys are read first with `FOR UPDATE` and the write runs by them (below) |
 | MongoDB | the **related keys resolved first**: one aggregation over the related collection per test (`$match`, then `$group` on the key), inside the open transaction's session, then `$in` (`$nin`) over them | the same: the keys first, then `updateMany`/`deleteMany`/`findOneAndUpdate` filtered by them — a write's filter cannot hold a `$lookup` |
 | Cosmos DB | the **related keys resolved first**: one `SELECT DISTINCT VALUE` over the related container per test (cross-partition), then `IN` (`NOT IN`) over them | the same; each item is then patched (or deleted) **under the filter holding those keys** |
-| Cassandra | the **related keys resolved first**, through the same planner and gates as any read and **under the read's own opt-ins** (`SELECT DISTINCT` when the key is the related table's partition key), then `IN` over them where the table's key serves it — `NOT IN` and anything else CQL cannot express runs client-side behind `.AllowClientEvaluation()` | the keys first, then the write finds its rows by them as by any key: a write carries no opt-ins, so its related read has to be one the table serves natively, and the filter has to address the written table's partition; a negated test leaves out, of the rows the rest of the filter finds, those whose key the related read returned, and writes each other row by its full key in a lightweight transaction |
+| Cassandra | the **related keys resolved first**, through the same planner and gates as any read and **under the read's own opt-ins** — a related read that names none of the related table's partitions (a test with no condition among them) is a scan, behind `.AllowFiltering()` — then `IN` over them where the table's key serves it, in chunks of 100 keys — `NOT IN` and anything else CQL cannot express runs client-side behind `.AllowClientEvaluation()` | the keys first, then the write finds its rows by them as by any key: a write carries no opt-ins, so its related read has to be partition-scoped — by the relation's condition, or by the rows the write finds when its filter names the written table's partition — and is refused otherwise; a negated test leaves out, of the rows the rest of the filter finds, those whose key the related read returned, and writes each other row by its full key in a lightweight transaction |
 
 ```sql
 -- relational: x => x.Mentions.Any(m => m.UserId == @u && m.DeletedAt == null) && x.Container == null
@@ -70,7 +70,8 @@ explain runs nothing).
 - **MongoDB, Cosmos DB and Cassandra** read the related keys **before** the filtered read or write,
   and **every key travels** into its `IN` — a test that matches many related rows makes a long list.
   `!x.Runs.Any()` and `x.Container == null` read the keys of *every* related row (over the whole
-  collection, container or table), so they cost a full read of the related keys.
+  collection, container or table), so they cost a full read of the related keys — which Cassandra
+  makes only behind `.AllowFiltering()`, and a Cassandra write only for the rows it finds.
 - The keys and the read are **two operations**, not one snapshot: a related row written between them
   is seen or not by chance. MongoDB reads both inside the open transaction's session, so inside an
   explicit transaction they are one snapshot; Cosmos DB and Cassandra have no read transaction to
@@ -79,16 +80,24 @@ explain runs nothing).
 - **Cosmos DB** reads the related container cross-partition unless its partition key pins it, and a
   container shared by several entity types returns every type's documents to the key read — give
   each related entity its own container, or a global filter that tells its documents apart.
-- **Cassandra** applies its gates to the related read: an `IN` the related table's key does not
+- **Cassandra** applies its gates to the related read: a read that names none of the related
+  table's partitions — a test with no condition (`x.Runs.Any()`, `!x.Runs.Any()`,
+  `x.Container == null`) reads every related row's key — or an `IN` the related table's key does not
   serve needs `.AllowFiltering()`, a condition CQL cannot express (`!=`, a null test, `NOT IN`) needs
-  `.AllowClientEvaluation()` — both on the read's own options, which the related read inherits.
-  Model the related table partitioned by the key the filter names, and the relation is one routed
-  query. A set-based write with a negated relation (`!x.Runs.Any()`, `x.Container == null`) cannot put
-  `NOT IN` in a lightweight transaction's `IF`, so it reads the rows the rest of its filter finds (under
-  the written table's partition, which the filter has to name), leaves out those whose key the related
-  read returned, and writes each other row by its full key, `IF` the filter's other conditions still
-  hold and every column the negated test read (`ContainerId`) still holds the value read — `IF EXISTS`
-  when there is nothing else to hold. The count is the transactions Cassandra applied.
+  `.AllowClientEvaluation()` — both on the read's own options, which the related read inherits, and
+  checked before anything is read. Model the related table partitioned by the key the filter names,
+  and the relation is one routed query; the `IN` the keys make runs in chunks of 100 keys, a query
+  each. A set-based write carries no opt-ins, so its related read has to be partition-scoped: by the
+  relation's condition, or — when the write's filter names the written table's partition — by the
+  rows the write finds, their keys read from the related table by its partition key
+  (`x.Space == s && !x.Runs.Any()` reads only the runs of the items of `s`); any other is refused. A
+  set-based write with a negated relation cannot put `NOT IN` in a lightweight transaction's `IF`, so
+  it reads the rows the rest of its filter finds (under the written table's partition, which the
+  filter has to name), leaves out those whose key the related read returned, and writes each other row
+  by its full key, `IF` the filter's other conditions still hold and every column the negated test read
+  (`ContainerId`) still holds the value read — `IF EXISTS` when there is nothing else to hold. A row it
+  meets that was not among the rows its relation was read for is left alone. The count is the
+  transactions Cassandra applied.
 - **MySQL and MariaDB** refuse an `UPDATE`/`DELETE` whose subquery reads the table being written
   (error 1093), as a self-referencing relation does (a node filtered by its children). There a
   set-based write reads the matching keys first, inside the operation's transaction (the open one, or

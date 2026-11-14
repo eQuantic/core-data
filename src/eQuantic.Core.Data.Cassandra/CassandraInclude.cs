@@ -5,15 +5,18 @@ using System.Reflection;
 using eQuantic.Core.Data.Cassandra.Repository;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository.Options;
+using eQuantic.Linq.Expressions;
 
 namespace eQuantic.Core.Data.Cassandra;
 
 /// <summary>
 ///     Loads related rows from their own tables. Cassandra rows are self-contained and CQL has no join, so each
-///     <c>Include</c> segment is <b>one second query</b> over the related table — the parents' keys resolved and read
-///     with <c>IN</c> — under the same gates as any read and the read's own opt-ins (<c>.AllowFiltering()</c> when the
-///     foreign key is not the related table's partition key, <c>.AllowClientEvaluation()</c> for a filter CQL cannot
-///     express). A shape's order, skip and limit apply per parent as the rows are stitched; when the foreign key is the
+///     <c>Include</c> segment is <b>a second query</b> over the related table — the parents' keys resolved and read
+///     with <c>IN</c>, in chunks of <see cref="CassandraCqlRenderer.InChunkSize" /> keys — under the same gates as any read
+///     and the read's own opt-ins: <c>.AllowFiltering()</c> when the read is not scoped to the related table's partitions
+///     (its foreign key is not the partition key, so the table is scanned), <c>.AllowClientEvaluation()</c> for a filter
+///     CQL cannot express (a foreign key outside the primary key among them: CQL takes <c>IN</c> on the primary key only).
+///     A shape's order, skip and limit apply per parent as the rows are stitched; when the foreign key is the
 ///     partition key and the order is the clustering order, the limit pushes down as <c>PER PARTITION LIMIT</c>.
 ///     A relation count is <c>SELECT fk, COUNT(*) … GROUP BY fk</c> when the foreign key is the partition key and the
 ///     filter pushes down; otherwise the foreign keys (and the columns a client-side filter reads) are fetched and
@@ -125,9 +128,10 @@ internal static class CassandraInclude
         var keys = parents.Select(key.GetValue).Where(value => value is not null).Distinct().ToList();
         var configuration = unitOfWork.ConfigurationOf(typeof(TElement))
                             ?? throw new InvalidOperationException($"'{typeof(TElement).Name}' is not registered in the Cassandra model.");
-        var elements = await ReadAsync<TElement>(unitOfWork, configuration, In<TElement>(foreignKey, keys),
-            shape?.Filter as Expression<Func<TElement, bool>>, options, $"the include of '{navigation.Name}'",
-            PerPartitionLimit(configuration, foreignKey, shape)).ConfigureAwait(false);
+        var perPartitionLimit = PerPartitionLimit(configuration, foreignKey, shape);
+        var elements = await InChunksAsync(configuration, foreignKey, keys, chunk => ReadAsync<TElement>(unitOfWork, configuration,
+            In<TElement>(foreignKey, chunk), shape?.Filter as Expression<Func<TElement, bool>>, options, $"the include of '{navigation.Name}'",
+            perPartitionLimit)).ConfigureAwait(false);
 
         var byParent = elements.GroupBy(element => KeyText(foreignKey.GetValue(element)))
             .ToDictionary(group => group.Key, group => (IEnumerable<TElement>)group);
@@ -163,8 +167,8 @@ internal static class CassandraInclude
             return [];
         }
 
-        var targets = await ReadAsync<TTarget>(unitOfWork, configuration, In<TTarget>(targetKey, ids), null, options,
-            $"the include of '{navigation.Name}'", null).ConfigureAwait(false);
+        var targets = await InChunksAsync(configuration, targetKey, ids, chunk => ReadAsync<TTarget>(unitOfWork, configuration,
+            In<TTarget>(targetKey, chunk), null, options, $"the include of '{navigation.Name}'", null)).ConfigureAwait(false);
         var byKey = targets.GroupBy(target => KeyText(targetKey.GetValue(target))).ToDictionary(group => group.Key, group => group.First());
         foreach (var parent in parents)
         {
@@ -193,21 +197,26 @@ internal static class CassandraInclude
                              $"Cannot count '{count.Navigation.Name}': no foreign key found on '{typeof(TElement).Name}' back to '{typeof(TParent).Name}'.");
         var column = configuration.ColumnFor(foreignKey.Name);
         var options = Options<TElement>(parentOptions, count.Predicate as Expression<Func<TElement, bool>>);
-        var plan = CassandraCql.Plan(configuration, options, In<TElement>(foreignKey, keys));
+        var plan = CassandraCql.Plan(configuration, options, In<TElement>(foreignKey, keys.Take(CassandraCqlRenderer.InChunkSize).ToList()));
         var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions);
 
         if (plan.Residual.Count == 0 && plan.Alternatives.Count == 0
             && configuration.PartitionKeys is [var partition] && CassandraEntityConfiguration.Same(partition, column))
         {
             // The foreign key is the partition key: the cluster groups and counts, only the counts travel.
-            var cql = $"SELECT {column}, COUNT(*) FROM {configuration.TableName} WHERE {plan.Where} GROUP BY {column}"
-                      + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
             Gate(plan, options, $"the count of '{count.Navigation.Name}'", clientWork: false);
-            var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, plan.Values, consistency,
-                unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
-            foreach (var row in rows)
+            var grouped = await InChunksAsync(configuration, foreignKey, keys, async chunk =>
             {
-                counts[KeyText(row.GetValue<object>(0))] = row.GetValue<long>(1);
+                var chunkPlan = CassandraCql.Plan(configuration, options, In<TElement>(foreignKey, chunk));
+                var cql = $"SELECT {column}, COUNT(*) FROM {configuration.TableName} WHERE {chunkPlan.Where} GROUP BY {column}"
+                          + (chunkPlan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+                var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, chunkPlan.Values, consistency,
+                    unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
+                return rows.Select(row => (Key: KeyText(row.GetValue<object>(0)), Count: row.GetValue<long>(1))).ToList();
+            }).ConfigureAwait(false);
+            foreach (var (key, found) in grouped)
+            {
+                counts[key] = found;
             }
 
             return counts;
@@ -215,9 +224,9 @@ internal static class CassandraInclude
 
         // Counted client-side: only the foreign key and the columns a client-side filter reads travel.
         Gate(plan, options, $"the count of '{count.Navigation.Name}'", clientWork: true);
-        var elements = await ReadAsync<TElement>(unitOfWork, configuration, In<TElement>(foreignKey, keys),
-            options.Filter, parentOptions, $"the count of '{count.Navigation.Name}'", null,
-            [column, .. ResidualColumns(configuration, plan)]).ConfigureAwait(false);
+        var elements = await InChunksAsync(configuration, foreignKey, keys, chunk => ReadAsync<TElement>(unitOfWork, configuration,
+            In<TElement>(foreignKey, chunk), options.Filter, parentOptions, $"the count of '{count.Navigation.Name}'", null,
+            [column, .. ResidualColumns(configuration, plan)])).ConfigureAwait(false);
         foreach (var group in elements.GroupBy(element => KeyText(foreignKey.GetValue(element))))
         {
             counts[group.Key] = group.LongCount();
@@ -241,9 +250,10 @@ internal static class CassandraInclude
 
         var selected = columns is null ? null : new HashSet<string>(columns, StringComparer.OrdinalIgnoreCase);
         var push = perPartitionLimit is not null && plan.Residual.Count == 0;
-        var cql = $"SELECT {(selected is null ? "*" : string.Join(", ", selected))} FROM {configuration.TableName} WHERE {plan.Where}"
+        var cql = $"SELECT {(selected is null ? "*" : string.Join(", ", selected))} FROM {configuration.TableName}"
+                  + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
                   + (push ? $" PER PARTITION LIMIT {perPartitionLimit}" : string.Empty)
-                  + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+                  + (Filtering(plan) ? " ALLOW FILTERING" : string.Empty);
         var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, plan.Values,
             CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions), unitOfWork.CommandLogger, unitOfWork.SensitiveLogging)
             .ConfigureAwait(false);
@@ -258,11 +268,25 @@ internal static class CassandraInclude
     ///     The distinct values of a member of the related rows a relation test reads: <c>SELECT DISTINCT</c> of the
     ///     partition key when the member is the table's partition key and nothing filters it; otherwise the member (and
     ///     what a client-side filter reads) of the rows the condition matches, deduplicated client-side — through the same
-    ///     planner and gates as any read, under the read's opt-ins (a write carries none, so its related read has to be one
-    ///     the table serves natively).
+    ///     planner and gates as any read, under the read's opt-ins. A read not scoped to the related table's partitions (no
+    ///     condition, or one off the partition key) scans the table, so a read makes it only behind <c>.AllowFiltering()</c>.
+    ///     A write carries no opt-ins: its related read has to be partition-scoped, by the condition or by
+    ///     <paramref name="scope" /> — the keys of the rows the write finds, read from the related table by the member, in
+    ///     chunks, which is partition-scoped when the member is the related table's partition key.
     /// </summary>
+    /// <param name="unitOfWork">The unit of work.</param>
+    /// <param name="condition">The condition the related rows meet (already resolved), or <c>null</c> for every row.</param>
+    /// <param name="member">The member of the related rows whose distinct values are read.</param>
+    /// <param name="parentOptions">The read's options (its opt-ins and consistency); <c>null</c> for a write.</param>
+    /// <param name="what">What reads, for messages.</param>
+    /// <param name="write">Whether a set-based write reads (no opt-ins, and no scan whatever they say).</param>
+    /// <param name="scope">
+    ///     For a write: the values of <paramref name="member" /> the rows the write finds can be related by, or <c>null</c>
+    ///     when the write's filter does not name its partition.
+    /// </param>
     public static async Task<IReadOnlyCollection<object?>> RelatedKeysAsync<TTarget>(CassandraUnitOfWork unitOfWork,
-        Expression<Func<TTarget, bool>>? condition, PropertyInfo member, object? parentOptions, string what)
+        Expression<Func<TTarget, bool>>? condition, PropertyInfo member, object? parentOptions, string what, bool write = false,
+        Func<Task<IReadOnlyCollection<object?>?>>? scope = null)
         where TTarget : class
     {
         var configuration = unitOfWork.ConfigurationOf(typeof(TTarget))
@@ -272,6 +296,21 @@ internal static class CassandraInclude
         var plan = CassandraCql.Plan(configuration, options, null, unitOfWork.GlobalFilter<TTarget>());
         var consistency = CassandraQueryOptionsExtensions.ConsistencyOf(parentOptions);
 
+        if (write && !plan.PartitionScoped && scope is not null && await scope().ConfigureAwait(false) is { } keys)
+        {
+            // The related rows of the rows the write found: read by the member, a chunk of their keys at a time.
+            var related = new List<object?>();
+            foreach (var chunk in keys.Chunk(CassandraCqlRenderer.InChunkSize))
+            {
+                var scoped = In<TTarget>(member, chunk);
+                related.AddRange(await RelatedKeysAsync(unitOfWork, condition is null ? scoped : condition.AndAlso(scoped), member, null,
+                    what, write: true).ConfigureAwait(false));
+            }
+
+            return related.Distinct().ToList();
+        }
+
+        Gate(plan, options, what, clientWork: false, write ? configuration.TableName : null);
         if (plan.Where.Length == 0 && plan.Residual.Count == 0 && plan.Alternatives.Count == 0
             && configuration.PartitionKeys is [var partition] && CassandraEntityConfiguration.Same(partition, column))
         {
@@ -283,18 +322,10 @@ internal static class CassandraInclude
                 .Select(target => member.GetValue(target)).Distinct().ToList();
         }
 
-        Gate(plan, options, what, clientWork: false);
-        if (plan.Residual.Count > 0 && !plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
-        {
-            throw new NotSupportedException(
-                $"{Capitalized(what)} runs client-side over a read of the whole table; call .AllowFiltering() as well to acknowledge the scan, " +
-                "or restrict the related rows by their partition key.");
-        }
-
         var selected = new HashSet<string>([column, .. ResidualColumns(configuration, plan)], StringComparer.OrdinalIgnoreCase);
         var cql = $"SELECT {string.Join(", ", selected)} FROM {configuration.TableName}"
                   + (plan.Where.Length > 0 ? $" WHERE {plan.Where}" : string.Empty)
-                  + (plan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
+                  + (Filtering(plan) ? " ALLOW FILTERING" : string.Empty);
         var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, plan.Values, consistency,
             unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
         var residuals = plan.Residual.Select(predicate => ((Expression<Func<TTarget, bool>>)predicate).Compile()).ToList();
@@ -305,14 +336,42 @@ internal static class CassandraInclude
             .ToList();
     }
 
-    /// <summary>The read's gates, applied to a related read: a scan needs <c>.AllowFiltering()</c>, client work <c>.AllowClientEvaluation()</c>.</summary>
-    private static void Gate<TElement>(CassandraCqlPlan plan, QueryOptions<TElement> options, string what, bool clientWork)
+    /// <summary>
+    ///     Whether a related read's CQL carries <c>ALLOW FILTERING</c>: a clause outside the primary key, or a restriction
+    ///     that does not name the partition (a clustering column alone) — either way a scan its gate let through.
+    /// </summary>
+    private static bool Filtering(CassandraCqlPlan plan) =>
+        plan.RequiresAllowFiltering || (!plan.PartitionScoped && plan.Where.Length > 0);
+
+    /// <summary>
+    ///     The read's gates, applied to a related read: a scan — a clause outside the primary key, or a read not scoped to the
+    ///     related table's partitions — needs <c>.AllowFiltering()</c>, client work <c>.AllowClientEvaluation()</c>. A set-based
+    ///     write (<paramref name="writeTable" /> names the related table) carries no opt-ins, so its related read has to need
+    ///     none.
+    /// </summary>
+    private static void Gate<TElement>(CassandraCqlPlan plan, QueryOptions<TElement> options, string what, bool clientWork,
+        string? writeTable = null)
         where TElement : class
     {
         if (plan.Alternatives.Count > 0)
         {
             throw new NotSupportedException(
                 $"{Capitalized(what)} cannot split an OR into several queries; restructure its filter around the keys.");
+        }
+
+        if (writeTable is not null)
+        {
+            if (!plan.PartitionScoped || plan.RequiresAllowFiltering || plan.Residual.Count > 0 || clientWork)
+            {
+                throw new NotSupportedException(
+                    $"{Capitalized(what)} would read '{writeTable}' " +
+                    (!plan.PartitionScoped ? "whole (it names none of its partitions)" : "with a filter CQL cannot serve natively") +
+                    ", and a set-based write carries no opt-ins. Give the relation a condition on the related table's partition key, " +
+                    "or name the write's partition key so the related rows are read for the rows the write finds — by the related " +
+                    "table's partition key, which has to be the relation's key.");
+            }
+
+            return;
         }
 
         if (plan.RequiresAllowFiltering && !CassandraCql.AllowFilteringOptedIn(options))
@@ -328,6 +387,14 @@ internal static class CassandraInclude
                 $"{Capitalized(what)} runs client-side over the fetched rows" +
                 (plan.Residual.Count > 0 ? $" ('{plan.ResidualText}' cannot be expressed in CQL)" : " (CQL groups by the partition key only)") +
                 "; call .AllowClientEvaluation() on the read to opt in, or partition the related table by the foreign key.");
+        }
+
+        if (!plan.PartitionScoped && !CassandraCql.AllowFilteringOptedIn(options))
+        {
+            throw new NotSupportedException(
+                $"{Capitalized(what)} names none of the related table's partitions, so it reads the whole table; call " +
+                ".AllowFiltering() on the read to acknowledge the scan, or restrict the related rows by their partition key " +
+                "(partition the related table by the foreign key).");
         }
     }
 
@@ -401,6 +468,43 @@ internal static class CassandraInclude
 
         return body is MemberExpression { Expression: ParameterExpression } member ? member.Member.Name : null;
     }
+
+    /// <summary>
+    ///     Reads related rows by a list of keys: a chunk of <see cref="CassandraCqlRenderer.InChunkSize" /> keys per query
+    ///     when the key is a primary-key column (the <c>IN</c> pushes down), a few queries at a time, and in one read
+    ///     otherwise (the <c>IN</c> runs client-side over the rows read, and one scan is enough).
+    /// </summary>
+    private static async Task<List<T>> InChunksAsync<T>(CassandraEntityConfiguration configuration, PropertyInfo member,
+        IReadOnlyList<object?> keys, Func<IReadOnlyList<object?>, Task<List<T>>> read)
+    {
+        if (keys.Count == 0)
+        {
+            return [];
+        }
+
+        if (!configuration.IsKey(configuration.ColumnFor(member.Name)))
+        {
+            return await read(keys).ConfigureAwait(false);
+        }
+
+        using var slots = new SemaphoreSlim(ChunkQueries);
+        var chunks = await Task.WhenAll(keys.Chunk(CassandraCqlRenderer.InChunkSize).Select(async chunk =>
+        {
+            await slots.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                return await read(chunk).ConfigureAwait(false);
+            }
+            finally
+            {
+                slots.Release();
+            }
+        })).ConfigureAwait(false);
+        return chunks.SelectMany(chunk => chunk).ToList();
+    }
+
+    /// <summary>How many chunks of a related read run at once.</summary>
+    private const int ChunkQueries = 8;
 
     private static IEnumerable<string> ResidualColumns(CassandraEntityConfiguration configuration, CassandraCqlPlan plan) =>
         plan.Residual.SelectMany(predicate => new MemberCollector(predicate.Parameters[0]).Collect(predicate.Body))

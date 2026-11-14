@@ -421,6 +421,104 @@ public sealed class CassandraWriteOutcomeTests : CassandraIntegrationTest
             .UpdateAndGetAsync(x => x.Id == itemType.Id && x.NextSequence == 100, x => new ItemType { NextSequence = 0 }), Is.Empty);
     }
 
+    /// <remarks>
+    ///     Every row of one partition is written by a lightweight transaction of its own, and Paxos runs per partition: two
+    ///     hundred proposed at once contend with each other until some time out, and an increment that timed out cannot be
+    ///     written again. One write runs a partition's transactions one at a time, so none of them contends with another.
+    /// </remarks>
+    [Test]
+    public async Task Two_hundred_rows_of_one_partition_take_a_conditional_update_an_increment_and_a_conditional_delete()
+    {
+        const int count = 200;
+        var workspace = Guid.NewGuid();
+        using (var seed = NewScope())
+        {
+            await Repo<SecretByName, Guid>(seed).AddRangeAsync(Enumerable.Range(0, count)
+                .Select(index => new SecretByName { WorkspaceId = workspace, Name = $"name-{index:D3}", Value = "a" }));
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var repo = Repo<SecretByName, Guid>(scope);
+        Assert.That(await repo.UpdateManyAsync(x => x.WorkspaceId == workspace && x.Value == "a", x => new SecretByName { Value = "b" }),
+            Is.EqualTo((long)count), "every row matched the condition, and each transaction applied");
+        Assert.That(await repo.UpdateManyAsync(x => x.WorkspaceId == workspace, x => new SecretByName { Uses = x.Uses + 1 }),
+            Is.EqualTo((long)count), "every increment applied, and none timed out");
+
+        var rows = (await repo.GetFilteredAsync(x => x.WorkspaceId == workspace)).ToList();
+        Assert.That(rows, Has.Count.EqualTo(count));
+        Assert.That(rows.Select(x => x.Value), Is.All.EqualTo("b"));
+        Assert.That(rows.Select(x => x.Uses), Is.All.EqualTo(1), "each row was incremented exactly once");
+
+        Assert.That(await repo.DeleteManyAsync(x => x.WorkspaceId == workspace && x.Uses == 1), Is.EqualTo((long)count));
+        Assert.That(await repo.GetFilteredAsync(x => x.WorkspaceId == workspace), Is.Empty);
+    }
+
+    [Test]
+    public async Task Inserting_many_reserves_every_sequence_number_in_one_compare_and_set()
+    {
+        const int count = 100;
+        using var executed = new ExecutedCql();
+        using var scope = NewScope();
+        var vouchers = Enumerable.Range(0, count).Select(index => new Voucher { Note = $"v{index}" }).ToList();
+
+        var inserted = await Resolve<IUpsertRepository<Voucher, Guid>>(scope).InsertManyAsync(vouchers);
+
+        Assert.That(inserted, Is.EqualTo((long)count));
+        Assert.That(vouchers.Select(x => x.Number).Distinct().Count(), Is.EqualTo(count), "a hundred numbers, none handed out twice");
+        Assert.That(vouchers.Select(x => x.Number).Order(), Is.EqualTo(Enumerable.Range(1, count).Select(number => (long)number)),
+            "one reservation of a hundred numbers, in order");
+        Assert.That(executed.On(CassandraSequences.TableName).Count(statement => statement.IsConditional), Is.EqualTo(1),
+            "the hundred numbers are reserved by one compare-and-set");
+        var stored = (await Repo<Voucher, Guid>(scope).GetAllAsync()).ToDictionary(x => x.Id);
+        Assert.That(vouchers.All(voucher => stored[voucher.Id].Number == voucher.Number), Is.True, "each row holds the number its entity took");
+    }
+
+    /// <remarks>
+    ///     The number a sequence hands out is on the entity before the insert, so only the coordinator's clock is read back,
+    ///     and an <c>INSERT … IF NOT EXISTS</c> is read back at the serial consistency its transaction ran at: a read at the
+    ///     session's (one replica) could miss the row the transaction just wrote.
+    /// </remarks>
+    [Test]
+    public async Task A_compare_and_set_insert_reads_back_only_the_clock_at_the_serial_consistency()
+    {
+        using var executed = new ExecutedCql();
+        using var scope = NewScope();
+        var many = new[] { new Voucher { Note = "a" }, new Voucher { Note = "b" } };
+        await Resolve<IUpsertRepository<Voucher, Guid>>(scope).InsertManyAsync(many);
+        var upserted = await Resolve<IUpsertRepository<Voucher, Guid>>(scope).UpsertAsync(new Voucher { Note = "c" });
+
+        Assert.That(many.Concat([upserted]).Select(x => x.IssuedAt), Has.None.EqualTo(default(DateTimeOffset)), "the clock was read back");
+        var readBacks = executed.On("vouchers").Where(statement => statement.IsRead).ToList();
+        Assert.That(readBacks, Has.Count.EqualTo(3), "one read back per inserted row");
+        Assert.That(readBacks.Select(statement => statement.Cql), Has.All.Match(@"(?i)^SELECT\s+IssuedAt\s+FROM"),
+            "the sequence's number is known: only the clock is read");
+        Assert.That(readBacks.Select(statement => statement.Consistency), Has.All.EqualTo(nameof(global::Cassandra.ConsistencyLevel.Serial)),
+            "the read back runs at the serial consistency of the transaction that wrote the row");
+    }
+
+    [Test]
+    public async Task A_key_only_update_refuses_to_write_a_store_generated_member_or_the_key()
+    {
+        using var scope = NewScope();
+        var voucher = await Resolve<IUpsertRepository<Voucher, Guid>>(scope).UpsertAsync(new Voucher { Note = "first" });
+        var repo = Repo<Voucher, Guid>(scope);
+
+        var number = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.UpdateManyAsync(x => x.Id == voucher.Id, x => new Voucher { Number = voucher.Number + 1000 }));
+        Assert.That(number!.Message, Does.Contain("store-generated"));
+        var stamp = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.UpdateManyAsync(x => x.Id == voucher.Id, x => new Voucher { IssuedAt = DateTimeOffset.UnixEpoch }));
+        Assert.That(stamp!.Message, Does.Contain("store-generated"));
+        var key = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.UpdateManyAsync(x => x.Id == voucher.Id, x => new Voucher { Id = Guid.NewGuid() }));
+        Assert.That(key!.Message, Does.Contain("primary key"));
+
+        var stored = (await repo.GetAsync(voucher.Id))!;
+        Assert.That(stored.Number, Is.EqualTo(voucher.Number), "the sequence's number stands");
+        Assert.That(stored.IssuedAt, Is.EqualTo(voucher.IssuedAt), "the clock stands");
+    }
+
     [Test]
     public async Task A_member_scoped_modify_leaves_the_other_members()
     {

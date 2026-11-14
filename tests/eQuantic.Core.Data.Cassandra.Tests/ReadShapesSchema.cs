@@ -95,10 +95,40 @@ public sealed class ShapeComment : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A support queue with its tickets: the parent of an include whose foreign key the related table does not key.</summary>
+public sealed class ShapeQueue : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Name { get; set; } = "";
+
+    public List<ShapeTicket>? Tickets { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
+/// <summary>A ticket, partitioned by the desk that works it: its queue's key (<c>ShapeQueueId</c>) is a regular column.</summary>
+public sealed class ShapeTicket : IEntity<Guid>
+{
+    public string Desk { get; set; } = "";
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid ShapeQueueId { get; set; }
+
+    public string Title { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>
 ///     The read-shape entities' mapping: each related table is partitioned by its foreign key, so a run's steps, a
 ///     package's versions, a board's cards and a repository's comments each live in one partition, clustered in the
-///     order they are read.
+///     order they are read. A ticket is the exception: it is partitioned by its desk, so its queue's key is a regular column.
 /// </summary>
 internal static class ReadShapesModel
 {
@@ -123,6 +153,11 @@ internal static class ReadShapesModel
             .PartitionKey(x => x.Repository)
             .ClusteringKey(x => x.IssueNumber)
             .ClusteringKey(x => x.Id)
+            .Key(x => x.Id))
+        .Entity<ShapeQueue>(entity => entity.PartitionKey(x => x.Id))
+        .Entity<ShapeTicket>(entity => entity
+            .PartitionKey(x => x.Desk)
+            .ClusteringKey(x => x.Id)
             .Key(x => x.Id));
 
     /// <summary>The tables, created by the executor (a discovered migration would run for every test keyspace).</summary>
@@ -134,5 +169,7 @@ internal static class ReadShapesModel
         new EnsureCollectionOperation(typeof(ShapeVersion)),
         new EnsureCollectionOperation(typeof(ShapeCard)),
         new EnsureCollectionOperation(typeof(ShapeComment)),
+        new EnsureCollectionOperation(typeof(ShapeQueue)),
+        new EnsureCollectionOperation(typeof(ShapeTicket)),
     ];
 }
