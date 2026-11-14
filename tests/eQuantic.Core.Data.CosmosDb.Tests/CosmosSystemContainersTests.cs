@@ -32,6 +32,36 @@ public sealed class CosmosSystemContainersTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task A_creation_that_fails_after_its_caller_gave_up_is_not_remembered()
+    {
+        // The database is not there yet: creating the container in it fails, after the only caller stopped waiting.
+        var database = Database.Client.GetDatabase("eq_late_" + Guid.NewGuid().ToString("N"));
+        const string name = "_late_probe";
+        using (var gaveUp = new CancellationTokenSource())
+        {
+            await gaveUp.CancelAsync();
+            Assert.That(async () => await CosmosSystemContainers.GetAsync(database, name, "A purpose.", gaveUp.Token),
+                Throws.InstanceOf<OperationCanceledException>());
+        }
+
+        var ensured = (System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<Task>>)typeof(CosmosSystemContainers)
+            .GetField("Ensured", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var creation = ensured.Single(entry => entry.Key.EndsWith("|" + database.Id + "|" + name, StringComparison.Ordinal)).Value.Value;
+        Assert.That(async () => await creation, Throws.InstanceOf<CosmosException>(), "the creation failed on its own");
+
+        await Database.Client.CreateDatabaseIfNotExistsAsync(database.Id);
+        try
+        {
+            var container = await CosmosSystemContainers.GetAsync(database, name, "A purpose.", CancellationToken.None);
+            Assert.That((await container.ReadContainerAsync()).Resource.Id, Is.EqualTo(name), "the next use tried again, and created it");
+        }
+        finally
+        {
+            await database.DeleteAsync();
+        }
+    }
+
+    [Test]
     public void An_account_that_takes_writes_in_several_regions_is_refused_for_the_counters_and_the_leases()
     {
         Assert.That(CosmosSystemContainers.RefusalFor(["West US"], "A purpose."), Is.Null, "one write region");

@@ -36,19 +36,31 @@ internal static class CosmosSystemContainers
     public static async Task<Container> GetAsync(Database database, string name, string purpose, CancellationToken cancellationToken)
     {
         var key = Key(database, name);
-        var ensure = Ensured.GetOrAdd(key, _ => new Lazy<Task>(() => EnsureAsync(database, name, purpose)));
-        try
-        {
-            await ensure.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch when (ensure.Value.IsFaulted || ensure.Value.IsCanceled)
-        {
-            // A failed creation is not remembered: the next use tries again.
-            Ensured.TryRemove(new KeyValuePair<string, Lazy<Task>>(key, ensure));
-            throw;
-        }
-
+        var ensure = Ensured.GetOrAdd(key, _ => Creation(key, database, name, purpose));
+        await ensure.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         return database.GetContainer(name);
+    }
+
+    /// <summary>
+    ///     The shared creation, which forgets itself when it fails: the next use tries again, even when every caller that
+    ///     waited for it had stopped waiting before it failed.
+    /// </summary>
+    private static Lazy<Task> Creation(string key, Database database, string name, string purpose)
+    {
+        Lazy<Task>? creation = null;
+        creation = new Lazy<Task>(async () =>
+        {
+            try
+            {
+                await EnsureAsync(database, name, purpose).ConfigureAwait(false);
+            }
+            catch
+            {
+                Ensured.TryRemove(new KeyValuePair<string, Lazy<Task>>(key, creation!));
+                throw;
+            }
+        });
+        return creation;
     }
 
     /// <summary>
