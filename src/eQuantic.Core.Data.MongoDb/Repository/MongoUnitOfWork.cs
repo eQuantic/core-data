@@ -384,8 +384,10 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
 
     /// <summary>
     ///     Gives every staged insert the values the store assigns its store-generated members: the next numbers of
-    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, in the open transaction) and the
-    ///     server's clock (read once, the same instant for every insert of the commit).
+    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, outside any open transaction) and the
+    ///     server's clock (read once, the same instant for every insert of the commit). The inserts stay listed until
+    ///     every value is on its entity: a commit that fails reading the clock or a counter keeps them staged, and the
+    ///     retried commit assigns them again (a counter advanced before the failure leaves a gap, never a repeat).
     /// </summary>
     private async Task AssignStoreGeneratedAsync(CancellationToken cancellationToken)
     {
@@ -394,12 +396,16 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
             return;
         }
 
-        var pending = _generatedInserts.ToList();
+        await AssignStoreGeneratedAsync(_generatedInserts.ToList(), cancellationToken).ConfigureAwait(false);
         _generatedInserts.Clear();
-        await AssignStoreGeneratedAsync(pending, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Gives these inserts the values the store assigns their store-generated members.</summary>
+    /// <summary>
+    ///     Gives these inserts the values the store assigns their store-generated members. A counter advances outside the
+    ///     open transaction, as a PostgreSQL sequence does: concurrent transactions inserting into one collection never
+    ///     write-lock its counter until they end (which MongoDB answers with a write conflict), and a transaction that
+    ///     rolls back leaves the numbers it took unused, a gap.
+    /// </summary>
     internal async Task AssignStoreGeneratedAsync(IReadOnlyList<(object Entity, Type EntityType)> generatedInserts,
         CancellationToken cancellationToken)
     {
@@ -426,7 +432,7 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
                      .GroupBy(insert => MongoSequences.CounterId(MongoModeling.CollectionName(insert.EntityType), insert.Member.ElementName)))
         {
             var count = counter.Count();
-            var last = await MongoSequences.AdvanceAsync(Database, _session, counter.Key, count, cancellationToken).ConfigureAwait(false);
+            var last = await MongoSequences.AdvanceAsync(Database, counter.Key, count, cancellationToken).ConfigureAwait(false);
             var next = last - count + 1;
             foreach (var insert in counter)
             {

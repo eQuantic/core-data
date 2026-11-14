@@ -257,14 +257,14 @@ public sealed class MongoNativeTypesTests : MongoIntegrationTest
     }
 
     [Test]
-    public async Task A_sequence_is_taken_inside_the_open_transaction()
+    public async Task A_sequence_is_taken_outside_the_open_transaction_and_a_rollback_leaves_a_gap()
     {
         using var db = NewDatabase();
         var repo = Runs(db);
         var uow = Uow(db);
 
-        // The counter collection exists first: a first use inside the transaction would create it there.
-        await repo.AddAsync(new RunRecord());
+        var before = new RunRecord();
+        await repo.AddAsync(before);
         await uow.CommitAsync();
 
         await uow.BeginTransactionAsync();
@@ -274,9 +274,15 @@ public sealed class MongoNativeTypesTests : MongoIntegrationTest
         await uow.RollbackTransactionAsync();
 
         var counter = await Raw(db, MongoSequences.CollectionName, "RunRecord.Sequence");
-        Assert.That(counter["value"].ToInt64(), Is.EqualTo(inside.Sequence - 1),
-            "the counter's $inc ran in the transaction, and rolled back with it");
-        Assert.That(await repo.GetAsync(inside.Id), Is.Null);
+        Assert.That(inside.Sequence, Is.EqualTo(before.Sequence + 1));
+        Assert.That(counter["value"].ToInt64(), Is.EqualTo(inside.Sequence),
+            "the counter's $inc ran outside the transaction, as a PostgreSQL sequence's nextval does, and stays");
+        Assert.That(await repo.GetAsync(inside.Id), Is.Null, "the insert rolled back");
+
+        var after = new RunRecord();
+        await repo.AddAsync(after);
+        await uow.CommitAsync();
+        Assert.That(after.Sequence, Is.EqualTo(inside.Sequence + 1), "the rolled-back number is a gap, never handed out again");
     }
 
     [Test]

@@ -18,7 +18,7 @@ queries so they can never disagree.
 | Text ignoring case | an escaped, anchored, case-insensitive regular expression (`/^…\z/i`); `ToLower() == v` keeps C#'s meaning (a value with an upper-case letter matches nothing) |
 | Set-based writes | native operators: `$set`, `$inc`, `$mul`, `$push`, `$addToSet`, `$pull` |
 | Concurrency | `[ConcurrencyToken]` → version-filtered conditional replaces/deletes |
-| Named locks | **leases** in `_locks`: one conditional `findOneAndUpdate` upsert on the server's clock (`$$NOW`), renewed while held, swept by a TTL index; a dead holder's lease expires — see [Named locks](../writing/locks.md) |
+| Named locks | **leases** in `_locks`: one conditional `findOneAndUpdate` upsert on the server's clock (`$$NOW`), acknowledged by a majority of the replica set, renewed while held, swept by a TTL index; a dead holder's lease expires — see [Named locks](../writing/locks.md) |
 | TTL | `[TimeToLive]` → per-document TTL index (from `CreatedAt` or an explicit date member) |
 | Ordered reads | `[ClusteringKey]` → compound index with directions |
 | Migrations | collections, all index kinds (unique, filtered, text, TTL, composite), field ops, `Run` |
@@ -50,7 +50,14 @@ every other provider, through MongoDB's own mechanisms:
   back equal, and `null` stays `null`.
 - **Sequence** — an atomic counter: one document per `<collection>.<element>` in `_sequences`,
   advanced by `findOneAndUpdate` with `$inc` (upserted on first use), one `$inc` per counter for a
-  whole commit, inside the open transaction. No number is ever handed out twice.
+  whole commit, acknowledged by a majority of the replica set (a `w:1` acknowledgement can be rolled
+  back by a failover, and the number handed out again). No number is ever handed out twice. The
+  counter advances **outside** the open transaction, as a PostgreSQL sequence's `nextval` does:
+  transactions inserting into one collection at once never wait on, or conflict over, its counter,
+  and a transaction that rolls back leaves the numbers it took unused — a gap, as on PostgreSQL. A
+  commit that fails before it writes (the clock or a counter could not be read) keeps its inserts
+  staged, and the retried commit gives them their values again; a counter advanced before the
+  failure leaves a gap, never a repeat.
 - **Clock** — the server's clock (`hello`'s `localTime`), read once per commit and given to every
   insert of it, the way PostgreSQL's `now()` is the transaction's time.
 - **Updates keep them** — a staged replace becomes one pipeline update (`$replaceWith` over
