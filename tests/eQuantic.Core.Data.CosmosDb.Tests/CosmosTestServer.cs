@@ -236,8 +236,11 @@ public sealed class InFlightRequests : RequestHandler
 
     public override async Task<ResponseMessage> SendAsync(RequestMessage request, CancellationToken cancellationToken)
     {
+        // An item's own request names it under the container (/colls/x/docs/id); a create names the container alone.
         var watched = Volatile.Read(ref _watched);
-        if (watched is null || request.RequestUri?.OriginalString.Contains(watched, StringComparison.Ordinal) != true)
+        var uri = request.RequestUri?.OriginalString;
+        if (watched is null || uri is null
+            || !uri.Contains(watched, StringComparison.Ordinal) && !uri.EndsWith(watched[..^1], StringComparison.Ordinal))
         {
             return await base.SendAsync(request, cancellationToken);
         }

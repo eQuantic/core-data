@@ -770,6 +770,37 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task Inserting_many_keeps_a_bounded_number_of_requests_in_flight_and_counts_every_create()
+    {
+        const int jobs = 200;
+        var taken = new Job { Category = Partition, Status = "taken" };
+        using (var seed = NewScope())
+        {
+            await RepoOf<Job>(seed).AddAsync(taken);
+            await Commit(seed);
+        }
+
+        using var scope = NewScope();
+        var batch = Enumerable.Range(0, jobs).Select(_ => new Job { Category = Partition, Status = "queued" })
+            .Append(new Job { Id = taken.Id, Category = Partition, Status = "duplicate" }).ToList();
+        long inserted;
+        CosmosTestServer.Requests.Watch(CosmosTestServer.ContainerName);
+        try
+        {
+            inserted = await Resolve<IUpsertRepository<Job, string>>(scope).InsertManyAsync(batch, skipDuplicates: true);
+        }
+        finally
+        {
+            CosmosTestServer.Requests.Stop();
+        }
+
+        Assert.That(inserted, Is.EqualTo((long)jobs), "every create counted, the taken id left out");
+        Assert.That(CosmosTestServer.Requests.Peak, Is.InRange(2, Repository.CosmosSet<Job>.MaxConcurrentItems),
+            "the items are created several at a time, never all of them at once");
+        Assert.That((await RepoOf<Job>(scope).GetFilteredAsync(x => x.Category == Partition)).Count(), Is.EqualTo(jobs + 1));
+    }
+
+    [Test]
     public async Task A_transaction_of_more_operations_than_one_batch_takes_is_refused_whole()
     {
         // Six modifies of twelve members are two patches each: ninety inserts and six modifies are 96 writes and 102

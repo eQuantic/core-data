@@ -481,7 +481,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
     // ---------------------------------------------------------------- inserts skipping duplicates (immediate)
 
     /// <summary>
-    ///     Creates every entity at once, concurrently, and counts the creates that applied. A taken id (or unique key)
+    ///     Creates every entity, at most <see cref="MaxConcurrentItems" /> at once, and counts the creates that applied. A taken id (or unique key)
     ///     answers 409: with <paramref name="skipDuplicates" /> the entity is left out; without it the call fails with
     ///     <see cref="DuplicateKeyException" /> once every create has answered — each create is its own write, so the
     ///     others stay written.
@@ -507,12 +507,13 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
             await _unitOfWork.AssignStoreGeneratedAsync(inserts, new CosmosServerClock(), cancellationToken).ConfigureAwait(false);
         }
 
+        // A few creates at a time, as a set-based write's items are: all of a large batch at once would be throttled.
         var conflicts = new System.Collections.Concurrent.ConcurrentBag<CosmosException>();
-        var created = await Task.WhenAll(inserts.Select(async insert =>
+        var created = await ForEachItemAsync(entities, async entity =>
         {
             try
             {
-                await _container.CreateItemAsync((TEntity)insert.Entity, insert.PartitionKey, cancellationToken: cancellationToken)
+                await _container.CreateItemAsync(entity, _configuration.GetPartitionKey(entity), cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 return 1;
             }
@@ -521,7 +522,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
                 conflicts.Add(exception);
                 return 0;
             }
-        })).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
 
         if (!skipDuplicates && conflicts.TryPeek(out var conflict))
         {
