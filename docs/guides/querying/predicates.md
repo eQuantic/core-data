@@ -133,6 +133,13 @@ A **negated equality** keeps the rows whose member is null, on every store, as C
 relational engines, `IS_NULL`/`IS_DEFINED` on Cosmos DB, the residual on Cassandra, where a null member's
 text fails a text test and stays null when folded instead of throwing).
 
+A **null value** reads the same way everywhere: `string.Equals(x.Name, null, …)` (either argument, any
+comparison) is `x.Name == null`; `x.Name.ToLower() == null` holds for a null `Name` (null folds to
+null), while `x.Name.ToLower().Equals(null)` holds for none; and `Contains`/`StartsWith`/`EndsWith`
+against null is refused (`NotSupportedException`), as C# refuses it. On Cosmos DB, whose
+`STRINGEQUALS`, `STARTSWITH` and `LOWER` answer undefined for null, `string.Equals(x.A, x.B, …)`
+holds where both are null and a test with no member is evaluated as C# evaluates it.
+
 `InvariantCultureIgnoreCase` reads as `OrdinalIgnoreCase`. The value's wildcard characters are
 **literal** on every store (`%`, `_`, `[`, a regular expression's metacharacters), escaped where the
 store needs it. A one-argument `Contains`/`StartsWith`/`EndsWith` keeps following the store's

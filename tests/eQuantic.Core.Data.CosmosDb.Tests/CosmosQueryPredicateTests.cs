@@ -403,6 +403,40 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task A_text_equality_meets_a_null_as_the_engines_read_it()
+    {
+        // STRINGEQUALS and LOWER answer undefined for null, which reads as "no row", negated or not.
+        await Seed(new RelTicket { Title = "x", Alias = null }, new RelTicket { Title = null!, Alias = null },
+            new RelTicket { Title = "x", Alias = "X" }, new RelTicket { Title = "x", Alias = "y" });
+        using var scope = NewScope();
+        var repo = RepoOf<RelTicket>(scope);
+        var partition = Partition;
+        string? nothing = null;
+        var text = "abc";
+        async Task<string[]> Rows(System.Linq.Expressions.Expression<Func<RelTicket, bool>> filter) =>
+            (await repo.GetFilteredAsync(filter.AndAlso(x => x.Category == partition)))
+            .Select(x => $"{x.Title ?? "-"}/{x.Alias ?? "-"}").OrderBy(x => x, StringComparer.Ordinal).ToArray();
+
+        Assert.That(await Rows(x => string.Equals(x.Alias, nothing, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "-/-", "x/-" }),
+            "a member equal to null is its null test, as on every engine");
+        Assert.That(await Rows(x => !string.Equals(x.Alias, nothing, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "x/X", "x/y" }));
+        Assert.That(await Rows(x => string.Equals(nothing, x.Alias, StringComparison.Ordinal)), Is.EqualTo(new[] { "-/-", "x/-" }));
+        Assert.That(await Rows(x => string.Equals(x.Alias, x.Title, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "-/-", "x/X" }),
+            "two nulls are equal");
+        Assert.That(await Rows(x => !string.Equals(x.Alias, x.Title, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "x/-", "x/y" }),
+            "a null is unequal to a text");
+        Assert.That(await Rows(x => !x.Alias!.Equals(x.Title, StringComparison.OrdinalIgnoreCase)), Is.EqualTo(new[] { "-/-", "x/-", "x/y" }),
+            "a null receiver fails the test, so its negation holds");
+        Assert.That(await Rows(x => x.Title == "x" && (string.Equals(text, nothing, StringComparison.OrdinalIgnoreCase) || x.Alias == "y")),
+            Is.EqualTo(new[] { "x/y" }), "a test without a member is evaluated as C# evaluates it");
+        Assert.That(await Rows(x => x.Alias!.ToLower() == nothing), Is.EqualTo(new[] { "-/-", "x/-" }), "null folds to null");
+        Assert.That(await Rows(x => x.Alias!.ToLower() != nothing), Is.EqualTo(new[] { "x/X", "x/y" }));
+        Assert.That(await Rows(x => x.Alias!.ToLower().Equals(nothing)), Is.Empty, "a folded text never equals null");
+        Assert.That(() => repo.GetFilteredAsync(x => x.Alias!.StartsWith(nothing!, StringComparison.OrdinalIgnoreCase)),
+            Throws.InstanceOf<NotSupportedException>(), "a match against null is refused, as C# refuses it");
+    }
+
+    [Test]
     public async Task An_array_and_a_list_are_tested_with_Contains()
     {
         var companies = Enumerable.Range(1, 4).Select(rank => new RelCompany { Name = "c" + rank, Rank = rank }).ToArray();
