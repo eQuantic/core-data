@@ -202,6 +202,10 @@ internal static class CassandraInclude
         {
             // The foreign key is the partition key: the cluster groups and counts, only the counts travel.
             Gate(plan, options, $"the count of '{count.Navigation.Name}'", clientWork: false);
+            // The key comes back in its stored form (an enum as its number or label): read it as the mapper reads a
+            // member, so it names the parent as the parent's own key does.
+            var keyColumn = configuration.Column(column);
+            var keyType = keyColumn is null ? typeof(object) : CassandraValues.StoredType(keyColumn, foreignKey.PropertyType);
             var grouped = await InChunksAsync(configuration, foreignKey, keys, async chunk =>
             {
                 var chunkPlan = CassandraCql.Plan(configuration, options, In<TElement>(foreignKey, chunk));
@@ -209,7 +213,8 @@ internal static class CassandraInclude
                           + (chunkPlan.RequiresAllowFiltering ? " ALLOW FILTERING" : string.Empty);
                 var rows = await CassandraStatements.ExecuteAsync(unitOfWork.GetSession(), cql, chunkPlan.Values, consistency,
                     unitOfWork.CommandLogger, unitOfWork.SensitiveLogging).ConfigureAwait(false);
-                return rows.Select(row => (Key: KeyText(row.GetValue<object>(0)), Count: row.GetValue<long>(1))).ToList();
+                return rows.Select(row => (Key: KeyText(CassandraValues.FromStored(foreignKey.PropertyType, row.GetValue(keyType, 0))),
+                    Count: row.GetValue<long>(1))).ToList();
             }).ConfigureAwait(false);
             foreach (var (key, found) in grouped)
             {

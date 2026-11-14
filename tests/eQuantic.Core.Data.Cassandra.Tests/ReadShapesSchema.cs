@@ -141,6 +141,41 @@ public sealed class ShapeTicket : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A zone, the key of a region (stored as its number, as an enum without <c>[EnumType]</c> is).</summary>
+public enum ShapeZone
+{
+    North = 1,
+    South = 2,
+}
+
+/// <summary>A region keyed by its zone, with the offices in it.</summary>
+public sealed class ShapeRegion : IEntity<ShapeZone>
+{
+    public ShapeZone Id { get; set; }
+
+    public string Name { get; set; } = "";
+
+    public List<ShapeOffice>? Offices { get; set; }
+
+    public ShapeZone GetKey() => Id;
+
+    public void SetKey(ShapeZone key) => Id = key;
+}
+
+/// <summary>An office, partitioned by its region's zone.</summary>
+public sealed class ShapeOffice : IEntity<Guid>
+{
+    public ShapeZone ShapeRegionId { get; set; }
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string City { get; set; } = "";
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>
 ///     The read-shape entities' mapping: each related table is partitioned by its foreign key, so a run's steps, a
 ///     package's versions, a board's cards and a repository's comments each live in one partition, clustered in the
@@ -175,6 +210,11 @@ internal static class ReadShapesModel
             .ClusteringKey(x => x.Name)
             .ClusteringKey(x => x.Id)
             .Key(x => x.Id))
+        .Entity<ShapeRegion>(entity => entity.PartitionKey(x => x.Id))
+        .Entity<ShapeOffice>(entity => entity
+            .PartitionKey(x => x.ShapeRegionId)
+            .ClusteringKey(x => x.Id)
+            .Key(x => x.Id))
         .Entity<ShapeQueue>(entity => entity.PartitionKey(x => x.Id))
         .Entity<ShapeTicket>(entity => entity
             .PartitionKey(x => x.Desk)
@@ -191,6 +231,8 @@ internal static class ReadShapesModel
         new EnsureCollectionOperation(typeof(ShapeCard)),
         new EnsureCollectionOperation(typeof(ShapeComment)),
         new EnsureCollectionOperation(typeof(ShapeTag)),
+        new EnsureCollectionOperation(typeof(ShapeRegion)),
+        new EnsureCollectionOperation(typeof(ShapeOffice)),
         new EnsureCollectionOperation(typeof(ShapeQueue)),
         new EnsureCollectionOperation(typeof(ShapeTicket)),
     ];

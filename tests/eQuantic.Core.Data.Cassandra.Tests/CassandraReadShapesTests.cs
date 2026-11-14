@@ -132,6 +132,26 @@ public sealed class CassandraReadShapesTests : CassandraIntegrationTest
     }
 
     [Test]
+    public async Task A_relation_whose_key_is_stored_in_another_form_is_counted_on_the_cluster()
+    {
+        var regions = _db.Resolve<IAsyncRepository<ShapeRegion, ShapeZone>>();
+        await regions.AddAsync(new ShapeRegion { Id = ShapeZone.North, Name = "north" });
+        await regions.AddAsync(new ShapeRegion { Id = ShapeZone.South, Name = "south" });
+        await Add(new ShapeOffice { ShapeRegionId = ShapeZone.North, City = "a" }, new ShapeOffice { ShapeRegionId = ShapeZone.North, City = "b" },
+            new ShapeOffice { ShapeRegionId = ShapeZone.South, City = "c" });
+        await Commit();
+
+        var zones = new List<ShapeZone> { ShapeZone.North, ShapeZone.South };
+        var counted = (await regions.GetMappedAsync(x => new { x.Id, Offices = x.Offices!.Count() },
+                new QueryOptions<ShapeRegion>().Where(x => zones.Contains(x.Id))))
+            .ToDictionary(x => x.Id, x => x.Offices);
+
+        Assert.That(_statements, Has.Some.Contains("GROUP BY ShapeRegionId"), "partitioned by the foreign key, counted on the cluster");
+        Assert.That(counted, Is.EqualTo(new Dictionary<ShapeZone, int> { [ShapeZone.North] = 2, [ShapeZone.South] = 1 }),
+            "the cluster answers each zone as its number, which is the member the parent holds");
+    }
+
+    [Test]
     public async Task A_relation_is_counted_not_loaded()
     {
         var package = new ShapePackage { Name = "core" };
