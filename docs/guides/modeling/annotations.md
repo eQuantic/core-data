@@ -101,7 +101,9 @@ build to refuse.
   entity compose a multi-hash key: the container is created with all paths, point writes build the
   multi-value key transparently, and partition inference declines (fans out) rather than guessing.
 - **`[EnumType]` means "the store holds the labels and nothing else".** Each member's label is its
-  `[StoredAs]` name, or its own name. Filters and set-based updates compare and write labels, including
+  `[StoredAs]` name, or its own name, and each member needs a value of its own: two members of one value
+  (an alias) are refused, since C# cannot tell them apart and `Enum.GetName` does not say which name
+  such a value takes. Filters and set-based updates compare and write labels, including
   the `(int)x.State == 1` shape the compiler produces. The enum still **compares and orders by its
   members' values**, as C# does, never by the labels' text nor by the order PostgreSQL or MySQL declared
   them in: `x.Priority >= Priority.Medium` (on a nullable member too, and under a negation, where a null

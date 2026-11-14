@@ -139,8 +139,19 @@ public static class EnumLabels
 
             var byMember = new Dictionary<string, string>(StringComparer.Ordinal);
             var byLabel = new Dictionary<string, object>(StringComparer.Ordinal);
+            var byValue = new Dictionary<object, string>();
             foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Static))
             {
+                // Two members of one value are one value to C#: which name Enum.GetName gives it is not specified, so the
+                // label it is stored as would not be either, and a row written as one could be filtered as the other.
+                var value = field.GetRawConstantValue()!;
+                if (!byValue.TryAdd(value, field.Name))
+                {
+                    throw new InvalidOperationException(
+                        $"The members '{type.Name}.{byValue[value]}' and '{type.Name}.{field.Name}' share the value {value}, so which label " +
+                        "that value is stored as is not defined; each member of an enum stored as its labels needs a value of its own.");
+                }
+
                 var label = field.GetCustomAttribute<StoredAsAttribute>()?.Name ?? field.Name;
                 if (string.IsNullOrWhiteSpace(label))
                 {

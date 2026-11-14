@@ -25,6 +25,20 @@ public enum Priority
     Medium = 2,
 }
 
+/// <summary>A state whose two members share a value: an alias, which C# cannot tell from the member it aliases.</summary>
+[EnumType]
+public enum AliasedState
+{
+    [StoredAs("open")]
+    Open = 0,
+
+    [StoredAs("active")]
+    Active = 0,
+
+    [StoredAs("closed")]
+    Closed = 1,
+}
+
 /// <summary>A ticket with a priority and an escalation that may be unset.</summary>
 public sealed class Ticket
 {
@@ -47,6 +61,16 @@ public sealed class EnumOrderTests
             Is.EqualTo(new[] { ("low", 1m), ("medium", 2m), ("high", 3m), ("a_urgent", 4m) }));
         Assert.That(EnumOrder.ByValue(typeof(Priority?)), Is.EqualTo(new Enum[] { Priority.Low, Priority.Medium, Priority.High, Priority.Urgent }),
             "a nullable member's enum is the same enum");
+    }
+
+    [Test]
+    public void An_enum_whose_members_share_a_value_is_not_stored_as_labels()
+    {
+        // Enum.GetName names a shared value by either member, unspecified, so its label would be either: a row written as
+        // "open" could be filtered as "active" and not found.
+        Assert.That(() => EnumLabels.Of(typeof(AliasedState)),
+            Throws.InvalidOperationException.With.Message.Contains("'AliasedState.Open' and 'AliasedState.Active' share the value 0"));
+        Assert.That(() => EnumLabels.Label(AliasedState.Closed), Throws.InvalidOperationException, "nor is any of its members written");
     }
 
     [TestCase(ComparisonOperator.GreaterThanOrEqual, new[] { Priority.Medium, Priority.High, Priority.Urgent })]
