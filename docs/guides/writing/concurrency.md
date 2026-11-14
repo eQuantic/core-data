@@ -35,7 +35,7 @@ reapply, retry. The stale writer's data **never reached the store**.
 | Store | A `Modify` becomes | A lost race is |
 |---|---|---|
 | Relational | `UPDATE … SET …, version = @next WHERE key = @k AND version = @old` | 0 rows affected → the whole flush **rolls back** |
-| Cosmos DB | replace with `If-Match: <etag>` (the token is a `string` member carrying `_etag`) | HTTP 412 → conflict |
+| Cosmos DB | replace with `If-Match: <etag>` (the token is a `string` member carrying `_etag`) | HTTP 412, or 404 when the document was removed → conflict (a transactional batch: nothing applied) |
 | Cassandra | a **lightweight transaction**: `UPDATE … IF version = @old` (new rows: `INSERT … IF NOT EXISTS`) | `[applied] = false` → conflict |
 | MongoDB | `ReplaceOne` filtered on `{_id, version}` with the bump in the document | matched 0 → conflict |
 

@@ -12,8 +12,9 @@ namespace eQuantic.Core.Data.CosmosDb;
 ///     created on first use), advanced by a <c>Patch</c> <c>Increment</c>, which answers the item as it now is — so no
 ///     two inserts ever take the same number. The increment runs outside a transactional batch (a batch is bound to
 ///     one container and one partition): a batch that fails leaves a gap, never a repeat, as a relational sequence
-///     does. The clock is the server's (<c>SELECT VALUE GetCurrentDateTime()</c>), read once per commit and given to
-///     every insert of it. Everything here goes through the stream API, whatever serializer the client carries.
+///     does. The clock is the server's (<c>SELECT VALUE GetCurrentDateTime()</c>), read once per write operation — a
+///     commit, an <c>InsertManyAsync</c>, an upsert — and given to every insert of it. Everything here goes through the
+///     stream API, whatever serializer the client carries.
 ///     <para>
 ///         The increment is atomic in the region that applies it. An account that accepts writes in several regions
 ///         applies it to each region's copy of the counter before the copies converge, so two inserts in two regions

@@ -342,7 +342,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
                 if (!assigned)
                 {
                     // The store's values for the insert, once: a retry that ends in the update leaves a gap, never a repeat.
-                    await _unitOfWork.AssignStoreGeneratedAsync([(entity, _configuration, partitionKey)], cancellationToken).ConfigureAwait(false);
+                    await _unitOfWork.AssignStoreGeneratedAsync([(entity, _configuration, partitionKey)], new CosmosServerClock(), cancellationToken)
+                        .ConfigureAwait(false);
                     assigned = true;
                 }
 
@@ -494,7 +495,8 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
 
         if (_configuration.StoreGenerated.Count > 0)
         {
-            await _unitOfWork.AssignStoreGeneratedAsync(inserts, cancellationToken).ConfigureAwait(false);
+            // One read of the server's clock for this call's inserts, taken now: never one an earlier write read.
+            await _unitOfWork.AssignStoreGeneratedAsync(inserts, new CosmosServerClock(), cancellationToken).ConfigureAwait(false);
         }
 
         var conflicts = new System.Collections.Concurrent.ConcurrentBag<CosmosException>();

@@ -32,11 +32,14 @@ translation asks the same contract**:
   `_sequences` container (partitioned by `/id`, created on first use, and created again if it is
   removed later), advanced by a `Patch` `Increment`, which answers the new value. One increment per
   counter covers a whole commit. It runs outside a `TransactionalBatch` (bound to one partition): a
-  failed batch leaves a gap, never a repeat. On an account with provisioned throughput, the
-  container takes its own throughput unless the database shares it. An account with **multi-region
-  writes** is refused — see [Multi-region writes](#multi-region-writes).
+  failed batch leaves a gap, never a repeat, and so does an insert the store refuses (one number,
+  however many times a `Modify` that inserts reads again). On an account with provisioned
+  throughput, the container takes its own throughput unless the database shares it. An account with
+  **multi-region writes** is refused — see [Multi-region writes](#multi-region-writes).
 - **Clock** — the server's clock, `SELECT VALUE GetCurrentDateTime()` scoped to one partition,
-  read once per commit and given to every insert of it.
+  read once per write operation (a commit, a transaction, an `InsertManyAsync`, an upsert) when it
+  first needs it, and given to every insert of that operation. A failed read is not kept: the next
+  operation reads again.
 - **Updates keep them** — a replace writes the whole document, so `Modify` first reads the stored
   document, copies its store-generated values onto the entity and replaces it with `If-Match` on
   the `_etag` it read (reading again if another writer got in between; an entity carrying its own
@@ -75,7 +78,9 @@ model.Entity<Order>(entity => entity
 
 - Commits flush as batched point writes with **bulk execution** enabled.
 - `[ConcurrencyToken]` on a `string` member (carrying `_etag`) turns `Modify`/`Merge` into
-  conditional replaces (`If-Match`) — see [Concurrency](../writing/concurrency.md).
+  conditional replaces (`If-Match`). A replace refused on its `_etag` (412), or finding the document
+  removed (404), fails the commit with `ConcurrencyConflictException`, as on every engine; the other
+  writes of the commit stand — see [Concurrency](../writing/concurrency.md).
 - `UpdateManyAsync` renders **patch operations** (`Set`, `Increment`, array append/remove) — the
   provider queries the affected ids and patches per item **under the filter**
   (`PatchItemRequestOptions.FilterPredicate`), so an item that stopped matching is left alone and the
@@ -93,7 +98,12 @@ model.Entity<Order>(entity => entity
   it; the id and a container's **unique key** hold a target unique within a partition, and only then
   is a concurrent upsert race-free. A 409 on a create is `DuplicateKeyException` (Cosmos DB names no
   key). See [Upserts and write outcomes](../writing/upserts.md).
-- `BeginTransactionAsync` gives a `TransactionalBatch` — single partition, enforced with guidance.
+- `BeginTransactionAsync` gives a `TransactionalBatch` — single partition and **at most 100
+  operations** (a member-scoped `ModifyAsync` of more than ten members is one operation per ten), both
+  enforced before anything is read, numbered or written, and the refused transaction's writes are
+  discarded. Splitting it would give up the atomicity it exists for. A batch the store refuses throws
+  `DuplicateKeyException` for a taken key, `ConcurrencyConflictException` for a stale token, and
+  otherwise a `CosmosException` with the failing operation's status and the store's reason.
 
 ## Multi-region writes
 

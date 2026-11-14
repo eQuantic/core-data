@@ -36,6 +36,9 @@ public sealed class CosmosTestServer
     private static ServiceProvider? _provider;
     private static Exception? _startupError;
 
+    /// <summary>The container of the entity whose clock read a test makes fail by removing the container.</summary>
+    public const string ClockProbeContainer = "clock_probe";
+
     /// <summary>Counts the requests the shared client has in flight against one container, while a test watches.</summary>
     public static InFlightRequests Requests { get; } = new();
 
@@ -145,6 +148,9 @@ public sealed class CosmosTestServer
             .Generated(x => x.IssuedAt, eQuantic.Core.Data.Modeling.StoreValue.Clock))
         .Entity<Secret>(entity => entity.Container(SecretsContainer).PartitionKey(x => x.Category))
         .Entity<UserAccount>(entity => entity.Container(UsersContainer).PartitionKey(x => x.Category))
+        .Entity<NumberedAccount>(entity => entity.Container(UsersContainer).PartitionKey(x => x.Category).Generated(x => x.Number))
+        .Entity<ClockStamp>(entity => entity.Container(ClockProbeContainer).PartitionKey(x => x.Category)
+            .Generated(x => x.At, eQuantic.Core.Data.Modeling.StoreValue.Clock))
         .Entity<Label>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))

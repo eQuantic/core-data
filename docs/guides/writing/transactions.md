@@ -52,7 +52,7 @@ catch
 |---|---|---|
 | Relational | a real DB transaction spanning commits, read-your-writes | — |
 | MongoDB | a multi-document session; reads inside see its writes | requires a replica set |
-| Cosmos DB | a `TransactionalBatch` | **single partition only** — crossing partitions throws with guidance |
+| Cosmos DB | a `TransactionalBatch` | **single partition only, at most 100 operations** — crossing partitions or passing the limit throws with guidance before anything is written, and discards the transaction's writes |
 | Cassandra | writes deferred and flushed as one atomic `LOGGED BATCH` | atomicity only (no isolation — Cassandra's own definition); a [concurrency-token](concurrency.md) write refuses to join the batch |
 
 ## Set-based writes are outside both
