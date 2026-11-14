@@ -350,6 +350,10 @@ internal static class QueryPredicateScenarios
         Assert.That(await Titles(newScope, x => !x.Runs!.Any()), Is.EqualTo(new[] { "B", "C" }));
         Assert.That(await Titles(newScope, x => x.Box == null), Is.EqualTo(new[] { "B", "C" }), "C's box id names no box");
         Assert.That(await Titles(newScope, x => x.Box != null), Is.EqualTo(new[] { "A" }));
+        Assert.That(await Titles(newScope, x => !(x.Box != null)), Is.EqualTo(new[] { "B", "C" }),
+            "the negation of a related row is no related row, an unset key included, as x.Box == null says");
+        Assert.That(await Titles(newScope, x => !(x.Box!.Name == "inbox")), Is.EqualTo(new[] { "B", "C" }),
+            "no related row meets the test: B's key is unset, C's names no box");
         Assert.That(await Titles(newScope, x => x.Box!.Name == "inbox"), Is.EqualTo(new[] { "A" }));
 
         using var scope = newScope();

@@ -293,6 +293,10 @@ public sealed class MongoQueryPredicateTests : MongoIntegrationTest
         Assert.That(await Titles(x => x.Box == null), Is.EqualTo(new[] { "B", "C" }), "C's box id names no box");
         Assert.That(await Titles(x => x.Box != null), Is.EqualTo(new[] { "A" }));
         Assert.That(await Titles(x => x.Box!.Name == "inbox"), Is.EqualTo(new[] { "A" }));
+        Assert.That(await Titles(x => !(x.Box != null)), Is.EqualTo(new[] { "B", "C" }),
+            "the negation of a related row is no related row, an unset key included, as x.Box == null says");
+        Assert.That(await Titles(x => !(x.Box!.Name == "inbox")), Is.EqualTo(new[] { "B", "C" }),
+            "no related row meets the test: B's key is unset, C's names no box");
 
         using var scope = NewScope();
         Assert.That(await Repo<RelItem>(scope).DeleteManyAsync(x => x.Box == null && !x.Runs!.Any()), Is.EqualTo(2L));
