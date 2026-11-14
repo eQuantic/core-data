@@ -224,6 +224,24 @@ internal static class SqlFilterRenderer
         }
     }
 
+    /// <summary>
+    ///     Renders the filter with its values written in as the dialect's literals (<see cref="SqlDialect.Literal" />), for a
+    ///     statement that has to carry the predicate itself: a filtered index's DDL, which takes no parameters, and an
+    ///     upsert's conflict filter, which names that index's predicate.
+    /// </summary>
+    /// <param name="dialect">The dialect.</param>
+    /// <param name="configuration">The mapping of the entity the filter reads.</param>
+    /// <param name="filter">The filter.</param>
+    public static string RenderInlined(SqlDialect dialect, RelationalEntityConfiguration configuration, QueryFilter filter)
+    {
+        var values = new List<object?>();
+        var fragment = Render(dialect, configuration, filter, values);
+
+        // One pass over the markers: a literal whose text holds a marker is never read as one.
+        return System.Text.RegularExpressions.Regex.Replace(fragment, @"@p(\d+)\b", marker =>
+            dialect.Literal(values[int.Parse(marker.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)]));
+    }
+
     /// <summary>Attempts to render, reporting failure instead of throwing — the engine turns refusals into residual work.</summary>
     public static bool TryRender(SqlDialect dialect, RelationalEntityConfiguration configuration, QueryFilter filter,
         List<object?> parameters, out string sql, RelationalRelations? relations = null)

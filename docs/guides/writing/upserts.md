@@ -54,12 +54,17 @@ What an upsert promises, everywhere:
   `x.Uses + 1`, read the *existing* row), or, without one, the entity's mapped non-key members.
 - **A key or unique key other than the target** that the insert would take fails with
   `DuplicateKeyException` — the upsert does not silently turn into an update of some other row.
+- **On a key the store generates**, the target is the row holding the entity's key; when no row
+  holds it, the upsert inserts a row the store numbers, as an insert of a new entity does — the
+  entity's key is never written into a new row, where it could later collide with a number the store
+  hands out. MySQL, which cannot hand back a key it generates, refuses an upsert on one
+  (`NotSupportedException`) before writing anything; MariaDB hands it back with `RETURNING`.
 
 | Store | Mechanism | Guarantee |
 |---|---|---|
-| PostgreSQL | `INSERT … ON CONFLICT (target) [WHERE filter] DO UPDATE … RETURNING` | atomic, race-free; the target needs a matching unique index or constraint (PostgreSQL refuses one it cannot infer), and the conflict filter must imply a partial index's predicate |
-| SQL Server | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` | atomic, race-free — `HOLDLOCK` keeps the target's range locked from the match to the insert |
-| MySQL / MariaDB | the target read with `SELECT … FOR UPDATE` in a transaction, then `INSERT` or `UPDATE` by key; a duplicate key on the target (a concurrent insert won) or a deadlock runs it again | atomic, race-free with a unique index on the target. `ON DUPLICATE KEY UPDATE` is not used: it fires on *any* unique key and cannot be told which one is the target |
+| PostgreSQL | `INSERT … ON CONFLICT (target) [WHERE filter] DO UPDATE … RETURNING`; the conflict filter is written with its values in place, as the partial index's own predicate is, since PostgreSQL matches it when it plans the statement — bound as parameters it stops matching once the driver prepares the statement and the store plans it for any value. On a generated key the insert writes the entity's key when a row holds it, and the identity's next number otherwise | atomic, race-free; the target needs a matching unique index or constraint (PostgreSQL refuses one it cannot infer), and the conflict filter must imply a partial index's predicate |
+| SQL Server | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` (the conflict filter's values in place, as on PostgreSQL) | atomic, race-free — `HOLDLOCK` keeps the target's range locked from the match to the insert |
+| MySQL / MariaDB | in a transaction (the caller's, or one of its own): the target read without a lock; a row found, read again with `SELECT … FOR UPDATE` and updated by key; a row not found, inserted — and when a concurrent insert of the target wins, the store refuses this one with a duplicate key (rolling back that statement alone), and the row that won is read with `SELECT … FOR UPDATE` and updated. A deadlock outside an explicit transaction runs it again | atomic, race-free with a unique index on the target. A locking read of a row that is not there would lock the gap where it goes, and two such gap locks deadlock the two inserts; the plain read first takes no lock, so two upserts of one target, each inside an explicit transaction of its own, both succeed — the second waits for the first transaction to end. Inside explicit transactions, **three or more** upserts of a target that is not there yet can still deadlock: the inserts that lose each hold a shared lock on the winner's row before asking for an exclusive one, and InnoDB rolls one caller's transaction back (error 1213, the driver's exception), which no retry can resume. `ON DUPLICATE KEY UPDATE` is not used: it fires on *any* unique key and cannot be told which one is the target |
 | MongoDB | `findOneAndUpdate` of the target (returning the document after it); when nothing matches, an upsert of `$setOnInsert` — and when that finds the target after all, the update runs again | race-free with a unique index on the target (the losing insert gets E11000 and becomes the update); **without one, MongoDB itself can insert twice** |
 | Cosmos DB | the target read (by id, or by a query inside the entity's partition), then a replace (or a patch of the update) under its `_etag`, or a create; a 412 or 409 reads it again | race-free on the id and on a container's unique key, both of which hold **within a partition**; a target nothing holds unique can be created twice |
 | Cassandra | `INSERT … IF NOT EXISTS`, then `UPDATE … IF EXISTS` (or `IF column = value read`, for a value computed from the row) — lightweight transactions | race-free on the **primary key, the only key Cassandra holds unique**: an upsert on any other members is refused (`NotSupportedException`), and a conflict filter the stored row does not match is a `DuplicateKeyException` |
@@ -127,7 +132,7 @@ catch (DuplicateKeyException taken) when (taken.ConstraintName == "ix_users_emai
 |---|---|---|
 | PostgreSQL | SQLSTATE `23505` | the constraint or index |
 | SQL Server | errors 2627 and 2601 | parsed from the message |
-| MySQL / MariaDB | error 1062 (a bulk load's duplicate-key warning too: the load is rolled back) | parsed from the message (MySQL's `table.` prefix dropped) |
+| MySQL / MariaDB | error 1062 (a bulk load's duplicate-key warning too: the load is rolled back whole, to a savepoint inside an explicit transaction) | parsed from the message (MySQL's `table.` prefix dropped) |
 | MongoDB | E11000, from a write, a bulk write or a command | the index |
 | Cosmos DB | 409 on a create (a taken id or unique key), in a transactional batch too | none — Cosmos DB does not say |
 | Cassandra | an `INSERT … IF NOT EXISTS` that did not apply | none |
@@ -152,7 +157,7 @@ filter — and every row it updated comes back as stored after it, store-generat
 |---|---|---|
 | PostgreSQL | `UPDATE … RETURNING` | yes |
 | SQL Server | `UPDATE … OUTPUT INSERTED` | yes |
-| MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update) | yes |
+| MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update); the keys spread over as many statements as the dialect's parameter limit needs | yes |
 | MongoDB | the matching ids, then `findOneAndUpdate` per document (filtered on its id *and* the filter), returning it after the update | per document; the set is one unit only inside an explicit transaction |
 | Cosmos DB | a patch per matching item under the filter (`FilterPredicate`), which answers with the item; an update of more than ten paths patches the item several times in one transactional batch, the first patch under the filter | per item |
 | Cassandra | a lightweight transaction per row: `UPDATE … IF EXISTS` (or `IF` the filter's other members), and `IF column = value read` for a value computed from the row; the row returned is the row read with the update's values | per row |

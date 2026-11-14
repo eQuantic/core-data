@@ -120,6 +120,26 @@ public sealed class MariaDbTests
     [Test]
     public Task A_bulk_load_of_a_taken_key_fails() => WriteOutcomeScenarios.BulkInsertOfTakenKeyFails(NewScope);
 
+    [Test]
+    public Task An_upsert_on_a_generated_key_updates_the_row_holding_it() => WriteOutcomeScenarios.UpsertOnGeneratedKey(NewScope);
+
+    [Test]
+    public Task A_conflict_filter_with_a_value_holds_past_the_prepared_statement_threshold() =>
+        WriteOutcomeScenarios.ConflictFilterWithAValue(NewScope);
+
+    [Test]
+    public Task Two_concurrent_upserts_in_explicit_transactions_both_succeed() =>
+        WriteOutcomeScenarios.UpsertsInExplicitTransactions(NewScope);
+
+    [Test]
+    public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
+        WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
+
+    [Test]
+    public Task Keys_first_writes_past_the_parameter_limit_bind_within_it() =>
+        WriteOutcomeScenarios.KeysFirstWritesPastTheParameterLimit(NewScope, _commands,
+            _scope!.ServiceProvider.GetRequiredService<eQuantic.Core.Data.Relational.SqlDialect>().MaxParameters);
+
     // ---------------------------------------------------------------- query predicates (the same scenarios as MySQL)
 
     [Test]
@@ -274,4 +294,13 @@ public sealed class MariaDbTests
 
     [Test]
     public Task Distinct_values_of_two_members() => ReadShapeScenarios.DistinctOfTwoMembers(Shapes);
+
+    [Test]
+    public Task A_skip_without_a_take_returns_every_row_after_it() => ReadShapeScenarios.SkipWithoutTakeAndTakeWithoutSkip(Shapes);
+
+    [Test]
+    public Task A_take_of_zero_returns_nothing_without_asking_the_store() => ReadShapeScenarios.TakeZero(Shapes);
+
+    [Test]
+    public Task Includes_of_more_parents_than_one_statement_binds() => ReadShapeScenarios.IncludesPastTheParameterLimit(Shapes);
 }

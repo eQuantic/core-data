@@ -21,7 +21,7 @@ the shared relational engine exercises all of it.
 | Text ignoring case | `lower(col) = lower(@p)` for equality, `ILIKE … ESCAPE '!'` (served by the trigram search index) for a part of it |
 | GROUP BY / HAVING / UNION | fully native |
 | Resilience | opt-in transient retry — see [Resilience](../operations/resilience.md) |
-| Upserts | `INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING`; `InsertManyAsync(…, skipDuplicates: true)` is `ON CONFLICT DO NOTHING`; `UpdateAndGetAsync` is `UPDATE … RETURNING`; a taken key (SQLSTATE `23505`) is `DuplicateKeyException` naming the constraint — see [Upserts and write outcomes](../writing/upserts.md) |
+| Upserts | `INSERT … ON CONFLICT (target) [WHERE predicate] DO UPDATE … RETURNING`, the predicate written with its values in place so that it still names a partial unique index once the statement is prepared; on an identity key, the row holding the entity's key is updated and a key no row holds takes the identity's next number; `InsertManyAsync(…, skipDuplicates: true)` is `ON CONFLICT DO NOTHING`; `UpdateAndGetAsync` is `UPDATE … RETURNING`; a taken key (SQLSTATE `23505`) is `DuplicateKeyException` naming the constraint — see [Upserts and write outcomes](../writing/upserts.md) |
 
 ## jsonb members
 

@@ -195,19 +195,19 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
                 return [];
             }
 
-            var updateParameters = new List<object?>();
-            var updateSet = SetList(updateExpression, updateParameters, existingRow: null);
-            var byKeys = KeysAndTheRest(keys, filter, updateParameters);
-            await using (var command = await _unitOfWork.CommandAsync(
-                             $"UPDATE {Table} SET {updateSet} WHERE {byKeys}", updateParameters, cancellationToken).ConfigureAwait(false))
+            foreach (var (update, updateParameters) in ByKeys(keys, filter,
+                         setParameters => $"UPDATE {Table} SET {SetList(updateExpression, setParameters, existingRow: null)}"))
             {
-                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                await ExecuteAsync(update, updateParameters, cancellationToken).ConfigureAwait(false);
             }
 
-            var readParameters = new List<object?>();
-            var readWhere = KeysWhere(keys, readParameters);
-            return await ReadAsync($"SELECT {ColumnList} FROM {Table} WHERE {readWhere}", readParameters, cancellationToken)
-                .ConfigureAwait(false);
+            var rows = new List<TEntity>(keys.Count);
+            foreach (var (read, readParameters) in ByKeys(keys, null, _ => $"SELECT {ColumnList} FROM {Table}"))
+            {
+                rows.AddRange(await ReadAsync(read, readParameters, cancellationToken).ConfigureAwait(false));
+            }
+
+            return rows;
         }, cancellationToken)).ConfigureAwait(false);
     }
 
@@ -216,8 +216,10 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     /// <summary>
     ///     Inserts the entity, or updates the row matching it on the target members, atomically, and returns the row as
     ///     stored: one statement where the dialect has one (<c>INSERT … ON CONFLICT</c>, <c>MERGE … WITH (HOLDLOCK)</c>);
-    ///     otherwise a read of the target under a lock in a transaction, then the insert or the update — run again when
-    ///     a concurrent insert of the same target wins the race (a duplicate key on the target, or a deadlock).
+    ///     otherwise a plain read of the target, then the update of the row it found, locked, or the insert — and, when a
+    ///     concurrent insert of the target wins, the update of that row (run again only after a deadlock outside an
+    ///     explicit transaction). On a key the store generates, the row holding the entity's key is updated, and a key no
+    ///     row holds inserts a row the store numbers.
     /// </summary>
     internal async Task<TEntity> UpsertAsync(TEntity entity, IReadOnlyList<string>? on,
         Expression<Func<TEntity, TEntity>>? update, Expression<Func<TEntity, bool>>? conflictFilter,
@@ -248,6 +250,17 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         var targetValues = target.Select(column => insertColumns.Contains(column)
             ? insertValues[insertColumns.IndexOf(column)]
             : Bind(parameters, column.Read(entity))).ToList();
+
+        // A generated key the upsert targets is written by the insert only where the statement finds the target by what
+        // the insert writes (PostgreSQL's ON CONFLICT): the entity's key when a row holds it, the store's number otherwise.
+        var keyAt = target.ToList().IndexOf(_configuration.Key);
+        if (_configuration.KeyIsGenerated && keyAt >= 0
+            && _dialect.GeneratedKeyUpsertValue(Table, _configuration.Key, targetValues[keyAt]) is { } keyValue)
+        {
+            insertColumns.Add(_configuration.Key);
+            insertValues.Add(keyValue);
+        }
+
         var existingRow = _dialect.UpsertExistingRow(Table);
         var assignments = UpdateAssignments(entity, target, update, parameters, existingRow,
             column => insertColumns.Contains(column) ? insertValues[insertColumns.IndexOf(column)] : Bind(parameters, column.Read(entity)));
@@ -258,9 +271,12 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             assignments.Add($"{first} = {existingRow}.{first}");
         }
 
+        // The conflict filter names a partial unique index's predicate, which PostgreSQL matches when it plans the
+        // statement: written with its values in place, it still matches once the driver has prepared the statement and the
+        // store plans it once for any value — bound as parameters, it matched nothing after a few executions.
         var filter = conflictFilter is null
             ? null
-            : SqlFilterRenderer.Render(_dialect, _configuration, FilterInterpreter.Interpret(conflictFilter), parameters);
+            : SqlFilterRenderer.RenderInlined(_dialect, _configuration, FilterInterpreter.Interpret(conflictFilter));
 
         var sql = _dialect.UpsertSql(Table, insertColumns.Select(column => _dialect.Quote(column.Name)).ToList(), insertValues,
             target.Select(column => _dialect.Quote(column.Name)).ToList(), targetValues, filter, assignments,
@@ -272,93 +288,134 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         Expression<Func<TEntity, TEntity>>? update, Expression<Func<TEntity, bool>>? conflictFilter,
         CancellationToken cancellationToken)
     {
-        if (_configuration.KeyIsGenerated && target.SequenceEqual(_configuration.Keys))
+        if (_configuration.KeyIsGenerated && target.SequenceEqual(_configuration.Keys) && !ReturnsInsertedRows)
         {
             throw new NotSupportedException(
-                $"{_dialect.System} upserts by reading the target, and a key the store generates has no value to read it by; " +
-                "upsert on a unique member instead, or give the entity a client-assigned key.");
+                $"{_dialect.System} cannot hand back a key it generates, and an upsert on one inserts a row the store numbers " +
+                "when no row holds the entity's key; upsert on a unique member instead, or give the entity a client-assigned key.");
         }
 
-        DuplicateKeyException? lostInsert = null;
         for (var attempt = 1; ; attempt++)
         {
-            var inserting = false;
             try
             {
-                return await _unitOfWork.AtomicallyAsync(async () =>
-                {
-                    inserting = false;
-                    // The target, read under a lock: an existing row stays as it is until this transaction ends, and a
-                    // missing one has its place locked where the target is indexed.
-                    var readParameters = new List<object?>();
-                    var targetWhere = TargetWhere(entity, target, conflictFilter, readParameters);
-                    var existing = await ReadAsync(
-                        $"SELECT {ColumnList} FROM {Table} WHERE {targetWhere}{_dialect.ForUpdateClause}", readParameters,
-                        cancellationToken).ConfigureAwait(false);
-
-                    if (existing.Count == 0)
-                    {
-                        if (lostInsert is not null)
-                        {
-                            // The insert lost to a key that is not the target: no retry can take it.
-                            throw lostInsert;
-                        }
-
-                        inserting = true;
-                        var insertParameters = new List<object?>();
-                        var columns = InsertColumns();
-                        var values = string.Join(", ", columns.Select(column => Bind(insertParameters, column.Read(entity))));
-                        var insert = _dialect.InsertSql(Table, string.Join(", ", columns.Select(column => _dialect.Quote(column.Name))),
-                            values, (string?)null);
-                        await ExecuteAsync(insert, insertParameters, cancellationToken).ConfigureAwait(false);
-                        inserting = false;
-
-                        // The row just inserted, by its key — or by the target when the store generated the key.
-                        var insertedParameters = new List<object?>();
-                        var insertedWhere = _configuration.KeyIsGenerated
-                            ? TargetWhere(entity, target, conflictFilter, insertedParameters)
-                            : TargetWhere(entity, _configuration.Keys, null, insertedParameters);
-                        var inserted = await ReadAsync($"SELECT {ColumnList} FROM {Table} WHERE {insertedWhere}",
-                            insertedParameters, cancellationToken).ConfigureAwait(false);
-                        return inserted[0];
-                    }
-
-                    var row = existing[0];
-                    var updateParameters = new List<object?>();
-                    var assignments = UpdateAssignments(entity, target, update, updateParameters, existingRow: null,
-                        column => Bind(updateParameters, column.Read(entity)));
-                    if (assignments.Count > 0)
-                    {
-                        var byKey = TargetWhere(row, _configuration.Keys, null, updateParameters);
-                        await ExecuteAsync($"UPDATE {Table} SET {string.Join(", ", assignments)} WHERE {byKey}", updateParameters,
-                            cancellationToken).ConfigureAwait(false);
-                    }
-
-                    var storedParameters = new List<object?>();
-                    var stored = await ReadAsync(
-                        $"SELECT {ColumnList} FROM {Table} WHERE {TargetWhere(row, _configuration.Keys, null, storedParameters)}",
-                        storedParameters, cancellationToken).ConfigureAwait(false);
-                    return stored[0];
-                }, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (inserting && attempt < UpsertAttempts && _dialect.DuplicateKey(exception) is { } duplicate)
-            {
-                // A concurrent insert of the target won between the read and the insert: the next read finds its row.
-                // Inside an explicit transaction only the statement rolled back, so the read runs in it again.
-                lostInsert = duplicate;
+                return await _unitOfWork.AtomicallyAsync(
+                    () => UpsertOnceAsync(entity, target, update, conflictFilter, cancellationToken), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (attempt < UpsertAttempts && _dialect.IsDeadlock(exception)
                                               && !_unitOfWork.InExplicitTransaction)
             {
-                // Two upserts locked the target's gap and both tried to insert into it: the store rolled one back.
+                // The store chose this upsert as a deadlock's victim and rolled its own transaction back: it runs again.
+                // Inside an explicit transaction the caller's transaction is what the store rolled back, which no retry
+                // can resume.
                 await Task.Delay(Random.Shared.Next(5, 20 * attempt), cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception exception) when (_dialect.DuplicateKey(exception) is { } duplicate)
+            catch (Exception exception) when (exception is not DuplicateKeyException && _dialect.DuplicateKey(exception) is { } duplicate)
             {
                 throw duplicate;
             }
         }
     }
+
+    /// <summary>
+    ///     One attempt of an upsert by reading, in a transaction (the caller's, or one of its own). The target is read
+    ///     without a lock first: a locking read of a row that is not there locks the gap where it would go, and two such
+    ///     gap locks each block the other's insert — the deadlock InnoDB answers by rolling a transaction back, which inside
+    ///     an explicit transaction is the caller's. A row the plain read finds is read again under a lock (an exclusive lock
+    ///     on a row that exists, which two upserts take in turn) and updated. A row it does not find is inserted; when a
+    ///     concurrent insert of the target wins, the store refuses this one with a duplicate key, which rolls back the
+    ///     statement alone, and the row that won is read under a lock and updated.
+    /// </summary>
+    private async Task<TEntity> UpsertOnceAsync(TEntity entity, IReadOnlyList<RelationalColumn> target,
+        Expression<Func<TEntity, TEntity>>? update, Expression<Func<TEntity, bool>>? conflictFilter,
+        CancellationToken cancellationToken)
+    {
+        var row = await ReadTargetAsync(entity, target, conflictFilter, locking: false, cancellationToken).ConfigureAwait(false) is null
+            ? null
+            : await ReadTargetAsync(entity, target, conflictFilter, locking: true, cancellationToken).ConfigureAwait(false);
+
+        if (row is null)
+        {
+            DuplicateKeyException taken;
+            try
+            {
+                return await InsertTargetAsync(entity, target, conflictFilter, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (_dialect.DuplicateKey(exception) is { } duplicate)
+            {
+                taken = duplicate;
+            }
+
+            row = await ReadTargetAsync(entity, target, conflictFilter, locking: true, cancellationToken).ConfigureAwait(false);
+            if (row is null)
+            {
+                // The insert took a key or a unique key that is not the target: no update can take its place.
+                throw taken;
+            }
+        }
+
+        var updateParameters = new List<object?>();
+        var assignments = UpdateAssignments(entity, target, update, updateParameters, existingRow: null,
+            column => Bind(updateParameters, column.Read(entity)));
+        if (assignments.Count == 0)
+        {
+            // Nothing to write: the row read under the lock is the row as stored.
+            return row;
+        }
+
+        var byKey = TargetWhere(row, _configuration.Keys, null, updateParameters);
+        await ExecuteAsync($"UPDATE {Table} SET {string.Join(", ", assignments)} WHERE {byKey}", updateParameters,
+            cancellationToken).ConfigureAwait(false);
+
+        var storedParameters = new List<object?>();
+        var stored = await ReadAsync(
+            $"SELECT {ColumnList} FROM {Table} WHERE {TargetWhere(row, _configuration.Keys, null, storedParameters)}",
+            storedParameters, cancellationToken).ConfigureAwait(false);
+        return stored[0];
+    }
+
+    /// <summary>The row the upsert targets, read plainly or under a lock that holds it until the transaction ends.</summary>
+    private async Task<TEntity?> ReadTargetAsync(TEntity entity, IReadOnlyList<RelationalColumn> target,
+        Expression<Func<TEntity, bool>>? conflictFilter, bool locking, CancellationToken cancellationToken)
+    {
+        var parameters = new List<object?>();
+        var where = TargetWhere(entity, target, conflictFilter, parameters);
+        var rows = await ReadAsync($"SELECT {ColumnList} FROM {Table} WHERE {where}{(locking ? _dialect.ForUpdateClause : string.Empty)}",
+            parameters, cancellationToken).ConfigureAwait(false);
+        return rows.Count > 0 ? rows[0] : null;
+    }
+
+    /// <summary>
+    ///     Inserts the upsert's entity and returns the row as stored: with <c>RETURNING</c> where the dialect has it
+    ///     (MariaDB, which hands back a key it generates too), otherwise read back by its key — or by the target, when the
+    ///     store generated the key.
+    /// </summary>
+    private async Task<TEntity> InsertTargetAsync(TEntity entity, IReadOnlyList<RelationalColumn> target,
+        Expression<Func<TEntity, bool>>? conflictFilter, CancellationToken cancellationToken)
+    {
+        var parameters = new List<object?>();
+        var columns = InsertColumns();
+        var columnList = string.Join(", ", columns.Select(column => _dialect.Quote(column.Name)));
+        var values = string.Join(", ", columns.Select(column => Bind(parameters, column.Read(entity))));
+        if (ReturnsInsertedRows)
+        {
+            return await SingleAsync(_dialect.InsertSql(Table, columnList, values,
+                _configuration.Columns.Select(column => _dialect.Quote(column.Name)).ToList()), parameters, cancellationToken).ConfigureAwait(false);
+        }
+
+        await ExecuteAsync(_dialect.InsertSql(Table, columnList, values, (string?)null), parameters, cancellationToken).ConfigureAwait(false);
+
+        var insertedParameters = new List<object?>();
+        var insertedWhere = _configuration.KeyIsGenerated
+            ? TargetWhere(entity, target, conflictFilter, insertedParameters)
+            : TargetWhere(entity, _configuration.Keys, null, insertedParameters);
+        var inserted = await ReadAsync($"SELECT {ColumnList} FROM {Table} WHERE {insertedWhere}",
+            insertedParameters, cancellationToken).ConfigureAwait(false);
+        return inserted[0];
+    }
+
+    /// <summary>Whether an insert can return the row it wrote (<c>RETURNING</c>), a key the store generated included.</summary>
+    private bool ReturnsInsertedRows => _dialect.ReadsBackInsertedValues && !_dialect.ReadsBackByKey;
 
     private const int UpsertAttempts = 25;
 
@@ -580,15 +637,13 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         _unitOfWork.AtomicallyAsync(async () =>
         {
             var keys = await LockedKeysAsync(filter, cancellationToken).ConfigureAwait(false);
-            if (keys.Count == 0)
+            long written = 0;
+            foreach (var (sql, parameters) in ByKeys(keys, filter, statement))
             {
-                return 0L;
+                written += await ExecuteAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
             }
 
-            var parameters = new List<object?>();
-            var sql = statement(parameters);
-            return await ExecuteAsync($"{sql} WHERE {KeysAndTheRest(keys, filter, parameters)}", parameters, cancellationToken)
-                .ConfigureAwait(false);
+            return written;
         }, cancellationToken);
 
     /// <summary>The keys of the rows the filter (and the global filter) matches, locked until the transaction ends.</summary>
@@ -612,16 +667,48 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     }
 
     /// <summary>
-    ///     The rows by their keys, and the filter's conjuncts that do not read the written table (the ones that do were
-    ///     evaluated by the locking read, and the store would refuse them in the write).
+    ///     The statements of a write (or a read) by keys, each binding at most the dialect's parameter limit: the
+    ///     statement's own values, rendered once and bound in each, then a share of the keys, then the filter's conjuncts
+    ///     that do not read the written table (the ones that do were evaluated by the locking read, and the store would
+    ///     refuse them in the write).
     /// </summary>
-    private string KeysAndTheRest(IReadOnlyList<object?[]> keys, Expression<Func<TEntity, bool>> filter, List<object?> parameters)
+    /// <param name="keys">The keys of the rows, read from them.</param>
+    /// <param name="filter">The write's filter, or <c>null</c> for the keys alone.</param>
+    /// <param name="statement">The statement before its <c>WHERE</c>, binding its own values first.</param>
+    private IEnumerable<(string Sql, List<object?> Parameters)> ByKeys(IReadOnlyList<object?[]> keys,
+        Expression<Func<TEntity, bool>>? filter, Func<List<object?>, string> statement)
     {
-        var byKeys = KeysWhere(keys, parameters);
+        var head = new List<object?>();
+        var sql = statement(head);
+        var probe = new List<object?>(head);
+        RestOf(filter, probe);
+        var perStatement = Math.Max(1, (_dialect.MaxParameters - probe.Count) / _configuration.Keys.Count);
+
+        foreach (var chunk in keys.Chunk(perStatement))
+        {
+            var parameters = new List<object?>(head);
+            var where = KeysWhere(chunk, parameters);
+            if (RestOf(filter, parameters) is { } rest)
+            {
+                where += " AND " + rest;
+            }
+
+            yield return ($"{sql} WHERE {where}", parameters);
+        }
+    }
+
+    /// <summary>The filter's conjuncts that do not read the written table, rendered; <c>null</c> when none is left.</summary>
+    private string? RestOf(Expression<Func<TEntity, bool>>? filter, List<object?> parameters)
+    {
+        if (filter is null)
+        {
+            return null;
+        }
+
         var relations = _unitOfWork.Relations;
         return relations.Without(filter, _unitOfWork.GlobalFilter<TEntity>(), typeof(TEntity)) is Expression<Func<TEntity, bool>> rest
-            ? $"{byKeys} AND {RelationalSql.Where(_dialect, _configuration, rest, null, parameters, relations)}"
-            : byKeys;
+            ? RelationalSql.Where(_dialect, _configuration, rest, null, parameters, relations)
+            : null;
     }
 
     /// <summary>The predicate matching rows by the key values read from them.</summary>

@@ -21,7 +21,8 @@ namespace eQuantic.Core.Data.Relational.Repository;
 ///     A shaped collection include (<c>Include(x =&gt; x.Steps, s =&gt; s.Where(…).OrderBy(…).Take(3))</c>) puts its
 ///     filter in the follow-up query's <c>WHERE</c> and its order in the <c>ORDER BY</c>; a skip or a limit per
 ///     parent ranks each parent's rows with <c>ROW_NUMBER() OVER (PARTITION BY fk ORDER BY …)</c>, so only the rows
-///     each parent keeps travel.
+///     each parent keeps travel. Keys past the dialect's parameter limit (2,100 on SQL Server) split the follow-up
+///     query into as many statements as the limit needs.
 /// </summary>
 internal static class RelationalInclude
 {
@@ -153,9 +154,12 @@ internal static class RelationalInclude
             return [];
         }
 
-        var elements = shape is null
-            ? await LoadAsync(unitOfWork, configuration, foreignKey, keys, cancellationToken).ConfigureAwait(false)
-            : await LoadShapedAsync(unitOfWork, configuration, foreignKey, keys, shape, cancellationToken).ConfigureAwait(false);
+        // A shape that keeps no row per parent has its answer already: every parent gets an empty collection, unasked.
+        var elements = shape is { TakeCount: 0 }
+            ? []
+            : shape is null
+                ? await LoadAsync(unitOfWork, configuration, foreignKey, keys, cancellationToken).ConfigureAwait(false)
+                : await LoadShapedAsync(unitOfWork, configuration, foreignKey, keys, shape, cancellationToken).ConfigureAwait(false);
 
         // GroupBy keeps the rows' order within each group, so a shaped include's order survives the stitching.
         var byParent = elements.GroupBy(element => foreignKey.Property.GetValue(element)!)
@@ -181,20 +185,26 @@ internal static class RelationalInclude
     /// <summary>
     ///     Loads a shaped collection: the shape's filter joins the <c>IN</c> in the <c>WHERE</c>, its order is the
     ///     <c>ORDER BY</c>, and a skip or a limit ranks each parent's rows with <c>ROW_NUMBER()</c> partitioned by the
-    ///     foreign key, keeping the ranks the window allows. Only the rows a parent keeps leave the database.
+    ///     foreign key, keeping the ranks the window allows. Only the rows a parent keeps leave the database. The parents'
+    ///     keys go in as many statements as the dialect's parameter limit needs: a parent's rows are ranked within one
+    ///     statement, since all of them answer to its one key.
     /// </summary>
     private static async Task<List<object>> LoadShapedAsync(RelationalUnitOfWork unitOfWork,
         RelationalEntityConfiguration configuration, RelationalColumn foreignKey, IReadOnlyList<object?> keys,
         IncludeShape shape, CancellationToken cancellationToken)
     {
         var dialect = unitOfWork.Dialect;
-        var parameters = keys.Select(dialect.BindValue).ToList();
-        var placeholders = string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index));
-        var where = $"{dialect.Quote(foreignKey.Name)} IN ({placeholders})";
-        if (shape.Filter is not null)
+        var filter = shape.Filter is null ? null : FilterInterpreter.Interpret(shape.Filter);
+        var ranked = shape.SkipCount is not null || shape.TakeCount is not null;
+
+        // What every statement binds besides the keys: the filter's values and the bounds of the ranks.
+        var shared = new List<object?>();
+        if (filter is not null)
         {
-            where += " AND " + SqlFilterRenderer.Render(dialect, configuration, FilterInterpreter.Interpret(shape.Filter), parameters);
+            SqlFilterRenderer.Render(dialect, configuration, filter, shared);
         }
+
+        var bound = shared.Count + (!ranked ? 0 : shape.TakeCount is null ? 1 : 2);
 
         var order = shape.Sortings.Count > 0
             ? string.Join(", ", shape.Sortings.Select(sort => dialect.OrderTerm(
@@ -203,35 +213,40 @@ internal static class RelationalInclude
         var columns = string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)));
         var table = dialect.Quote(configuration.TableName);
 
-        string sql;
-        if (shape.SkipCount is null && shape.TakeCount is null)
+        var loaded = new List<object>();
+        foreach (var chunk in Chunks(keys, dialect.MaxParameters - bound))
         {
-            sql = $"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order}";
-        }
-        else
-        {
-            var rank = dialect.Quote("eq_rank");
-            var skip = shape.SkipCount ?? 0;
-            parameters.Add(skip);
-            var bounds = $"{rank} > @p{parameters.Count - 1}";
-            if (shape.TakeCount is { } take)
+            var parameters = chunk.Select(dialect.BindValue).ToList();
+            var placeholders = string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index));
+            var where = $"{dialect.Quote(foreignKey.Name)} IN ({placeholders})";
+            if (filter is not null)
             {
-                parameters.Add(skip + take);
-                bounds += $" AND {rank} <= @p{parameters.Count - 1}";
+                where += " AND " + SqlFilterRenderer.Render(dialect, configuration, filter, parameters);
             }
 
-            sql = $"SELECT {columns} FROM (SELECT {columns}, ROW_NUMBER() OVER (PARTITION BY {dialect.Quote(foreignKey.Name)} " +
-                  $"ORDER BY {order}) AS {rank} FROM {table} WHERE {where}) {dialect.Quote("eq_ranked")} " +
-                  $"WHERE {bounds} ORDER BY {rank}";
-        }
+            string sql;
+            if (!ranked)
+            {
+                sql = $"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order}";
+            }
+            else
+            {
+                var rank = dialect.Quote("eq_rank");
+                var skip = shape.SkipCount ?? 0;
+                parameters.Add(skip);
+                var bounds = $"{rank} > @p{parameters.Count - 1}";
+                if (shape.TakeCount is { } take)
+                {
+                    parameters.Add(skip + take);
+                    bounds += $" AND {rank} <= @p{parameters.Count - 1}";
+                }
 
-        await using var command = await unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                sql = $"SELECT {columns} FROM (SELECT {columns}, ROW_NUMBER() OVER (PARTITION BY {dialect.Quote(foreignKey.Name)} " +
+                      $"ORDER BY {order}) AS {rank} FROM {table} WHERE {where}) {dialect.Quote("eq_ranked")} " +
+                      $"WHERE {bounds} ORDER BY {rank}";
+            }
 
-        var loaded = new List<object>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            loaded.Add(RelationalMaterializer.Materialize(configuration.EntityType, reader, configuration.Columns));
+            await ReadIntoAsync(unitOfWork, configuration, sql, parameters, loaded, cancellationToken).ConfigureAwait(false);
         }
 
         return loaded;
@@ -253,27 +268,43 @@ internal static class RelationalInclude
                 $"'{configuration.EntityType.Name}' can only be ordered by a mapped member; '{selector}' is not one.");
     }
 
+    /// <summary>
+    ///     Loads the rows whose column holds one of the values: one <c>IN</c> per as many values as the dialect binds in a
+    ///     statement.
+    /// </summary>
     private static async Task<List<object>> LoadAsync(RelationalUnitOfWork unitOfWork,
         RelationalEntityConfiguration configuration, RelationalColumn filterColumn, IReadOnlyList<object?> values,
         CancellationToken cancellationToken)
     {
         var dialect = unitOfWork.Dialect;
-        var parameters = values.Select(dialect.BindValue).ToList();
-        var placeholders = string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index));
-        var sql = $"SELECT {string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)))}"
-                  + $" FROM {dialect.Quote(configuration.TableName)} WHERE {dialect.Quote(filterColumn.Name)} IN ({placeholders})";
-
-        await using var command = await unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var select = $"SELECT {string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)))}"
+                     + $" FROM {dialect.Quote(configuration.TableName)} WHERE {dialect.Quote(filterColumn.Name)} IN (";
 
         var loaded = new List<object>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        foreach (var chunk in Chunks(values, dialect.MaxParameters))
         {
-            loaded.Add(RelationalMaterializer.Materialize(configuration.EntityType, reader, configuration.Columns));
+            var parameters = chunk.Select(dialect.BindValue).ToList();
+            var sql = select + string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index)) + ")";
+            await ReadIntoAsync(unitOfWork, configuration, sql, parameters, loaded, cancellationToken).ConfigureAwait(false);
         }
 
         return loaded;
     }
+
+    /// <summary>Runs a read of entities and adds what it returns to <paramref name="loaded" />.</summary>
+    private static async Task ReadIntoAsync(RelationalUnitOfWork unitOfWork, RelationalEntityConfiguration configuration,
+        string sql, IReadOnlyList<object?> parameters, List<object> loaded, CancellationToken cancellationToken)
+    {
+        await using var command = await unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            loaded.Add(RelationalMaterializer.Materialize(configuration.EntityType, reader, configuration.Columns));
+        }
+    }
+
+    /// <summary>The values in runs of at most <paramref name="size" /> (one at least, whatever else a statement binds).</summary>
+    private static IEnumerable<object?[]> Chunks(IReadOnlyList<object?> values, int size) => values.Chunk(Math.Max(1, size));
 
     private static Type? ElementType(Type type)
     {

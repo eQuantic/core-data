@@ -291,24 +291,15 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
             return null;
         }
 
-        var parameters = new List<object?>();
-        string fragment;
         try
         {
-            fragment = SqlFilterRenderer.Render(_dialect, configuration, FilterInterpreter.Interpret(filter), parameters);
+            return SqlFilterRenderer.RenderInlined(_dialect, configuration, FilterInterpreter.Interpret(filter));
         }
         catch (NotSupportedException inner)
         {
             throw new NotSupportedException(
                 $"The filtered-index predicate must be fully expressible in SQL. {inner.Message}", inner);
         }
-
-        for (var index = parameters.Count - 1; index >= 0; index--)
-        {
-            fragment = fragment.Replace("@p" + index, _dialect.Literal(parameters[index]));
-        }
-
-        return fragment;
     }
 
     private (string Sql, List<object?> Parameters) Update(UpdateOperation operation)

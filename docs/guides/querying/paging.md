@@ -60,11 +60,12 @@ They apply to the reads that return rows — `GetAll`, `GetFiltered`, `AllMatchi
 every matching row (`Count`, `Any`, `All`, the sums and aggregates, `GroupBy`) and the reads that
 page by themselves (`GetPaged`, `GetPage`, `GetStream`) **refuse** them rather than count a page or
 page twice. A skip without an order orders by the key (the id on the document stores; Cassandra
-keeps its own token and clustering order), so pages are stable.
+keeps its own token and clustering order), so pages are stable. A skip without a take returns every
+row after it, and `Take(0)` returns no row without asking the store.
 
 | Store | Executes as |
 |---|---|
-| Relational | the dialect's `LIMIT … OFFSET …` (`OFFSET … FETCH` on SQL Server) |
+| Relational | the dialect's `LIMIT … OFFSET …` (`OFFSET … FETCH` on SQL Server); a skip alone as `OFFSET n` on PostgreSQL, `OFFSET n ROWS` on SQL Server, and `LIMIT 18446744073709551615 OFFSET n` on MySQL and MariaDB, which take an offset only after a limit |
 | MongoDB | `$skip` + `$limit`, before any `$lookup` include |
 | Cosmos DB | `OFFSET … LIMIT …` |
 | Cassandra | no `OFFSET` exists: the first `skip + take` rows are fetched (`LIMIT`) and the skipped ones dropped |

@@ -46,6 +46,13 @@ public class MySqlDialect : SqlDialect
         """;
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     MySQL and MariaDB take an offset only after a limit, and document the largest unsigned value as the limit that
+    ///     means "every row after it".
+    /// </remarks>
+    public override string OffsetClause(string offsetParameter) => $"LIMIT 18446744073709551615 OFFSET {offsetParameter}";
+
+    /// <inheritdoc />
     public override string TupleComparison(IReadOnlyList<string> columns, ComparisonOperator op, IReadOnlyList<string> parameters) =>
         $"({string.Join(", ", columns)}) {op switch
         {
@@ -169,17 +176,45 @@ public class MySqlDialect : SqlDialect
     /// <remarks>
     ///     MySqlConnector's <c>MySqlBulkCopy</c> — the client-side bulk loader, which streams rows without a
     ///     statement per row. Column mappings are explicit (ordinal to name), so the engine's row order is
-    ///     authoritative regardless of the table's physical column order.
+    ///     authoritative regardless of the table's physical column order. A load is whole or not at all: in a
+    ///     transaction of its own, or behind a savepoint inside the caller's.
     /// </remarks>
     public override async Task<long> BulkInsertAsync(DbConnection connection, DbTransaction? transaction,
         string quotedTable, IReadOnlyList<RelationalColumn> columns, IReadOnlyList<object?[]> rows,
         CancellationToken cancellationToken)
     {
         // LOAD DATA LOCAL turns a duplicate key into a warning and skips the row (the server cannot stop a file it is
-        // being sent), so the load runs in a transaction — the caller's, or one of its own — and a duplicate-key
-        // warning rolls it back and fails it, as a taken key fails every other write.
+        // being sent), so the load runs where it can be undone, and a duplicate-key warning undoes it and fails it, as a
+        // taken key fails every other write: in a transaction of its own, rolled back; or, inside the caller's, after a
+        // savepoint it is rolled back to — the caller's transaction is left as it was before the load, whole.
         var local = transaction is null ? await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false) : null;
-        var bulk = new MySqlBulkCopy((MySqlConnection)connection, (MySqlTransaction?)(transaction ?? local))
+        var scope = transaction ?? local!;
+        if (local is null)
+        {
+            await scope.SaveAsync(BulkSavepoint, cancellationToken).ConfigureAwait(false);
+        }
+
+        var undone = false;
+        async Task UndoAsync()
+        {
+            if (undone)
+            {
+                return;
+            }
+
+            undone = true;
+            if (local is not null)
+            {
+                await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            else
+            {
+                await scope.RollbackAsync(BulkSavepoint, CancellationToken.None).ConfigureAwait(false);
+                await scope.ReleaseAsync(BulkSavepoint, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+
+        var bulk = new MySqlBulkCopy((MySqlConnection)connection, (MySqlTransaction)scope)
         {
             DestinationTableName = quotedTable,
         };
@@ -201,9 +236,43 @@ public class MySqlDialect : SqlDialect
 
         try
         {
-            var result = await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
+            MySqlBulkCopyResult result;
+            try
+            {
+                result = await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
+            }
+            catch (MySqlException exception)
+            {
+                // The loader counted fewer rows inserted than it sent: the server says why (its warnings belong to the
+                // last statement, so they are read before the undo runs), and a taken key is the reason every other
+                // write reports as a DuplicateKeyException.
+                var warning = await DuplicateWarningAsync(connection, scope, cancellationToken).ConfigureAwait(false);
+                await UndoAsync().ConfigureAwait(false);
+                if (warning is not null)
+                {
+                    throw new eQuantic.Core.Data.Repository.DuplicateKeyException(KeyName(warning), exception);
+                }
+
+                throw;
+            }
+            catch (NotSupportedException exception)
+            {
+                await UndoAsync().ConfigureAwait(false);
+
+                // MySQL's bulk loader rides LOAD DATA LOCAL INFILE, which both sides must opt into — the client
+                // in its connection string and the server in its configuration. That is a deployment decision with
+                // security weight (the server can ask the client for local files), so the engine surfaces it
+                // instead of turning it on behind your back.
+                throw new NotSupportedException(
+                    "MySQL's bulk load needs LOAD DATA LOCAL INFILE enabled on both sides: add " +
+                    "'AllowLoadLocalInfile=true' to the connection string and set 'local_infile=1' on the server. " +
+                    "Without it, stage the entities and Commit() — the flush already batches them.", exception);
+            }
+
             if (result.Warnings.FirstOrDefault(warning => warning.ErrorCode == MySqlErrorCode.DuplicateKeyEntry) is { } duplicate)
             {
+                await UndoAsync().ConfigureAwait(false);
+
                 // A warning, not an exception: the server's own words are the message.
                 throw new eQuantic.Core.Data.Repository.DuplicateKeyException(
                     $"The store refused the bulk load: {duplicate.Message}.", KeyName(duplicate.Message), null);
@@ -213,45 +282,17 @@ public class MySqlDialect : SqlDialect
             {
                 await local.CommitAsync(cancellationToken).ConfigureAwait(false);
             }
+            else
+            {
+                await scope.ReleaseAsync(BulkSavepoint, cancellationToken).ConfigureAwait(false);
+            }
 
+            undone = true;
             return result.RowsInserted;
         }
-        catch (MySqlException exception)
+        catch when (!undone)
         {
-            // The loader counted fewer rows inserted than it sent: the server says why, and a taken key is the reason
-            // every other write reports as a DuplicateKeyException.
-            var duplicate = await DuplicateWarningAsync(connection, transaction ?? local, cancellationToken).ConfigureAwait(false);
-            if (local is not null)
-            {
-                await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-
-            if (duplicate is not null)
-            {
-                throw new eQuantic.Core.Data.Repository.DuplicateKeyException(KeyName(duplicate), exception);
-            }
-
-            throw;
-        }
-        catch (NotSupportedException exception)
-        {
-            if (local is not null)
-            {
-                await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-
-            // MySQL's bulk loader rides LOAD DATA LOCAL INFILE, which both sides must opt into — the client
-            // in its connection string and the server in its configuration. That is a deployment decision with
-            // security weight (the server can ask the client for local files), so the engine surfaces it
-            // instead of turning it on behind your back.
-            throw new NotSupportedException(
-                "MySQL's bulk load needs LOAD DATA LOCAL INFILE enabled on both sides: add " +
-                "'AllowLoadLocalInfile=true' to the connection string and set 'local_infile=1' on the server. " +
-                "Without it, stage the entities and Commit() — the flush already batches them.", exception);
-        }
-        catch when (local is not null)
-        {
-            await local.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            await UndoAsync().ConfigureAwait(false);
             throw;
         }
         finally
@@ -262,6 +303,9 @@ public class MySqlDialect : SqlDialect
             }
         }
     }
+
+    /// <summary>The savepoint a bulk load inside the caller's transaction is rolled back to when it fails.</summary>
+    private const string BulkSavepoint = "eq_bulk_load";
 
     /// <summary>The message of the duplicate-key warning the last statement left, or <c>null</c>.</summary>
     private static async Task<string?> DuplicateWarningAsync(DbConnection connection, DbTransaction? transaction,

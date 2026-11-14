@@ -73,4 +73,28 @@ public sealed class MySqlWriteOutcomeTests : MySqlIntegrationTest
 
     [Test]
     public Task A_bulk_load_of_a_taken_key_fails() => WriteOutcomeScenarios.BulkInsertOfTakenKeyFails(NewScope);
+
+    [Test]
+    public Task An_upsert_on_a_generated_key_is_refused() => WriteOutcomeScenarios.UpsertOnGeneratedKeyIsRefused(NewScope);
+
+    [Test]
+    public Task A_conflict_filter_with_a_value_holds_past_the_prepared_statement_threshold() =>
+        WriteOutcomeScenarios.ConflictFilterWithAValue(NewScope);
+
+    [Test]
+    public Task Two_concurrent_upserts_in_explicit_transactions_both_succeed() =>
+        WriteOutcomeScenarios.UpsertsInExplicitTransactions(NewScope);
+
+    [Test]
+    public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
+        WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
+
+    [Test]
+    public async Task Keys_first_writes_past_the_parameter_limit_bind_within_it()
+    {
+        var commands = new CommandCapture();
+        using var db = await NewSchemaAsync(commands.Register);
+        await WriteOutcomeScenarios.KeysFirstWritesPastTheParameterLimit(db.NewScope, commands,
+            db.Resolve<eQuantic.Core.Data.Relational.SqlDialect>().MaxParameters);
+    }
 }

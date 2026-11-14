@@ -542,9 +542,13 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                       "their order in its ORDER BY; a skip or a limit per parent ranks the rows with ROW_NUMBER() OVER (PARTITION BY the foreign key).");
         }
 
-        if (options is { SkipCount: not null } or { TakeCount: not null })
+        if (options is { TakeCount: 0 })
         {
-            notes.Add("Skip/Take render as the dialect's LIMIT/OFFSET; no count runs.");
+            notes.Add("Take(0) returns no row, and the read runs no query.");
+        }
+        else if (options is { SkipCount: not null } or { TakeCount: not null })
+        {
+            notes.Add("Skip/Take render as the dialect's LIMIT/OFFSET (a skip alone as its bare offset); no count runs.");
         }
 
         var plan = RelationalSql.Plan(_dialect, _configuration, options, null, global, UnitOfWork.Relations);
@@ -734,6 +738,11 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
                 var selected = SelectedColumns(mapColumns, plan);
                 if (RelationalMapCompiler.GetOrCompile(map, selected) is { } projector)
                 {
+                    if (limit == 0)
+                    {
+                        return [];
+                    }
+
                     return await UnitOfWork.RetryAsync(write: false, async _ =>
                     {
                         using var activity = DataActivitySource.Instance.StartActivity($"{_dialect.System}.select", ActivityKind.Client);
@@ -790,6 +799,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             throw new NotSupportedException(
                 $"'{typeof(TEntity).Name}' has a composite key, which a related entity's single foreign key cannot address; " +
                 "count the related entities with a read of their own.");
+        }
+
+        if (limit == 0)
+        {
+            GatedPlan(options, null);
+            return [];
         }
 
         var project = counted.Projection.Compile();
@@ -859,6 +874,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
         Expression<Func<TEntity, bool>>? extraFilter = null, IReadOnlyCollection<string>? mapColumns = null)
     {
         var plan = GatedPlan(options, extraFilter);
+        if (limit == 0)
+        {
+            // A limit of zero rows has its answer already: the store is not asked (SQL Server refuses FETCH NEXT 0).
+            return [];
+        }
+
         var residuals = Compile(plan.Residual);
         var selected = SelectedColumns(mapColumns, plan);
 
@@ -960,10 +981,15 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             sql += $" WHERE {where}";
         }
 
-        // A dialect whose limit syntax demands an ORDER BY (OFFSET/FETCH) gets a deterministic key order.
-        sql += OrderBy(options, orderByKeyWhenUnsorted || (limit is not null && _dialect.RequiresOrderByForLimit));
+        // A dialect whose paging syntax demands an ORDER BY (OFFSET/FETCH) gets a deterministic key order.
+        sql += OrderBy(options, orderByKeyWhenUnsorted || ((limit is not null || offset is not null) && _dialect.RequiresOrderByForLimit));
 
-        if (limit is not null && parameters is not null)
+        if (parameters is null)
+        {
+            return sql;
+        }
+
+        if (limit is not null)
         {
             parameters.Add(limit);
             var limitParameter = "@p" + (parameters.Count - 1);
@@ -975,6 +1001,12 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
             }
 
             sql += " " + _dialect.LimitClause(limitParameter, offsetParameter);
+        }
+        else if (offset is not null)
+        {
+            // A skip without a take: every row after the offset.
+            parameters.Add(offset);
+            sql += " " + _dialect.OffsetClause("@p" + (parameters.Count - 1));
         }
 
         return sql;
