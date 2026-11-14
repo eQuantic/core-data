@@ -313,6 +313,7 @@ public sealed class CosmosSet<TEntity> : Data.Repository.ISet<TEntity> where TEn
         Action<TEntity, TEntity> takeKey, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        RelationPredicates.RefuseInConflictFilter(conflictFilter, CosmosPredicates.Navigations(_unitOfWork));
         EntityLifecycle.StampForInsert(entity, _unitOfWork.Conventions, _unitOfWork.Services);
         var partitionKey = _configuration.GetPartitionKey(entity);
         var targetQuery = on is null ? null : TargetQuery(entity, on, conflictFilter, partitionKey);

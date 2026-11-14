@@ -538,6 +538,26 @@ public sealed class MongoQueryPredicateTests : MongoIntegrationTest
     }
 
     [Test]
+    public async Task An_upsert_s_conflict_filter_means_what_it_means_in_any_filter()
+    {
+        var box = new RelBox { Name = "inbox" };
+        await Seed(box, new RelItem { Title = "T", BoxId = box.Id }, new RelTicket { Title = "t1", Priority = RelPriority.High });
+        using var scope = NewScope();
+
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => scope.ServiceProvider.GetRequiredService<IUpsertRepository<RelItem, string>>()
+            .UpsertAsync(new RelItem { Title = "T", BoxId = box.Id }, x => x.Title, null, x => x.Box!.Name == "inbox"));
+        Assert.That(refusal!.Message, Does.Contain("crosses a relation"));
+        Assert.That((await Repo<RelItem>(scope).GetFilteredAsync(x => x.Title == "T")).Count(), Is.EqualTo(1),
+            "read as an embedded document's member, it would find no target and insert a second item");
+
+        // High > Medium by value, though "high" sorts before "medium" as text: the stored ticket is the target.
+        var stored = await scope.ServiceProvider.GetRequiredService<IUpsertRepository<RelTicket, string>>().UpsertAsync(
+            new RelTicket { Title = "t1", Priority = RelPriority.High, Alias = "updated" }, x => x.Title, null, x => x.Priority > RelPriority.Medium);
+        Assert.That(stored.Alias, Is.EqualTo("updated"));
+        Assert.That((await Repo<RelTicket>(scope).GetFilteredAsync(x => x.Title == "t1")).Count(), Is.EqualTo(1), "updated, not inserted again");
+    }
+
+    [Test]
     public async Task A_text_test_meets_a_null_as_the_engines_read_it()
     {
         await Seed(new RelTicket { Title = "x", Alias = null }, new RelTicket { Title = "y", Alias = "abc" });

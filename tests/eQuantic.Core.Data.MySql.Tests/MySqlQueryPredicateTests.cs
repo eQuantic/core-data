@@ -33,6 +33,9 @@ public sealed class MySqlQueryPredicateTests : MySqlIntegrationTest
     public void A_relation_test_reading_the_entity_is_refused() => QueryPredicateScenarios.CorrelationIsRefused(NewScope);
 
     [Test]
+    public void An_upsert_s_conflict_filter_across_a_relation_is_refused() => QueryPredicateScenarios.ConflictFilterAcrossARelationIsRefused(NewScope);
+
+    [Test]
     public void Explain_names_the_correlated_exists() => QueryPredicateScenarios.ExplainNamesTheMechanism(NewScope);
 
     [Test]

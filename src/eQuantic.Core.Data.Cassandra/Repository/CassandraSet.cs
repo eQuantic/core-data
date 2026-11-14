@@ -688,6 +688,7 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        RelationPredicates.RefuseInConflictFilter(conflictFilter, CassandraPredicates.Navigations(_unitOfWork));
         var keys = CassandraMapper.PrimaryKey(_configuration);
         if (on is not null)
         {

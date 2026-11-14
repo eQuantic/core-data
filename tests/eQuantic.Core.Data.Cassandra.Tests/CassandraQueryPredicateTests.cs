@@ -273,6 +273,22 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
     }
 
+    [Test]
+    public async Task An_upsert_s_conflict_filter_that_crosses_a_relation_is_refused()
+    {
+        var box = new RelBox { Name = "inbox" };
+        var item = new RelItem { Space = Guid.NewGuid(), Title = "T", BoxId = box.Id };
+        await Seed(box, item);
+        using var scope = NewScope();
+
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => scope.ServiceProvider.GetRequiredService<IUpsertRepository<RelItem, Guid>>()
+            .UpsertAsync(new RelItem { Space = item.Space, Id = item.Id, Title = "changed", BoxId = box.Id }, x => new { x.Space, x.Id }, null,
+                x => x.Box!.Name == "inbox"));
+        Assert.That(refusal!.Message, Does.Contain("crosses a relation"), "evaluated over the stored row, the unloaded box would throw");
+        Assert.That((await Repo<RelItem>(scope).GetFilteredAsync(x => x.Space == item.Space)).Single().Title, Is.EqualTo("T"),
+            "nothing was written");
+    }
+
     /// <summary>The items of a space a filter keeps; the negated relation tests run client-side, behind the opt-in.</summary>
     private async Task<string[]> Titles(Guid space, System.Linq.Expressions.Expression<Func<RelItem, bool>> filter)
     {

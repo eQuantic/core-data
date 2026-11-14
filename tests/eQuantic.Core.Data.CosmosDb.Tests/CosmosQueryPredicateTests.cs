@@ -453,6 +453,22 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task An_upsert_s_conflict_filter_that_crosses_a_relation_is_refused()
+    {
+        var box = new RelBox { Name = "inbox" };
+        await Seed(box, new RelItem { Title = "T", BoxId = box.Id });
+        using var scope = NewScope();
+        var partition = Partition;
+        var upserts = scope.ServiceProvider.GetRequiredService<IUpsertRepository<RelItem, string>>();
+
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => upserts.UpsertAsync(
+            new RelItem { Category = partition, Title = "T", BoxId = box.Id }, x => x.Title, null, x => x.Box!.Name == "inbox"));
+        Assert.That(refusal!.Message, Does.Contain("crosses a relation"));
+        Assert.That((await RepoOf<RelItem>(scope).GetFilteredAsync(x => x.Category == partition && x.Title == "T")).Count(), Is.EqualTo(1),
+            "read as a member the item embeds, it would find no target and insert a second item");
+    }
+
+    [Test]
     public async Task An_array_and_a_list_are_tested_with_Contains()
     {
         var companies = Enumerable.Range(1, 4).Select(rank => new RelCompany { Name = "c" + rank, Rank = rank }).ToArray();

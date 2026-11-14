@@ -423,6 +423,15 @@ internal static class QueryPredicateScenarios
         Assert.That(refusal!.Message, Does.Contain("entity's own members"));
     }
 
+    /// <summary>An upsert's conflict filter that crosses a relation is refused, in the words every engine uses.</summary>
+    public static void ConflictFilterAcrossARelationIsRefused(Func<IServiceScope> newScope)
+    {
+        using var scope = newScope();
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => scope.ServiceProvider.GetRequiredService<IUpsertRepository<RelItem, Guid>>()
+            .UpsertAsync(new RelItem { Title = "T" }, x => x.Title, null, x => x.Box!.Name == "inbox"));
+        Assert.That(refusal!.Message, Does.Contain("crosses a relation, which an upsert's conflict filter cannot express"));
+    }
+
     /// <summary>Explain names the mechanism: a correlated EXISTS.</summary>
     public static void ExplainNamesTheMechanism(Func<IServiceScope> newScope)
     {

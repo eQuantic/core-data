@@ -146,6 +146,23 @@ public static class RelationPredicates
     }
 
     /// <summary>
+    ///     Refuses an upsert's conflict filter that crosses a relation, on every engine alike: the filter restricts the
+    ///     target to the rows a partial unique index holds, a predicate over the row alone, and a relation read there
+    ///     would be read as a member the row embeds, find no target and insert a second row.
+    /// </summary>
+    /// <param name="conflictFilter">The conflict filter, or <c>null</c>.</param>
+    /// <param name="navigations">The model's navigations.</param>
+    public static void RefuseInConflictFilter(LambdaExpression? conflictFilter, Func<Type, PropertyInfo, RelationNavigation?> navigations)
+    {
+        if (conflictFilter is not null && Find(conflictFilter, navigations) is [var relation, ..])
+        {
+            throw new NotSupportedException(
+                $"'{relation.Text}' crosses a relation, which an upsert's conflict filter cannot express: it restricts the target " +
+                "to the rows a partial unique index holds, by the row's own members.");
+        }
+    }
+
+    /// <summary>
     ///     Replaces each relation test with the <see cref="RelatedRowExists" /> marker (negated where the test is), for an
     ///     engine that renders the relation inside its own statement.
     /// </summary>

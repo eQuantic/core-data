@@ -38,6 +38,11 @@ var stored = await upserts.UpsertAsync(
 var stored = await upserts.UpsertAsync(label, x => x.Name, conflictFilter: x => x.DeletedAt == null);
 ```
 
+The conflict filter reads the row's own members, as a partial index's predicate does, and means what
+it means in any other filter (an enum stored as labels compares by member value, text ignoring case
+matches without regard to case). A filter that crosses a relation (`x => x.Box.Name == "inbox"`) is
+refused with `NotSupportedException` on every engine before anything is written.
+
 What an upsert promises, everywhere:
 
 - **One row, never a lost race.** Two upserts of the same target at the same time leave one row and

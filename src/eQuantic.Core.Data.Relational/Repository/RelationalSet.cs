@@ -229,6 +229,7 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        RelationPredicates.RefuseInConflictFilter(conflictFilter, _unitOfWork.Relations.Navigation);
         var target = on is null
             ? _configuration.Keys
             : on.Select(member => _configuration.ColumnFor(member)

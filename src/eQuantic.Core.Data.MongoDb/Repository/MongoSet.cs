@@ -187,6 +187,7 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        RelationPredicates.RefuseInConflictFilter(conflictFilter, MongoPredicates.Navigation);
         var classMap = BsonClassMap.LookupClassMap(typeof(TEntity));
         var idMember = classMap.IdMemberMap
                        ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has no mapped id member to upsert by.");
@@ -214,8 +215,12 @@ public sealed class MongoSet<TEntity> : Data.Repository.ISet<TEntity> where TEnt
             body = body is ConstantExpression ? equal : Expression.AndAlso(body, equal);
         }
 
+        // The conflict filter means what it means in any other filter: an enum stored as labels compares by member value,
+        // text that ignores case is a case-insensitive match.
         var targetFilter = Expression.Lambda<Func<TEntity, bool>>(body, parameter);
-        var filter = Builders<TEntity>.Filter.Where(conflictFilter is null ? targetFilter : targetFilter.AndAlso(conflictFilter));
+        var filter = Builders<TEntity>.Filter.Where(conflictFilter is null
+            ? targetFilter
+            : (Expression<Func<TEntity, bool>>)MongoPredicates.Rendered(targetFilter.AndAlso(conflictFilter)));
 
         EntityLifecycle.StampForInsert(entity, _unitOfWork.Conventions, _unitOfWork.Services);
         MongoUnitOfWork.StampInitialVersion(entity);
