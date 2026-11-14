@@ -92,6 +92,9 @@ public sealed class LeaseLockAttempt(LeaseStore store, string name, NamedLockOpt
     /// </summary>
     public static readonly TimeSpan LeastCallTime = TimeSpan.FromSeconds(1);
 
+    /// <summary>The longest delay a timer takes (<see cref="CancellationTokenSource.CancelAfter(TimeSpan)" /> refuses more).</summary>
+    private static readonly TimeSpan LongestTimer = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
     private bool _unsettled;
     private bool _taken;
@@ -110,8 +113,10 @@ public sealed class LeaseLockAttempt(LeaseStore store, string name, NamedLockOpt
     /// <inheritdoc />
     public override async Task<NativeLock?> TryAsync(TimeSpan wait, TimeSpan remaining, CancellationToken cancellationToken)
     {
+        // A timeout longer than a timer can count (TimeSpan.MaxValue, or past about 49 days) bounds nothing a call could
+        // reach: the attempt waits as an infinite one does, as a relational lock's attempt waits on its server.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (remaining != Timeout.InfiniteTimeSpan)
+        if (remaining != Timeout.InfiniteTimeSpan && remaining <= LongestTimer)
         {
             deadline.CancelAfter(remaining > LeastCallTime ? remaining : LeastCallTime);
         }

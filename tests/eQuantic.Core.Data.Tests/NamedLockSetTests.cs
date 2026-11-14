@@ -467,6 +467,20 @@ public sealed class NamedLockSetTests
     }
 
     [Test]
+    public async Task A_lease_attempt_takes_a_timeout_longer_than_a_timer_can_count()
+    {
+        var options = new NamedLockOptions { LeaseDuration = TimeSpan.FromSeconds(5) };
+        var store = new FakeLeaseStore();
+
+        foreach (var timeout in new[] { TimeSpan.MaxValue, TimeSpan.FromDays(60) })
+        {
+            var held = await NewSet().AcquireAsync("tenant:11", timeout, false, () => new LeaseLockAttempt(store, "tenant:11", options), default);
+            Assert.That(held.Lost.IsCancellationRequested, Is.False, $"{timeout} waits as long as the store needs, as a relational lock does");
+            await held.DisposeAsync();
+        }
+    }
+
+    [Test]
     public async Task A_lease_whose_renewal_hangs_is_lost_within_its_term_and_released_without_waiting()
     {
         var lease = TimeSpan.FromSeconds(1);
