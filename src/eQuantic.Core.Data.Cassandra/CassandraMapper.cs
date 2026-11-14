@@ -47,20 +47,36 @@ internal static class CassandraMapper
         return ($"INSERT INTO {configuration.TableName} ({names}) VALUES ({placeholders})", values);
     }
 
-    /// <summary>Builds the read of a row's store-generated columns by its primary key.</summary>
-    public static (string Cql, object?[] Values) BuildReadBack(CassandraEntityConfiguration configuration, object entity)
+    /// <summary>
+    ///     The store-generated columns an insert has to read back: the clock columns, which the coordinator fills
+    ///     (<c>toTimestamp(now())</c>). A sequence's number is on the entity before the insert is built, so it is never read.
+    /// </summary>
+    public static IReadOnlyList<CassandraGeneratedColumn> ReadBackColumns(CassandraEntityConfiguration configuration) =>
+        configuration.StoreGenerated.Where(generated => generated.Value == Data.Modeling.StoreValue.Clock).ToList();
+
+    /// <summary>
+    ///     Builds the read of a row's clock columns by its primary key; <c>null</c> when the entity has none, and nothing is
+    ///     read back.
+    /// </summary>
+    public static (string Cql, object?[] Values)? BuildReadBack(CassandraEntityConfiguration configuration, object entity)
     {
+        var generated = ReadBackColumns(configuration);
+        if (generated.Count == 0)
+        {
+            return null;
+        }
+
         var keys = PrimaryKey(configuration);
-        var columns = string.Join(", ", configuration.StoreGenerated.Select(generated => generated.Column));
+        var columns = string.Join(", ", generated.Select(column => column.Column));
         var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
         var values = keys.Select(key => Stored(entity, configuration.Column(key))).ToArray();
         return ($"SELECT {columns} FROM {configuration.TableName} WHERE {where}", values);
     }
 
-    /// <summary>Sets a read-back row's store-generated values on the entity; a value the read did not see fails loudly.</summary>
+    /// <summary>Sets a read-back row's clock values on the entity; a value the read did not see fails loudly.</summary>
     public static void AssignReadBack(CassandraEntityConfiguration configuration, object entity, Row? row)
     {
-        foreach (var generated in configuration.StoreGenerated)
+        foreach (var generated in ReadBackColumns(configuration))
         {
             var column = configuration.Column(generated.Column)!;
             var property = Property(entity.GetType(), generated.Member)!;
@@ -76,6 +92,52 @@ internal static class CassandraMapper
             property.SetValue(entity, Value(row, column, property.PropertyType, name));
         }
     }
+
+    /// <summary>Builds the read of the entity's row, every column, by its full primary key.</summary>
+    public static (string Cql, object?[] Values) BuildRead(CassandraEntityConfiguration configuration, object entity)
+    {
+        var keys = PrimaryKey(configuration);
+        var where = string.Join(" AND ", keys.Select(key => $"{key} = ?"));
+        var values = keys.Select(key => Stored(entity, configuration.Column(key))).ToArray();
+        return ($"SELECT * FROM {configuration.TableName} WHERE {where}", values);
+    }
+
+    /// <summary>The partition an entity's row lives in, as text: its partition key's stored values.</summary>
+    public static string PartitionText(CassandraEntityConfiguration configuration, object entity) =>
+        PartitionText(configuration.PartitionKeys.Select(key => Stored(entity, configuration.Column(key))));
+
+    /// <summary>The partition a row lives in, as text: its partition key's values.</summary>
+    public static string PartitionText(CassandraEntityConfiguration configuration, Row row) =>
+        PartitionText(configuration.PartitionKeys.Select(key => row.GetValue<object>(key.ToLowerInvariant())));
+
+    private static string PartitionText(IEnumerable<object?> values) =>
+        string.Join("\u001f", values.Select(value => value switch
+        {
+            null => string.Empty,
+            IFormattable formattable => formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+            _ => value.ToString() ?? string.Empty,
+        }));
+
+    /// <summary>
+    ///     Whether a row read after an insert timed out is the entity's: every column the insert wrote from the entity (all
+    ///     but the clock the coordinator filled) holds its value.
+    /// </summary>
+    public static bool HoldsInsert(CassandraEntityConfiguration configuration, object stored, object entity) =>
+        configuration.Columns
+            .Where(column => !configuration.StoreGenerated.Any(generated => generated.Value == Data.Modeling.StoreValue.Clock
+                                                                            && CassandraEntityConfiguration.Same(generated.Column, column.Name)))
+            .All(column => Same(Read(stored, column.Member), Read(entity, column.Member)));
+
+    /// <summary>Equality of two member values as Cassandra stores them: timestamps to the millisecond, collections by their items.</summary>
+    public static bool Same(object? left, object? right) => (left, right) switch
+    {
+        (null, null) => true,
+        (DateTime a, DateTime b) => Math.Abs((a.ToUniversalTime() - b.ToUniversalTime()).TotalMilliseconds) < 1,
+        (DateTimeOffset a, DateTimeOffset b) => Math.Abs((a - b).TotalMilliseconds) < 1,
+        (System.Collections.IEnumerable a, System.Collections.IEnumerable b) when left is not string =>
+            a.Cast<object?>().SequenceEqual(b.Cast<object?>()),
+        _ => Equals(left, right),
+    };
 
     /// <summary>Builds a <c>DELETE</c> targeting the row's full primary key.</summary>
     public static (string Cql, object?[] Values) BuildDelete(CassandraEntityConfiguration configuration, object entity)

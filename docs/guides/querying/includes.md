@@ -40,7 +40,7 @@ limit means a collection.
 | Relational | one follow-up `IN` query per path segment (the "split query" strategy — no cartesian duplication), split into as many statements as the dialect's parameter limit needs when the parents' keys outnumber it (2,100 on SQL Server) | the filter joins the `IN` in the `WHERE`, the order is its `ORDER BY`; a skip or a limit ranks each parent's rows with `ROW_NUMBER() OVER (PARTITION BY fk ORDER BY …)`, so **only the rows each parent keeps leave the database**; a parent's rows are always ranked within one statement, and `Take(0)` loads nothing without a query |
 | MongoDB | a server-side `$lookup` per path | a `$lookup` with a pipeline — `localField`/`foreignField` correlate it, and the shape's `$match`, `$sort`, `$skip` and `$limit` run inside it, per parent, on the server (MongoDB 5.0 or later) |
 | Cosmos DB | **one second query** per path segment over the related container: the parents' keys resolved and read with `IN` | the filter joins that query's `WHERE`; the order, the skip and the limit apply per parent as the rows are stitched — **every row the filter keeps travels**, the ones past each parent's limit are dropped |
-| Cassandra | **one second query** per path segment over the related table: `IN` over the parents' keys, under the read's gates | as Cosmos DB; when the foreign key is the related table's partition key and the shape orders by its clustering columns as stored (or not at all), the limit pushes down as **`PER PARTITION LIMIT`** |
+| Cassandra | **a second query** per path segment over the related table: `IN` over the parents' keys, a query per chunk of 100 keys, under the read's gates | as Cosmos DB; when the foreign key is the related table's partition key and the shape orders by its clustering columns as stored (or not at all), the limit pushes down as **`PER PARTITION LIMIT`** |
 
 ```sql
 -- relational, the shaped include above:
@@ -63,11 +63,14 @@ Foreign keys resolve by convention — reference `Buyer` → `BuyerId` on the or
   keeps, not with the limit, because a per-parent limit has no Cosmos SQL form. Filter what you
   can, and keep the limit for display.
 - **Cassandra** has no join either. The second query runs through the same
-  [gates](pushdown.md) as any read, **under the read's own opt-ins**: an `IN` on a foreign key that
-  is not the related table's partition key needs `.AllowFiltering()`, and a filter CQL cannot
-  express (`!=`, a null test) needs `.AllowClientEvaluation()` — both on the parent's options. Model
-  the related table partitioned by the foreign key and clustered in the order it is read, and the
-  include is one partition-routed query with `PER PARTITION LIMIT`.
+  [gates](pushdown.md) as any read, **under the read's own opt-ins**: a read on a foreign key that
+  is not the related table's partition key names none of its partitions, so it is a scan and needs
+  `.AllowFiltering()`; a filter CQL cannot express (`!=`, a null test) needs
+  `.AllowClientEvaluation()`, and so does a foreign key outside the primary key, which takes no CQL
+  `IN`: the table is read whole and the parents' keys matched client-side. Both opt-ins go on the
+  parent's options. Model the related table partitioned by the foreign key and clustered in the order
+  it is read, and the include is partition-routed queries with `PER PARTITION LIMIT`, 100 parents' keys
+  each.
 
 ## Honest limits
 

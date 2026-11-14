@@ -230,6 +230,54 @@ public sealed class CassandraReadShapesTests : CassandraIntegrationTest
         Assert.That(bodies, Is.EquivalentTo(new[] { 1, 2 }));
     }
 
+    /// <remarks>
+    ///     A ticket's queue key is a regular column, so the include cannot restrict the tickets by it: they are read whole and
+    ///     kept client-side, which is a scan (<c>.AllowFiltering()</c>) and client work (<c>.AllowClientEvaluation()</c>).
+    /// </remarks>
+    [Test]
+    public async Task An_include_whose_foreign_key_is_a_regular_column_scans_only_behind_both_opt_ins()
+    {
+        var support = new ShapeQueue { Name = "support" };
+        var sales = new ShapeQueue { Name = "sales" };
+        await Add(support, sales);
+        await Add(
+            new ShapeTicket { Desk = "east", ShapeQueueId = support.Id, Title = "t1" },
+            new ShapeTicket { Desk = "west", ShapeQueueId = support.Id, Title = "t2" },
+            new ShapeTicket { Desk = "east", ShapeQueueId = sales.Id, Title = "t3" });
+        await Commit();
+
+        QueryOptions<ShapeQueue> Including() => new QueryOptions<ShapeQueue>().Where(x => x.Id == support.Id).Include(x => x.Tickets);
+
+        Assert.That(async () => await Repo<ShapeQueue>().GetAllAsync(Including()),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("AllowClientEvaluation"));
+        Assert.That(async () => await Repo<ShapeQueue>().GetAllAsync(Including().AllowClientEvaluation()),
+            Throws.InstanceOf<NotSupportedException>().With.Message.Contains("AllowFiltering"),
+            "the tickets are not read by a partition: the read is a scan of the table");
+
+        var queue = (await Repo<ShapeQueue>().GetAllAsync(Including().AllowClientEvaluation().AllowFiltering())).Single();
+        Assert.That(queue.Tickets!.Select(x => x.Title).Order(), Is.EqualTo(new[] { "t1", "t2" }));
+    }
+
+    /// <remarks>An include over 250 parents reads the related rows in chunks, each a query of its own.</remarks>
+    [Test]
+    public async Task An_include_over_more_parents_than_a_chunk_reads_in_chunks()
+    {
+        const int count = 250;
+        var runs = Enumerable.Range(0, count).Select(index => new ShapeRun { Name = $"run-{index:D3}" }).ToArray();
+        await Add(runs);
+        await Add(runs.Select(run => Step(run, "success", 1)).ToArray());
+        await Commit();
+        using var executed = new ExecutedCql();
+
+        var loaded = (await Repo<ShapeRun>().GetAllAsync(new QueryOptions<ShapeRun>().Include(x => x.Steps))).ToList();
+
+        Assert.That(loaded, Has.Count.EqualTo(count));
+        Assert.That(loaded.Select(run => run.Steps!.Count), Is.All.EqualTo(1), "every run has its step");
+        var reads = executed.On("shapestep").Where(statement => statement.IsRead).ToList();
+        Assert.That(reads, Has.Count.EqualTo(3), "250 keys in chunks of 100");
+        Assert.That(reads.Select(statement => statement.Markers), Has.All.LessThanOrEqualTo(100));
+    }
+
     private static ShapeStep Step(ShapeRun run, string status, int minute) =>
         new() { ShapeRunId = run.Id, Status = status, StartedAt = At(minute) };
 

@@ -71,9 +71,12 @@ What an upsert promises, everywhere:
 
 Cassandra's lightweight transactions are Paxos rounds: an upsert costs two of them when the row
 exists, and under contention one can time out with its outcome unknown. The provider settles it with
-a serial read: a write of values set outright is written again if it did not apply; a value computed
-from the row (`x.Uses + 1`, the version) is never written twice, so that timeout reaches you as a
-`TimeoutException` with the driver's inside.
+a serial read, for what that read proves: a write of values set outright counts as applied when the
+row holds them and is written again otherwise; a version the update conditions on and bumps proves it
+did not apply when the row is still at the version read, and the upsert runs again; a value computed
+from the row (`x.Uses + 1`) can come back to a value it held, so it is never written twice and its
+timeout reaches you as a `TimeoutException` with the driver's inside. A set-based write runs one
+partition's transactions one at a time, so it does not contend with itself.
 
 ## Inserting a batch, skipping the rows already there
 
@@ -94,7 +97,7 @@ assigns are not read back onto the entities (read the rows if you need them).
 | MySQL / MariaDB | one `INSERT` per row in a transaction, discarding only error 1062 | **yes** |
 | MongoDB | `insertMany`, unordered when skipping (discarding only E11000), ordered otherwise; inside an explicit transaction, the taken keys found first (below) and only the free documents inserted | no: an ordered insert stops at the taken key and the documents before it stay — unless an explicit transaction is open, which makes the call part of it |
 | Cosmos DB | one create per item, concurrently, discarding only 409 | per item: without skipping, the call fails after every create has answered, and the others stay |
-| Cassandra | one `INSERT … IF NOT EXISTS` per row, concurrently | per row, as above |
+| Cassandra | one `INSERT … IF NOT EXISTS` per row, one partition's at a time; every sequence number reserved first, in one compare-and-set | per row, as above |
 
 MongoDB aborts a transaction on **any** write error, a duplicate key included, so inside an explicit
 transaction the duplicates cannot be discarded after the fact. There the batch is checked first,

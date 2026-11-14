@@ -41,13 +41,37 @@ internal static class CassandraPredicates
     };
 
     /// <summary>
-    ///     The filter ready for the planner: normalized, and each relation resolved into the related keys, read under the
-    ///     opt-ins of <paramref name="options" /> (a read's; a write carries none).
+    ///     A read's filter ready for the planner: normalized, and each relation resolved into the related keys, read under the
+    ///     opt-ins of <paramref name="options" />.
     /// </summary>
     public static async Task<Expression<Func<T, bool>>> ResolveAsync<T>(Expression<Func<T, bool>> filter, CassandraUnitOfWork unitOfWork,
         object? options, CancellationToken cancellationToken) =>
         await RelationPredicates.ResolveAsync(PredicateNormalizer.Normalize(filter), Navigations(unitOfWork), Keys(unitOfWork, options),
             cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    ///     A set-based write's filter ready for the planner: normalized, and each relation resolved into the related keys. A
+    ///     write carries no opt-ins, so each related read is partition-scoped or refused: by the relation's condition, or by
+    ///     what <paramref name="scope" /> answers for a relation of the written entity — the values the rows the write finds
+    ///     relate by (<see cref="RelationNavigation.OwnerKey" />), <c>null</c> when the write's filter does not name its
+    ///     partition. A relation inside a relation's condition is read by its condition alone.
+    /// </summary>
+    public static async Task<Expression<Func<T, bool>>> ResolveForWriteAsync<T>(Expression<Func<T, bool>> filter,
+        CassandraUnitOfWork unitOfWork, Func<RelationPredicate, Task<IReadOnlyCollection<object?>?>>? scope, CancellationToken cancellationToken)
+    {
+        var normalized = PredicateNormalizer.Normalize(filter);
+        var navigations = Navigations(unitOfWork);
+        var relations = RelationPredicates.Find(normalized, navigations);
+
+        // The keys are read one relation at a time, in the order Find answers them.
+        var next = 0;
+        return await RelationPredicates.ResolveAsync(normalized, navigations, (target, condition, member, token) =>
+        {
+            var relation = relations[next++];
+            return Read(target, unitOfWork, condition, member, null, true,
+                scope is null ? null : () => scope(relation), token);
+        }, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>The filter with every relation replaced by an empty key list, for a plan that runs nothing.</summary>
     public static Expression<Func<T, bool>> Unresolved<T>(Expression<Func<T, bool>> filter, CassandraUnitOfWork unitOfWork) =>
@@ -63,18 +87,24 @@ internal static class CassandraPredicates
             "so the list shows empty here.");
 
     private static RelatedKeysReader Keys(CassandraUnitOfWork unitOfWork, object? options) => (target, condition, member, cancellationToken) =>
+        Read(target, unitOfWork, condition, member, options, false, null, cancellationToken);
+
+    private static Task<IReadOnlyCollection<object?>> Read(Type target, CassandraUnitOfWork unitOfWork, LambdaExpression? condition,
+        PropertyInfo member, object? options, bool write, Func<Task<IReadOnlyCollection<object?>?>>? scope, CancellationToken cancellationToken) =>
         (Task<IReadOnlyCollection<object?>>)typeof(CassandraPredicates)
             .GetMethod(nameof(DistinctAsync), BindingFlags.NonPublic | BindingFlags.Static)!
             .MakeGenericMethod(target)
-            .Invoke(null, [unitOfWork, condition, member, options, cancellationToken])!;
+            .Invoke(null, [unitOfWork, condition, member, options, write, scope, cancellationToken])!;
 
     private static async Task<IReadOnlyCollection<object?>> DistinctAsync<TTarget>(CassandraUnitOfWork unitOfWork, LambdaExpression? condition,
-        PropertyInfo member, object? options, CancellationToken cancellationToken) where TTarget : class
+        PropertyInfo member, object? options, bool write, Func<Task<IReadOnlyCollection<object?>?>>? scope,
+        CancellationToken cancellationToken) where TTarget : class
     {
-        var resolved = condition is null
-            ? null
-            : await ResolveAsync((Expression<Func<TTarget, bool>>)condition, unitOfWork, options, cancellationToken).ConfigureAwait(false);
+        var typed = (Expression<Func<TTarget, bool>>?)condition;
+        var resolved = typed is null ? null
+            : write ? await ResolveForWriteAsync(typed, unitOfWork, null, cancellationToken).ConfigureAwait(false)
+            : await ResolveAsync(typed, unitOfWork, options, cancellationToken).ConfigureAwait(false);
         return await CassandraInclude.RelatedKeysAsync(unitOfWork, resolved, member, options,
-            $"the related read of '{typeof(TTarget).Name}' a relation test makes").ConfigureAwait(false);
+            $"the related read of '{typeof(TTarget).Name}' a relation test makes", write, scope).ConfigureAwait(false);
     }
 }

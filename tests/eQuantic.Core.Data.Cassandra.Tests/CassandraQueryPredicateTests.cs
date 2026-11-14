@@ -363,6 +363,82 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         Assert.That(await Titles(space, _ => true), Is.EqualTo(new[] { "A" }));
     }
 
+    /// <remarks>
+    ///     A relation test with no condition (<c>Any()</c>, <c>!Any()</c>, <c>== null</c>) stands for every row of the related
+    ///     table: its keys are a read of the whole table, which a read makes only behind <c>.AllowFiltering()</c>, as any scan.
+    /// </remarks>
+    [Test]
+    public async Task A_relation_test_without_a_condition_reads_the_whole_related_table_only_behind_the_reads_opt_in()
+    {
+        var (space, _) = await SeedItemsAsync();
+        using var executed = new ExecutedCql();
+        using var scope = NewScope();
+        var repo = Repo<RelItem>(scope);
+
+        var refusal = Assert.ThrowsAsync<NotSupportedException>(() => repo.GetFilteredAsync(x => x.Space == space && x.Runs!.Any()));
+        Assert.That(refusal!.Message, Does.Contain("AllowFiltering"));
+        var missing = Assert.ThrowsAsync<NotSupportedException>(() => repo.GetFilteredAsync(x => x.Space == space && x.Box != null,
+            new QueryOptions<RelItem>().AllowClientEvaluation()));
+        Assert.That(missing!.Message, Does.Contain("AllowFiltering"));
+        Assert.That(executed.On("relrun").Concat(executed.On("relbox")), Is.Empty, "nothing was read before the gate");
+
+        Assert.That((await repo.GetFilteredAsync(x => x.Space == space && x.Runs!.Any(), new QueryOptions<RelItem>().AllowFiltering()))
+            .Select(x => x.Title), Is.EqualTo(new[] { "A" }), "opted into the scan, the read runs");
+    }
+
+    /// <remarks>
+    ///     A write carries no opt-ins, so the related rows a relation test reads have to be partition-scoped: by the
+    ///     relation's own condition, or — when the write names its partition — by the keys of the rows the write finds, read
+    ///     by the related table's partition key.
+    /// </remarks>
+    [Test]
+    public async Task A_write_reads_a_relation_partition_scoped_or_refuses()
+    {
+        var (space, user) = await SeedItemsAsync();
+        using var executed = new ExecutedCql();
+        using var scope = NewScope();
+        var repo = Repo<RelItem>(scope);
+
+        var unscoped = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.UpdateManyAsync(x => x.Runs!.Any(), x => new RelItem { Title = "busy" }));
+        Assert.That(unscoped!.Message, Does.Contain("partition key"));
+        var byUser = Assert.ThrowsAsync<NotSupportedException>(() =>
+            repo.UpdateManyAsync(x => x.Space == space && x.Mentions!.Any(), x => new RelItem { Title = "mentioned" }));
+        Assert.That(byUser!.Message, Does.Contain("partition key"), "the mentions are partitioned by user, not by item");
+        Assert.That(executed.On("relrun").Concat(executed.On("relmention")).Where(statement => statement.IsRead),
+            Has.None.Matches<ExecutedStatement>(statement => !statement.Cql.Contains(" WHERE ", StringComparison.OrdinalIgnoreCase)),
+            "no related table was read whole");
+
+        Assert.That(await repo.UpdateManyAsync(x => x.Space == space && x.Runs!.Any(), x => new RelItem { Title = "busy" }), Is.EqualTo(1L), "A");
+        Assert.That(executed.On("relrun").Where(statement => statement.IsRead).Select(statement => statement.Cql),
+            Has.Some.Contains("RelItemId IN").IgnoreCase.And.All.Contains(" WHERE ").IgnoreCase,
+            "the runs were read for the items the write found, by their partition key");
+        Assert.That(await repo.UpdateManyAsync(x => x.Space == space && x.Mentions!.Any(m => m.UserId == user), x => new RelItem { Title = "seen" }),
+            Is.EqualTo(2L), "a condition on the related partition needs nothing more");
+    }
+
+    /// <remarks>
+    ///     A user's 250 mentions resolve to an <c>IN</c> of 250 items; the read runs it in chunks, each a query of its own,
+    ///     instead of one statement binding every key.
+    /// </remarks>
+    [Test]
+    public async Task An_in_list_a_relation_resolves_to_runs_in_chunks()
+    {
+        const int count = 250;
+        var (space, user) = (Guid.NewGuid(), Guid.NewGuid());
+        var items = Enumerable.Range(0, count).Select(index => new RelItem { Space = space, Title = $"item-{index:D3}" }).ToList();
+        await Seed([.. items, .. items.Select(item => new RelMention { RelItemId = item.Id, UserId = user })]);
+        using var executed = new ExecutedCql();
+        using var scope = NewScope();
+
+        var found = (await Repo<RelItem>(scope).GetFilteredAsync(x => x.Space == space && x.Mentions!.Any(m => m.UserId == user))).ToList();
+
+        Assert.That(found.Select(x => x.Id), Is.EquivalentTo(items.Select(x => x.Id)));
+        var reads = executed.On("relitem").Where(statement => statement.IsRead).ToList();
+        Assert.That(reads, Has.Count.EqualTo(3), "250 keys in chunks of 100");
+        Assert.That(reads.Select(statement => statement.Markers), Has.All.LessThanOrEqualTo(101), "the space and at most 100 keys each");
+    }
+
     [Test]
     public void A_negated_relation_in_a_write_without_the_partition_key_is_refused()
     {
