@@ -94,8 +94,9 @@ internal static class SqlFilterRenderer
             return escaped;
         }
 
-        // Without regard to case: both sides lower-cased by the store (one folding for both). Against the member's
-        // lower- or upper-cased text: the value as it is, as C# compares it.
+        // Without regard to case: equality with both sides lower-cased by the store (one folding for both), a part of
+        // the text through the dialect's case-insensitive LIKE (PostgreSQL's ILIKE). Against the member's lower- or
+        // upper-cased text: the value as it is, as C# compares it.
         string Text(TextFilter text)
         {
             if (!text.CanMatch)
@@ -105,7 +106,6 @@ internal static class SqlFilterRenderer
             }
 
             var fold = text.Case == TextCase.Upper ? "UPPER" : "LOWER";
-            var column = $"{fold}({Column(text.Member)})";
             var value = text.Match switch
             {
                 TextMatch.Equals => text.Value,
@@ -113,8 +113,16 @@ internal static class SqlFilterRenderer
                 TextMatch.EndsWith => "%" + Escaped(text.Value),
                 _ => "%" + Escaped(text.Value) + "%",
             };
-            var bound = text.Case == TextCase.Ignore ? $"{fold}({Bind(value)})" : Bind(value);
-            return text.Match == TextMatch.Equals ? $"{column} = {bound}" : $"{column} LIKE {bound} ESCAPE '!'";
+
+            if (text.Case == TextCase.Ignore)
+            {
+                return text.Match == TextMatch.Equals
+                    ? $"LOWER({Column(text.Member)}) = LOWER({Bind(value)})"
+                    : dialect.LikeIgnoringCase(Column(text.Member), Bind(value));
+            }
+
+            var folded = $"{fold}({Column(text.Member)})";
+            return text.Match == TextMatch.Equals ? $"{folded} = {Bind(value)}" : $"{folded} LIKE {Bind(value)} ESCAPE '!'";
         }
 
         // A filter across a relation: a correlated EXISTS over the related table, its rows matched to this one by the

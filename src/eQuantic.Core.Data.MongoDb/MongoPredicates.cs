@@ -12,8 +12,8 @@ namespace eQuantic.Core.Data.MongoDb;
 ///     Prepares a predicate (or a whole LINQ query) for the driver: an array's <c>Contains</c> rewritten to the shape
 ///     LINQ providers read, text matched without regard to case rewritten to an escaped case-insensitive regular
 ///     expression, and each test across a relation resolved into the related keys — the related documents' keys read
-///     first (one <c>distinct</c> per test, through the driver, inside the open transaction's session), then an
-///     <c>$in</c> over them.
+///     first (one aggregation per test — <c>$match</c>, then <c>$group</c> on the key — through the driver, inside the open
+///     transaction's session), then an <c>$in</c> over them.
 ///     <para>
 ///         A navigation follows the conventions an include follows: a collection of documents of another collection
 ///         holding a foreign key back to the owner (<c>[ForeignKey("Owner")]</c> or <c>{Owner}Id</c>), or a reference
@@ -23,8 +23,13 @@ namespace eQuantic.Core.Data.MongoDb;
 /// </summary>
 internal static class MongoPredicates
 {
-    /// <summary>The navigation a member is, or <c>null</c> (an embedded document or array, a scalar).</summary>
-    public static RelationNavigation? Navigation(Type owner, PropertyInfo member)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(Type, PropertyInfo), RelationNavigation?> Navigations = new();
+
+    /// <summary>The navigation a member is, or <c>null</c> (an embedded document or array, a scalar); the conventions are static, so it is cached.</summary>
+    public static RelationNavigation? Navigation(Type owner, PropertyInfo member) =>
+        Navigations.GetOrAdd((owner, member), static key => Resolve(key.Item1, key.Item2));
+
+    private static RelationNavigation? Resolve(Type owner, PropertyInfo member)
     {
         if (member.PropertyType == typeof(string) || !owner.IsClass)
         {
@@ -60,7 +65,7 @@ internal static class MongoPredicates
     }
 
     /// <summary>
-    ///     The query ready for the driver, for a synchronous read: what <see cref="ReadyAsync{T}" /> does, the related keys
+    ///     The query ready for the driver, for a synchronous read: what <see cref="ReadyAsync{T}(IQueryable{T}, MongoUnitOfWork, CancellationToken)" /> does, the related keys
     ///     read through the driver's synchronous API.
     /// </summary>
     public static IQueryable<T> Ready<T>(IQueryable<T> query, MongoUnitOfWork unitOfWork)
@@ -92,9 +97,9 @@ internal static class MongoPredicates
             foreach (var relation in RelationPredicates.Find(lambda, Navigation))
             {
                 notes.Add($"'{relation.Text}' resolves first: the distinct {relation.Navigation.TargetKey.Name} of the " +
-                          $"'{MongoModeling.CollectionName(relation.Navigation.Target)}' documents that match is read (one distinct, " +
-                          $"inside the transaction's session when one is open), and the read takes {relation.Navigation.OwnerKey.Name} " +
-                          $"{(relation.Negated ? "$nin" : "$in")} those keys.");
+                          $"'{MongoModeling.CollectionName(relation.Navigation.Target)}' documents that match is read (one aggregation, " +
+                          $"$match then $group on the key, inside the transaction's session when one is open), and the read takes " +
+                          $"{relation.Navigation.OwnerKey.Name} {(relation.Negated ? "$nin" : "$in")} those keys.");
             }
         }).Visit(query);
         return notes;

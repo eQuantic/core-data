@@ -4,7 +4,7 @@ namespace eQuantic.Core.Data.PostgreSql.Tests;
 
 /// <summary>
 ///     The query predicates against a real PostgreSQL: filters across relations as correlated <c>EXISTS</c> in reads,
-///     counts and set-based writes, text matched with <c>lower()</c> on both sides, and <c>Contains</c> over an array or a
+///     counts and set-based writes, text matched with <c>lower()</c> on both sides or <c>ILIKE</c>, and <c>Contains</c> over an array or a
 ///     list as <c>IN</c>.
 /// </summary>
 [TestFixture]

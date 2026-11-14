@@ -72,6 +72,14 @@ public abstract class SqlDialect
     /// </summary>
     public virtual string LikeWildcards => "%_";
 
+    /// <summary>
+    ///     A <c>LIKE</c> that ignores case, of an escaped pattern (escape character <c>!</c>): both sides lower-cased by
+    ///     default; PostgreSQL's <c>ILIKE</c>, which its trigram search index serves.
+    /// </summary>
+    /// <param name="column">The (qualified, quoted) column.</param>
+    /// <param name="pattern">The bound pattern's placeholder.</param>
+    public virtual string LikeIgnoringCase(string column, string pattern) => $"LOWER({column}) LIKE LOWER({pattern}) ESCAPE '!'";
+
     /// <summary>The DDL type for a CLR type (used by <c>CREATE TABLE</c> migrations).</summary>
     public abstract string SqlType(Type type);
 

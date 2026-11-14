@@ -346,18 +346,28 @@ public sealed class CassandraSet<TEntity> : Data.Repository.ISet<TEntity> where 
         }
     }
 
-    /// <summary>The rows the key restriction finds, read at the serial consistency a lightweight transaction writes at.</summary>
+    /// <summary>
+    ///     The rows the key restriction finds, read at the serial consistency a lightweight transaction writes at — or, when
+    ///     the restriction names several partitions (Cassandra takes a serial read of one partition at a time), at the
+    ///     session's consistency: each row's own transaction still checks its condition before it writes.
+    /// </summary>
     private async Task<List<global::Cassandra.Row>> KeyedRowsAsync(CassandraConditions split, CancellationToken cancellationToken)
     {
+        ConsistencyLevel? consistency = ConsistencyLevel.Serial;
         for (var attempt = 1; ; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var rows = await CassandraStatements.ExecuteAsync(_session,
-                    $"SELECT * FROM {_configuration.TableName} WHERE {split.KeyWhere}", split.KeyValues, ConsistencyLevel.Serial,
+                    $"SELECT * FROM {_configuration.TableName} WHERE {split.KeyWhere}", split.KeyValues, consistency,
                     _unitOfWork.CommandLogger, _unitOfWork.SensitiveLogging).ConfigureAwait(false);
                 return rows.ToList();
+            }
+            catch (InvalidQueryException exception) when (consistency is not null
+                                                          && exception.Message.Contains("one partition", StringComparison.OrdinalIgnoreCase))
+            {
+                consistency = null;
             }
             catch (Exception exception) when (exception is ReadTimeoutException or WriteTimeoutException && attempt < ConditionalAttempts)
             {

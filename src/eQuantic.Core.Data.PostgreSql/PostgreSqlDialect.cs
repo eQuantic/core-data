@@ -253,6 +253,10 @@ public sealed class PostgreSqlDialect : SqlDialect
     }
 
     /// <inheritdoc />
+    /// <remarks><c>ILIKE</c>: the trigram index a declared search index creates serves it.</remarks>
+    public override string LikeIgnoringCase(string column, string pattern) => $"{column} ILIKE {pattern} ESCAPE '!'";
+
+    /// <inheritdoc />
     /// <remarks>
     ///     A GIN trigram index (<c>pg_trgm</c>): it serves <c>LIKE</c>/<c>ILIKE</c> with leading wildcards —
     ///     <c>Contains</c>/<c>EndsWith</c> stop scanning. The extension creation is idempotent and ships with

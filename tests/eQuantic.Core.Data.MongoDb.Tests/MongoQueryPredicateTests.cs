@@ -130,7 +130,7 @@ public sealed class RelCompany : IEntity<string>
 
 /// <summary>
 ///     The query predicates against a real MongoDB: a filter across a relation resolves the related keys first (one
-///     <c>distinct</c> per test, inside the transaction's session when one is open) and reads with <c>$in</c>/<c>$nin</c>
+///     aggregation per test, inside the transaction's session when one is open) and reads with <c>$in</c>/<c>$nin</c>
 ///     over them, in reads, counts and set-based writes; text without regard to case is an escaped case-insensitive regular
 ///     expression; and <c>Contains</c> over an array or a list is <c>$in</c>.
 /// </summary>

@@ -4,8 +4,8 @@ namespace eQuantic.Core.Data.SqlServer.Tests;
 
 /// <summary>
 ///     The query predicates against a real SQL Server: filters across relations as correlated <c>EXISTS</c> in reads,
-///     counts and set-based writes, text matched with <c>LOWER()</c> on both sides (the value's <c>[</c> escaped too), and <c>Contains</c> over an array or a
-///     list as <c>IN</c>.
+///     counts and set-based writes, text matched with <c>LOWER()</c> on both sides (the value's <c>[</c> escaped too, a
+///     wildcard to SQL Server's <c>LIKE</c>), and <c>Contains</c> over an array or a list as <c>IN</c>.
 /// </summary>
 [TestFixture]
 public sealed class SqlServerQueryPredicateTests : SqlServerIntegrationTest

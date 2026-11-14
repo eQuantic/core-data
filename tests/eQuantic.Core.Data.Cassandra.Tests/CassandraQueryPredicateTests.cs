@@ -282,6 +282,13 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
             var returned = await ((IReturningUpdateRepository<RelArtifact, Guid>)Repo<RelArtifact>(read))
                 .UpdateAndGetAsync(x => x.Repo!.WorkspaceId == other && x.Name == "a3", x => new RelArtifact { Downloads = x.Downloads + 1 });
             Assert.That(returned.Select(x => (x.Name, x.Downloads)), Is.EqualTo(new[] { ("a3", 8) }));
+
+            // Workspace w's two repositories are two partitions of the artifacts: the rows are read across both.
+            Assert.That(await Repo<RelArtifact>(read).UpdateManyAsync(x => x.Repo!.WorkspaceId == workspace, x => new RelArtifact { Downloads = 5 }),
+                Is.EqualTo(2L));
+            var acrossPartitions = await ((IReturningUpdateRepository<RelArtifact, Guid>)Repo<RelArtifact>(read))
+                .UpdateAndGetAsync(x => x.Repo!.WorkspaceId == workspace && x.Name == "a2", x => new RelArtifact { Downloads = x.Downloads + 1 });
+            Assert.That(acrossPartitions.Select(x => (x.Name, x.Downloads)), Is.EqualTo(new[] { ("a2", 6) }));
         }
 
         using (var scope = NewScope())
