@@ -100,7 +100,9 @@ public static class ReadShapes
         nulls == NullsOrder.Default || nulls == (descending ? NullsOrder.Last : NullsOrder.First);
 
     /// <summary>
-    ///     Orders rows in memory as a store does: text compares ordinally, the rest by its own ordering, and nulls go
+    ///     Orders rows in memory as a store does: text by code point (UTF-8's byte order, which is how Cassandra clusters
+    ///     text and MongoDB compares it; ordinal UTF-16 would put a character past U+FFFF, a surrogate pair, before
+    ///     U+E000–U+FFFF), the rest by its own ordering, and nulls go
     ///     where each sort says (first when ascending and last when descending by default, as nulls sort as the
     ///     smallest value). The sort is stable.
     /// </summary>
@@ -163,6 +165,26 @@ public static class ReadShapes
         protected override Expression VisitParameter(ParameterExpression node) => node == from ? to : node;
     }
 
+    /// <summary>
+    ///     Text in code point order: UTF-16 compared unit by unit, with the surrogates moved above U+E000–U+FFFF, which is
+    ///     the order of the code points and of their UTF-8 bytes.
+    /// </summary>
+    private static int CompareCodePoints(string left, string right)
+    {
+        var length = Math.Min(left.Length, right.Length);
+        for (var index = 0; index < length; index++)
+        {
+            if (left[index] != right[index])
+            {
+                return InCodePointOrder(left[index]) - InCodePointOrder(right[index]);
+            }
+        }
+
+        return left.Length - right.Length;
+
+        static int InCodePointOrder(char unit) => unit >= 0xD800 ? (unit >= 0xE000 ? unit - 0x800 : unit + 0x2000) : unit;
+    }
+
     private sealed class KeysComparer(IReadOnlyList<MemorySort> sorts) : IComparer<object?[]>
     {
         public int Compare(object?[]? x, object?[]? y)
@@ -190,7 +212,7 @@ public static class ReadShapes
                 }
 
                 var compared = left is string text && right is string other
-                    ? string.CompareOrdinal(text, other)
+                    ? CompareCodePoints(text, other)
                     : Comparer<object>.Default.Compare(left, right);
                 if (compared != 0)
                 {

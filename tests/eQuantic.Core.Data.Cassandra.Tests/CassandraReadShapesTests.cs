@@ -63,6 +63,30 @@ public sealed class CassandraReadShapesTests : CassandraIntegrationTest
     }
 
     [Test]
+    public async Task An_include_orders_text_as_the_cluster_keeps_it()
+    {
+        var run = new ShapeRun { Name = "tagged" };
+        await Add(run);
+        await Add(new ShapeTag { ShapeRunId = run.Id, Name = "\U0001F600" }, new ShapeTag { ShapeRunId = run.Id, Name = "\uFF21" },
+            new ShapeTag { ShapeRunId = run.Id, Name = "z" });
+        await Commit();
+
+        var stored = (await Repo<ShapeTag>().GetAllAsync(new QueryOptions<ShapeTag>().Where(x => x.ShapeRunId == run.Id).OrderBy(x => x.Name)))
+            .Select(x => x.Name).ToArray();
+        Assert.That(stored, Is.EqualTo(new[] { "z", "\uFF21", "\U0001F600" }), "the cluster keeps text in UTF-8's byte order");
+
+        QueryOptions<ShapeRun> Tagged(Func<IncludeQuery<ShapeTag>, IncludeQuery<ShapeTag>> shape) =>
+            new QueryOptions<ShapeRun>().Where(x => x.Id == run.Id).Include(x => x.Tags, shape);
+        var ordered = (await Repo<ShapeRun>().GetAllAsync(Tagged(tags => tags.OrderBy(t => t.Name)))).Single();
+        Assert.That(ordered.Tags!.Select(t => t.Name), Is.EqualTo(stored), "ordered client-side, as the cluster orders it");
+
+        _statements.Clear();
+        var limited = (await Repo<ShapeRun>().GetAllAsync(Tagged(tags => tags.OrderBy(t => t.Name).Take(2)))).Single();
+        Assert.That(_statements, Has.Some.Contains("PER PARTITION LIMIT 2"));
+        Assert.That(limited.Tags!.Select(t => t.Name), Is.EqualTo(stored.Take(2)), "the cluster's first two, in its order");
+    }
+
+    [Test]
     public async Task An_include_is_filtered_ordered_and_limited_per_parent()
     {
         var run = new ShapeRun { Name = "build" };

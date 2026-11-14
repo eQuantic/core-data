@@ -12,6 +12,8 @@ public sealed class ShapeRun : IEntity<Guid>
 
     public List<ShapeStep>? Steps { get; set; }
 
+    public List<ShapeTag>? Tags { get; set; }
+
     public Guid GetKey() => Id;
 
     public void SetKey(Guid key) => Id = key;
@@ -95,6 +97,20 @@ public sealed class ShapeComment : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A tag of a run, in its run's partition, clustered by its name (text, kept in UTF-8's byte order).</summary>
+public sealed class ShapeTag : IEntity<Guid>
+{
+    public Guid ShapeRunId { get; set; }
+
+    public string Name { get; set; } = "";
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>A support queue with its tickets: the parent of an include whose foreign key the related table does not key.</summary>
 public sealed class ShapeQueue : IEntity<Guid>
 {
@@ -154,6 +170,11 @@ internal static class ReadShapesModel
             .ClusteringKey(x => x.IssueNumber)
             .ClusteringKey(x => x.Id)
             .Key(x => x.Id))
+        .Entity<ShapeTag>(entity => entity
+            .PartitionKey(x => x.ShapeRunId)
+            .ClusteringKey(x => x.Name)
+            .ClusteringKey(x => x.Id)
+            .Key(x => x.Id))
         .Entity<ShapeQueue>(entity => entity.PartitionKey(x => x.Id))
         .Entity<ShapeTicket>(entity => entity
             .PartitionKey(x => x.Desk)
@@ -169,6 +190,7 @@ internal static class ReadShapesModel
         new EnsureCollectionOperation(typeof(ShapeVersion)),
         new EnsureCollectionOperation(typeof(ShapeCard)),
         new EnsureCollectionOperation(typeof(ShapeComment)),
+        new EnsureCollectionOperation(typeof(ShapeTag)),
         new EnsureCollectionOperation(typeof(ShapeQueue)),
         new EnsureCollectionOperation(typeof(ShapeTicket)),
     ];

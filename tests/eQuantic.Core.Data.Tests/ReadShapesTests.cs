@@ -128,6 +128,20 @@ public sealed class ReadShapesTests
     }
 
     [Test]
+    public void Text_ordered_in_memory_follows_code_points_as_the_stores_keep_it()
+    {
+        // U+FF21 (a full-width A) and U+1F600 (an emoji, a surrogate pair in UTF-16): UTF-8 bytes, and so Cassandra's
+        // clustering and MongoDB's binary comparison, put U+FF21 first; UTF-16 code units put the pair first.
+        var tracks = new[] { new Track { Id = 1, Name = "\U0001F600" }, new Track { Id = 2, Name = "\uFF21" }, new Track { Id = 3, Name = "z" } };
+        System.Linq.Expressions.Expression<Func<Track, string>> name = x => x.Name;
+
+        Assert.That(ReadShapes.Order(tracks, [new MemorySort(name, false, NullsOrder.Default)]).Select(track => track.Id),
+            Is.EqualTo(new[] { 3, 2, 1 }));
+        Assert.That(ReadShapes.Order(tracks, [new MemorySort(name, true, NullsOrder.Default)]).Select(track => track.Id),
+            Is.EqualTo(new[] { 1, 2, 3 }));
+    }
+
+    [Test]
     public void The_window_of_a_read_honours_its_own_limit()
     {
         Assert.That(ReadShapes.Window(new QueryOptions<Track>().Skip(10).Take(10), null), Is.EqualTo(((int?)10, (int?)10)));
