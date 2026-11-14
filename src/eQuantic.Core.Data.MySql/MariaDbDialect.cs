@@ -54,5 +54,21 @@ public class MariaDbDialect : MySqlDialect
     /// <remarks>MariaDB's <c>JSON</c> is <c>LONGTEXT</c> with a <c>JSON_VALID</c> check, and its catalogue says so.</remarks>
     protected override string Synonym(string baseType) => baseType == "json" ? "longtext" : base.Synonym(baseType);
 
+    /// <inheritdoc />
+    /// <remarks>
+    ///     MariaDB's catalogue reports an integer column with a display width the DDL never wrote (<c>int(11)</c>,
+    ///     <c>bigint(20)</c>), which changes nothing it stores, so the width is dropped. <c>tinyint(1)</c> keeps its
+    ///     own: it is how this dialect writes a boolean.
+    /// </remarks>
+    public override string NormalizeStoredType(string storedType)
+    {
+        var normalized = base.NormalizeStoredType(storedType);
+        var open = normalized.IndexOf('(');
+        var close = open < 0 ? -1 : normalized.IndexOf(')', open);
+        return close > open && normalized[..open] is "smallint" or "mediumint" or "int" or "bigint"
+            ? normalized[..open] + normalized[(close + 1)..]
+            : normalized;
+    }
+
     private static string SequenceName(string table, RelationalColumn column) => $"{table}_{column.Name}_seq";
 }
