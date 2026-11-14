@@ -39,8 +39,9 @@ reapply, retry. The stale writer's data **never reached the store**.
 | Cassandra | a **lightweight transaction**: `UPDATE … IF version = @old` (new rows: `INSERT … IF NOT EXISTS`) | `[applied] = false` → conflict |
 | MongoDB | `ReplaceOne` filtered on `{_id, version}` with the bump in the document | matched 0 → conflict |
 
-Deletes are protected the same way (`DELETE … WHERE/IF version = @old`), so removing an entity
-someone else already changed is also a conflict — deliberately.
+Deletes are protected the same way (`DELETE … WHERE/IF version = @old`; on Cosmos DB a delete with
+`If-Match: <etag>`, in a transactional batch too), so removing an entity someone else already changed,
+or already removed, is also a conflict — deliberately.
 
 ## The costs, stated plainly
 
