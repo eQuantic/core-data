@@ -170,6 +170,9 @@ public sealed class CassandraTestDatabase : IDisposable
 
     public T Resolve<T>() where T : notnull => _scope.ServiceProvider.GetRequiredService<T>();
 
+    /// <summary>Opens another resolution scope over the same keyspace (another unit of work, the same session).</summary>
+    public IServiceScope NewScope() => _provider.CreateScope();
+
     public void Dispose()
     {
         // Capture the cluster before disposing the container-owned session, then dispose it so the control

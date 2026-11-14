@@ -1,5 +1,6 @@
 using eQuantic.Core.Data.PostgreSql.Extensions;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Write;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace eQuantic.Core.Data.PostgreSql.Tests;
@@ -37,5 +38,23 @@ public sealed class PostgreSqlAotRegistrationTests : PostgreSqlIntegrationTest
         Assert.That(services.Any(descriptor => descriptor.ServiceType == typeof(IQueryableUnitOfWork)), Is.True);
         Assert.That(services.All(descriptor => descriptor.ServiceType != typeof(IRepository<,>)), Is.True,
             "the unit-of-work registration adds no open-generic repository descriptors (the AOT blocker)");
+    }
+
+    [Test]
+    public void Closed_generic_registration_resolves_the_write_capabilities()
+    {
+        var services = new ServiceCollection();
+        services.AddPostgreSqlDatabase("Host=unused", TestSchema.Configure);
+        services.AddPostgreSqlRepository<Article, Guid>();
+        Assert.That(services.All(descriptor => !descriptor.ServiceType.IsGenericTypeDefinition), Is.True,
+            "nothing open-generic is registered on the AOT path");
+
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IAsyncRepository<Article, Guid>>();
+        Assert.That(scope.ServiceProvider.GetRequiredService<IUpsertRepository<Article, Guid>>(), Is.InstanceOf(repository.GetType()));
+        Assert.That(scope.ServiceProvider.GetRequiredService<IReturningUpdateRepository<Article, Guid>>(), Is.InstanceOf(repository.GetType()));
+        Assert.That(scope.ServiceProvider.GetRequiredService<IPartialModifyRepository<Article, Guid>>(), Is.InstanceOf(repository.GetType()));
+        Assert.That(repository, Is.InstanceOf<IUpsertRepository<Article, Guid>>(), "the repository itself casts to the capability");
     }
 }

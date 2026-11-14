@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using eQuantic.Core.Data.Query;
 
 namespace eQuantic.Core.Data.Tests;
@@ -179,9 +180,10 @@ public sealed class FilterInterpreterTests
     [Test]
     public void Instance_function_over_a_member_becomes_a_function_filter()
     {
-        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.ToLower() == "abc");
+        // ToLower()/ToUpper() compared with a value are text tests of their own (QueryPredicateInterpretationTests).
+        var filter = (FunctionFilter)FilterInterpreter.Interpret<Sample>(x => x.Name.Trim() == "abc");
 
-        Assert.That(filter.Function, Is.EqualTo("ToLower"));
+        Assert.That(filter.Function, Is.EqualTo("Trim"));
         Assert.That(filter.Member, Is.EqualTo("Name"));
         Assert.That(filter.Operator, Is.EqualTo(ComparisonOperator.Equal));
         Assert.That(filter.Value, Is.EqualTo("abc"));
@@ -222,5 +224,153 @@ public sealed class FilterInterpreterTests
     {
         Assert.That(() => FilterInterpreter.Interpret<Sample>(x => x.TenantId == x.Name.Length),
             Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
+    public void A_negated_comparison_of_a_nullable_member_keeps_the_rows_whose_member_is_null()
+    {
+        // C# lifts the comparison, and a lifted comparison is false for null: its negation holds there.
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation >= Priority.High));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or));
+        var reversed = (ComparisonFilter)filter.Operands[0];
+        Assert.That((reversed.Member, reversed.Operator, reversed.Value), Is.EqualTo(("Escalation", ComparisonOperator.LessThan, (object)3)));
+        var isNull = (ComparisonFilter)filter.Operands[1];
+        Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Escalation", ComparisonOperator.Equal, (object?)null)));
+    }
+
+    [Test]
+    public void A_negated_comparison_with_a_captured_nullable_value_keeps_the_rows_whose_member_is_null()
+    {
+        // No conversion marks the lift here: both sides are already nullable, the captured value folded to a constant.
+        Priority? high = Priority.High;
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation >= high));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or));
+        var isNull = (ComparisonFilter)filter.Operands[1];
+        Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Escalation", ComparisonOperator.Equal, (object?)null)));
+    }
+
+    [Test]
+    public void A_negated_comparison_of_two_members_is_refused()
+    {
+        Assert.That(() => FilterInterpreter.Interpret<Ticket>(x => !(x.Escalation > x.Escalation)), Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
+    public void A_negated_comparison_of_a_member_that_cannot_be_null_is_the_reversed_comparison()
+    {
+        var filter = (ComparisonFilter)FilterInterpreter.Interpret<Ticket>(x => !(x.Priority >= Priority.High));
+
+        Assert.That((filter.Member, filter.Operator), Is.EqualTo(("Priority", ComparisonOperator.LessThan)));
+    }
+
+    [Test]
+    public void A_negated_text_equality_without_regard_to_case_keeps_the_rows_whose_member_is_null()
+    {
+        Expression<Func<Alias, bool>>[] negations =
+        [
+            x => !string.Equals(x.Name, "alpha", StringComparison.OrdinalIgnoreCase),
+            x => !x.Name!.Equals("alpha", StringComparison.OrdinalIgnoreCase),
+            x => !"alpha".Equals(x.Name, StringComparison.OrdinalIgnoreCase),
+            x => x.Name!.ToLower() != "alpha",
+            x => !(x.Name!.ToUpper() == "ALPHA"),
+        ];
+
+        foreach (var negation in negations)
+        {
+            var filter = (LogicalFilter)FilterInterpreter.Interpret(negation);
+            Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Or), negation.ToString());
+            var not = (LogicalFilter)filter.Operands[0];
+            Assert.That(not.Operator, Is.EqualTo(LogicalOperator.Not), negation.ToString());
+            Assert.That(not.Operands.Single(), Is.InstanceOf<TextFilter>(), negation.ToString());
+            var isNull = (ComparisonFilter)filter.Operands[1];
+            Assert.That((isNull.Member, isNull.Operator, isNull.Value), Is.EqualTo(("Name", ComparisonOperator.Equal, (object?)null)),
+                negation.ToString());
+        }
+    }
+
+    [Test]
+    public void A_negated_text_match_that_is_not_an_equality_stays_a_negation()
+    {
+        var filter = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => !x.Name!.Contains("al", StringComparison.OrdinalIgnoreCase));
+
+        Assert.That(filter.Operator, Is.EqualTo(LogicalOperator.Not));
+        Assert.That(filter.Operands.Single(), Is.InstanceOf<TextFilter>());
+    }
+
+    [Test]
+    public void A_residual_reads_a_null_member_text_as_the_stores_do()
+    {
+        Expression<Func<Alias, bool>> folded = x => x.Name!.ToLower() != "alpha";
+        Expression<Func<Alias, bool>> instance = x => x.Name!.Equals("alpha", StringComparison.OrdinalIgnoreCase);
+        var unset = new Alias();
+
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(folded)(unset), Is.True, "null is not 'alpha', as x.Name != v says");
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(instance)(unset), Is.False, "a null member fails a text test");
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(folded)(new Alias { Name = "ALPHA" }), Is.False);
+        Assert.That(PredicateNormalizer.CompileResidual<Alias>(instance)(new Alias { Name = "Alpha" }), Is.True);
+    }
+
+    [Test]
+    public void A_folded_text_compared_with_null_is_the_member_s_null_test()
+    {
+        string? nothing = null;
+        Expression<Func<Alias, bool>>[] isNull =
+        [
+            x => x.Name!.ToLower() == null,
+            x => x.Name!.ToUpper() == nothing,
+            x => nothing == x.Name!.ToLowerInvariant(),
+            x => !(x.Name!.ToUpperInvariant() != null),
+        ];
+        Expression<Func<Alias, bool>>[] isNotNull =
+        [
+            x => x.Name!.ToLower() != null,
+            x => null != x.Name!.ToUpper(),
+            x => !(x.Name!.ToLower() == nothing),
+        ];
+
+        foreach (var (predicates, op) in new[] { (isNull, ComparisonOperator.Equal), (isNotNull, ComparisonOperator.NotEqual) })
+        {
+            foreach (var predicate in predicates)
+            {
+                var filter = (ComparisonFilter)FilterInterpreter.Interpret(predicate);
+                Assert.That((filter.Member, filter.Operator, filter.Value), Is.EqualTo(("Name", op, (object?)null)), predicate.ToString());
+            }
+        }
+    }
+
+    [Test]
+    public void A_folded_text_s_equality_with_null_holds_for_no_row_and_its_negation_for_every_row()
+    {
+        string? nothing = null;
+        var equals = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => x.Name!.ToLower().Equals(nothing));
+        Assert.That(equals.Operator, Is.EqualTo(LogicalOperator.And));
+        Assert.That(equals.Operands.Cast<ComparisonFilter>().Select(comparison => (comparison.Member, comparison.Operator, comparison.Value)),
+            Is.EqualTo(new[] { ("Name", ComparisonOperator.NotEqual, (object?)null), ("Name", ComparisonOperator.Equal, (object?)null) }),
+            "the member is a text, and its text is null: never both");
+
+        var negated = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => !x.Name!.ToUpper().Equals(null));
+        Assert.That(negated.Operator, Is.EqualTo(LogicalOperator.Not));
+        Assert.That(negated.Operands.Single(), Is.InstanceOf<LogicalFilter>());
+    }
+
+    [Test]
+    public void The_residual_reads_a_folded_text_against_null_as_the_interpreter_does()
+    {
+        string? nothing = null;
+        var rows = new[] { new Alias(), new Alias { Name = "Alpha" } };
+        bool[] Kept(Expression<Func<Alias, bool>> predicate) => rows.Select(PredicateNormalizer.CompileResidual<Alias>(predicate)).ToArray();
+
+        Assert.That(Kept(x => x.Name!.ToLower() == nothing), Is.EqualTo(new[] { true, false }), "null folds to null");
+        Assert.That(Kept(x => x.Name!.ToUpper() != null), Is.EqualTo(new[] { false, true }));
+        Assert.That(Kept(x => x.Name!.ToLower().Equals(nothing)), Is.EqualTo(new[] { false, false }), "a folded text never equals null");
+        Assert.That(Kept(x => !x.Name!.ToLower().Equals(nothing)), Is.EqualTo(new[] { true, true }));
+    }
+
+    /// <summary>A member that may hold no text.</summary>
+    public sealed class Alias
+    {
+        public string? Name { get; set; }
     }
 }

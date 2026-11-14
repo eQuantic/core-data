@@ -43,10 +43,32 @@ internal static class RelationalUnion
 
         if (query.Order.Count > 0)
         {
-            sql += " ORDER BY " + string.Join(", ", query.Order.Select(order =>
-                targets.Contains(order.Member, StringComparer.OrdinalIgnoreCase)
-                    ? $"{dialect.Quote(order.Member)}{(order.Descending ? " DESC" : string.Empty)}"
-                    : throw new NotSupportedException($"The union projects no member '{order.Member}' to order by.")));
+            var missing = query.Order.FirstOrDefault(order => !targets.Contains(order.Member, StringComparer.OrdinalIgnoreCase));
+            if (missing is not null)
+            {
+                throw new NotSupportedException($"The union projects no member '{missing.Member}' to order by.");
+            }
+
+            // A projected column holding an enum's labels orders by the value each label stands for, as C# orders the
+            // enum. A union's ORDER BY takes its output columns alone (no expression over them on PostgreSQL or SQL
+            // Server), so such an order runs over the union as a derived table.
+            var labelled = query.Order.Select(order => LabelColumn(dialect, model, query, projections, order.Member)).ToList();
+            if (labelled.Any(column => column is not null))
+            {
+                var alias = dialect.Quote("eq_union");
+                sql = $"SELECT * FROM ({sql}) {alias}";
+                sql += " ORDER BY " + string.Join(", ", query.Order.Select((order, index) =>
+                {
+                    var target = $"{alias}.{dialect.Quote(order.Member)}";
+                    var key = labelled[index] is { } column ? dialect.SortKey(column, target) : target;
+                    return key + (order.Descending ? " DESC" : string.Empty);
+                }));
+            }
+            else
+            {
+                sql += " ORDER BY " + string.Join(", ", query.Order.Select(order =>
+                    $"{dialect.Quote(order.Member)}{(order.Descending ? " DESC" : string.Empty)}"));
+            }
         }
         else if (query.Limit is not null && dialect.RequiresOrderByForLimit)
         {
@@ -80,6 +102,24 @@ internal static class RelationalUnion
             parameters.Add(dialect.BindValue(value));
             return "@p" + (parameters.Count - 1);
         }
+    }
+
+    /// <summary>The column a branch projects into <paramref name="target" /> when it holds an enum's labels, or <c>null</c>.</summary>
+    private static RelationalColumn? LabelColumn<TResult>(SqlDialect dialect, RelationalModel model, UnionQuery<TResult> query,
+        IReadOnlyList<UnionProjection> projections, string target)
+    {
+        for (var index = 0; index < query.Branches.Count; index++)
+        {
+            var binding = projections[index].Bindings.OfType<UnionColumnBinding>()
+                .FirstOrDefault(candidate => string.Equals(candidate.Target, target, StringComparison.OrdinalIgnoreCase));
+            if (binding is not null && model.For(query.Branches[index].EntityType).ColumnFor(binding.Member) is
+                    { Converter: null } column && dialect.NativeEnumOf(column.StoredType) is not null)
+            {
+                return column;
+            }
+        }
+
+        return null;
     }
 
     private static RelationalColumn Column(RelationalEntityConfiguration configuration, UnionBranch branch,

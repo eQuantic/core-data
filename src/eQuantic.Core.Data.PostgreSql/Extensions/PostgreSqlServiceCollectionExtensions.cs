@@ -56,6 +56,13 @@ public static class PostgreSqlServiceCollectionExtensions
 
             // Serializes dictionary parameters into jsonb document columns.
             dataSourceBuilder.EnableDynamicJson();
+
+            // Each enum the model declared native travels as its PostgreSQL type, labels and all.
+            foreach (var native in dialect.NativeEnums)
+            {
+                native.Register(new NpgsqlNativeEnumRegistrar(dataSourceBuilder, native));
+            }
+
             return dataSourceBuilder.Build();
         });
         services.TryAddSingleton<DbDataSource>(sp => sp.GetRequiredService<NpgsqlDataSource>());

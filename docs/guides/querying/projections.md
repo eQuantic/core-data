@@ -32,6 +32,48 @@ Projections resolve through the same model as everything else: a `[StoredAs]` me
 its stored name, a `Converts(...)` member materializes through its converter. There is no separate
 "projection path" to fall out of sync.
 
+## Counting a relation
+
+A projection can count a collection navigation — all of it, or the entities a filter keeps — and
+the store counts it: the related entities are **never loaded**, so a list of packages can show how
+many live versions each has in one read.
+
+```csharp
+var rows = await packages.GetMappedAsync(p => new
+{
+    p.Id,
+    p.Name,
+    Versions = p.Versions.Count(v => v.DeletedAt == null),   // filtered
+    Total = p.Versions.Count(),                              // or Count / LongCount(...)
+}, new QueryOptions<Package>().Where(p => p.OwnerId == owner));
+```
+
+`Count()`, `Count(filter)`, `LongCount(…)`, the collection's `Count` property and an array's
+`Length` (or `LongLength`) all count; the
+filter may read captured values. A member counts as a relation when its elements are entities with
+a foreign key back to the parent (the same resolution [includes](includes.md) use), so a count over
+a member the document embeds (`p.Tags.Count`) stays the store's ordinary projection.
+
+| Store | A relation count is | Cost |
+|---|---|---|
+| Relational | a correlated `(SELECT COUNT(*) FROM versions v WHERE v.package_id = packages.id AND …)` in the select list | one subquery per count, per row, inside the one statement |
+| MongoDB | a `$lookup` whose pipeline matches the related documents and ends in `$count`, beside the document into the `$project` | one lookup stage per count; only the number travels |
+| Cosmos DB | one grouped query per count over the related container: `SELECT fk, COUNT(1) … WHERE fk IN (…) AND … GROUP BY fk` | the parents are read whole and the map runs in memory over them and their counts |
+| Cassandra | `SELECT fk, COUNT(*) … GROUP BY fk` when the related table is partitioned by the foreign key and the filter pushes down; otherwise the foreign keys (and the columns a client-side filter reads) are fetched and counted client-side, behind `.AllowClientEvaluation()` | a null test (`v.DeletedAt == null`) has no CQL form, so such a count runs client-side |
+
+A count's filter may test the counted entity's own relations, as any filter does
+([relations in filters](predicates.md#filters-across-relations)): `r.Steps.Count(s => s.Logs.Any())`,
+`r.Steps.Count(s => s.Runner.Name == name)`, negated, `s.Runner == null`, or combined under `&&`/`||`.
+Every store counts with them, resolved as a filter's are: a correlated `EXISTS` inside the count's
+subquery on the relational engines; the related keys read first and an `$in`/`IN` over them in the
+count on MongoDB (a `$lookup` inside the count's past the bound), Cosmos DB and Cassandra (under the
+read's opt-ins, so a related read that names no partition needs `.AllowFiltering()`, and an `IN` the
+counted table cannot take runs client-side behind `.AllowClientEvaluation()`). No store answers a
+count that ignored a relation, or reads it as a member the document embeds.
+
+A read with relation counts refuses `Include` (a mapped read never loads navigations): count them,
+or include them in an entity read — not both.
+
 ## When you need more than member-shuffling
 
 Computed projections (string concatenation, arithmetic) execute where the store's LINQ provider can

@@ -12,6 +12,12 @@ public sealed class ModelDifferTests
 {
     private const string Order = "Shop.Order";
 
+    private enum OrderStage
+    {
+        Open,
+        Shipped,
+    }
+
     private static FieldSnapshot Field(string member, string name, string type = "System.String",
         bool nullable = false, string? defaultLiteral = null, params string[] previousNames) =>
         new(member, name, type)
@@ -174,6 +180,188 @@ public sealed class ModelDifferTests
         Assert.That(change.To, Is.EqualTo("(200)"));
     }
 
+    // ---- enums stored as labels --------------------------------------------------------------------
+
+    [Test]
+    public void An_enum_switched_from_its_numbers_to_its_labels_is_a_conversion()
+    {
+        var before = Snapshot(Entity(Field("State", "state", typeof(OrderStage).FullName!)));
+        var after = Snapshot(Entity(Field("State", "state", StoredForm.Labels(typeof(OrderStage)))));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ConvertField),
+            "the CLR type did not move, and every stored number did");
+        Assert.That(change.From, Is.EqualTo(typeof(OrderStage).FullName));
+        Assert.That(change.To, Is.EqualTo("labels:" + typeof(OrderStage).FullName));
+    }
+
+    [Test]
+    public void An_enum_switched_back_to_its_numbers_is_a_conversion()
+    {
+        var before = Snapshot(Entity(Field("State", "state", "labels:Shop.OrderState")));
+        var after = Snapshot(Entity(Field("State", "state", "Shop.OrderState")));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ConvertField));
+        Assert.That(change.From, Is.EqualTo("labels:Shop.OrderState"));
+        Assert.That(change.To, Is.EqualTo("Shop.OrderState"));
+    }
+
+    [Test]
+    public void The_labels_spelling_names_the_enum_and_whether_it_is_a_collection()
+    {
+        Assert.That(StoredForm.LabelsOf("labels:Shop.OrderState"), Is.EqualTo("Shop.OrderState"));
+        Assert.That(StoredForm.LabelsOf("labels:Shop.OrderState[]"), Is.EqualTo("Shop.OrderState"));
+        Assert.That(StoredForm.IsLabelCollection("labels:Shop.OrderState[]"), Is.True);
+        Assert.That(StoredForm.IsLabelCollection("labels:Shop.OrderState"), Is.False);
+        Assert.That(StoredForm.LabelsOf("Shop.OrderState"), Is.Null, "an enum stored as its number");
+        Assert.That(StoredForm.LabelsOf("text"), Is.Null);
+    }
+
+    // ---- store-generated members -------------------------------------------------------------------
+
+    [Test]
+    public void A_member_that_becomes_store_generated_is_a_generation_change()
+    {
+        var before = Snapshot(Entity(Field("Number", "number", "System.Int64")));
+        var after = Snapshot(Entity(new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" }));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeGeneration));
+        Assert.That(change.Member, Is.EqualTo("Number"));
+        Assert.That(change.From, Is.Null, "the application wrote it");
+        Assert.That(change.To, Is.EqualTo("sequence"));
+    }
+
+    [Test]
+    public void Changing_what_the_store_assigns_is_a_generation_change()
+    {
+        var before = Snapshot(Entity(new FieldSnapshot("At", "at", "System.DateTime") { Generated = "default now()" }));
+        var after = Snapshot(Entity(new FieldSnapshot("At", "at", "System.DateTime") { Generated = "clock" }));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeGeneration));
+        Assert.That(change.From, Is.EqualTo("default now()"));
+        Assert.That(change.To, Is.EqualTo("clock"));
+    }
+
+    [Test]
+    public void A_member_that_stops_being_store_generated_is_a_generation_change()
+    {
+        var before = Snapshot(Entity(new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" }));
+        var after = Snapshot(Entity(Field("Number", "number", "System.Int64")));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeGeneration));
+        Assert.That(change.From, Is.EqualTo("sequence"));
+        Assert.That(change.To, Is.Null);
+    }
+
+    [Test]
+    public void A_snapshot_that_records_no_generation_compares_clean_against_a_model_with_none()
+    {
+        // What a snapshot written before generation was recorded holds: no Generated anywhere.
+        var before = Snapshot(Entity(Field("Id", "id", "System.Guid"), Field("Number", "number", "System.Int64")));
+        var after = Snapshot(Entity(Field("Id", "id", "System.Guid"), Field("Number", "number", "System.Int64")));
+
+        Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True);
+    }
+
+    // ---- labels, keys and additions the store assigns ----------------------------------------------
+
+    private static readonly LabelSnapshot[] Stages =
+        [new("Queued", 0, "queued"), new("Running", 1, "running"), new("Done", 2, "done")];
+
+    private static FieldSnapshot Labelled(params LabelSnapshot[] labels) =>
+        new("State", "state", "labels:Shop.OrderState") { Labels = labels };
+
+    [Test]
+    public void A_label_added_to_an_enum_stored_as_labels_is_a_change_of_labels()
+    {
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled([.. Stages, new LabelSnapshot("Failed", 3, "failed")])));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeLabels));
+        Assert.That(change.From, Is.EqualTo("queued, running, done"));
+        Assert.That(change.To, Is.EqualTo("queued, running, done, failed"));
+        Assert.That(change.StoredType, Is.EqualTo("labels:Shop.OrderState"));
+        Assert.That(change.LabelsAfter, Has.Count.EqualTo(4));
+    }
+
+    [Test]
+    public void A_member_renamed_in_code_with_its_label_kept_is_no_change()
+    {
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled(new("Pending", 0, "queued"), Stages[1], Stages[2])));
+
+        Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True, "the store holds the same labels");
+    }
+
+    [Test]
+    public void Two_members_that_swap_their_labels_are_a_change_of_labels()
+    {
+        // The same labels in the same order, but Queued is now stored as 'running' and Running as 'queued': the rows
+        // already stored would read back as the other member.
+        var before = Snapshot(Entity(Labelled(Stages)));
+        var after = Snapshot(Entity(Labelled(new("Running", 1, "queued"), new("Queued", 0, "running"), Stages[2])));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeLabels));
+        Assert.That(change.LabelsAfter, Is.EqualTo(after.Entities[0].Fields[0].Labels));
+    }
+
+    [Test]
+    public void An_enum_whose_labels_were_not_recorded_compares_clean()
+    {
+        // A snapshot written before labels were recorded: the same label enum, and no labels.
+        var before = Snapshot(Entity(new FieldSnapshot("State", "state", "labels:Shop.OrderState")));
+        var after = Snapshot(Entity(Labelled(Stages)));
+
+        Assert.That(ModelDiffer.Compare(before, after).IsEmpty, Is.True,
+            "no labels recorded is not known, never every label removed");
+    }
+
+    [Test]
+    public void A_key_the_store_starts_numbering_is_a_key_generation_change()
+    {
+        var before = Snapshot(new EntitySnapshot(Order, "orders", [Field("Id", "id", "System.Int64")]) { Keys = ["Id"] });
+        var after = Snapshot(new EntitySnapshot(Order, "orders", [Field("Id", "id", "System.Int64")])
+        {
+            Keys = ["Id"],
+            KeyIsGenerated = true,
+        });
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeKeyGeneration));
+        Assert.That(change.Member, Is.EqualTo("Id"));
+        Assert.That(change.From, Is.Null);
+        Assert.That(change.To, Is.EqualTo("sequence"));
+        Assert.That(ModelDiffer.Compare(after, before).Changes.Single().To, Is.Null, "and the other way round");
+    }
+
+    [Test]
+    public void A_member_added_as_store_generated_asks_for_no_value()
+    {
+        var before = Snapshot(Entity(Field("Id", "id", "System.Guid")));
+        var after = Snapshot(Entity(Field("Id", "id", "System.Guid"),
+            new FieldSnapshot("Number", "number", "System.Int64") { Generated = "sequence" }));
+
+        var change = ModelDiffer.Compare(before, after).Changes.Single();
+
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.AddField));
+        Assert.That(change.NeedsValue, Is.False, "the store assigns it; the migration says where it does not fill what is there");
+        Assert.That(change.Generated, Is.EqualTo("sequence"));
+    }
+
     // ---- collections -------------------------------------------------------------------------------
 
     [Test]
@@ -244,5 +432,44 @@ public sealed class ModelDifferTests
         var after = new ModelSnapshot("mongodb", [new EntitySnapshot(Order, "orders", [])]);
 
         Assert.That(() => ModelDiffer.Compare(before, after), Throws.InvalidOperationException);
+    }
+
+    // ---- search indexes ----------------------------------------------------------------------------
+
+    private static EntitySnapshot Searched(params SearchSnapshot[] search) =>
+        new(Order, "orders", [Field("Id", "id", "System.Guid"), Field("Name", "name_col")]) { Keys = ["Id"], Search = search };
+
+    [Test]
+    public void A_search_index_turned_case_insensitive_is_a_change()
+    {
+        var difference = ModelDiffer.Compare(
+            Snapshot(Searched(new SearchSnapshot("Name", "Contains")), "cassandra"),
+            Snapshot(Searched(new SearchSnapshot("Name", "Contains, case-insensitive")), "cassandra"));
+
+        var change = difference.Changes.Single();
+        Assert.That(change.Kind, Is.EqualTo(ModelChangeKind.ChangeSearch));
+        Assert.That((change.Member, change.From, change.To, change.Collection, change.Field),
+            Is.EqualTo(("Name", "Contains", "Contains, case-insensitive", "orders", "name_col")));
+    }
+
+    [Test]
+    public void A_search_index_turned_case_sensitive_again_is_a_change()
+    {
+        var difference = ModelDiffer.Compare(
+            Snapshot(Searched(new SearchSnapshot("Name", "Prefix, case-insensitive")), "cassandra"),
+            Snapshot(Searched(new SearchSnapshot("Name", "Prefix")), "cassandra"));
+
+        Assert.That(difference.Changes.Single().Kind, Is.EqualTo(ModelChangeKind.ChangeSearch));
+    }
+
+    [Test]
+    public void A_search_index_declared_or_dropped_is_a_change_and_an_unchanged_one_is_not()
+    {
+        var plain = Snapshot(Searched(), "cassandra");
+        var searched = Snapshot(Searched(new SearchSnapshot("Name", "Contains")), "cassandra");
+
+        Assert.That(ModelDiffer.Compare(plain, searched).Changes.Single().From, Is.Null);
+        Assert.That(ModelDiffer.Compare(searched, plain).Changes.Single().To, Is.Null);
+        Assert.That(ModelDiffer.Compare(searched, searched).IsEmpty, Is.True);
     }
 }

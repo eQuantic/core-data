@@ -10,6 +10,9 @@
 
     <ItemGroup>
         <PackageReference Include="coverlet.collector" Version="6.0.4"/>
+        <!-- Compiles a written model snapshot the way the application's build does, so reading one back is tested
+             against the compiler rather than assumed. The same compiler the analyzer tests pin. -->
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.0"/>
         <PackageReference Include="NUnit" Version="4.5.0" />
         <PackageReference Include="NUnit.Analyzers" Version="4.7.0"/>
@@ -22,6 +25,8 @@
 
     <ItemGroup>
         <ProjectReference Include="../../src/eQuantic.Core.Data/eQuantic.Core.Data.csproj" />
+        <!-- The eqdata tool's own logic (the folder generated files go in), tested without running the tool. -->
+        <ProjectReference Include="../../src/eQuantic.Core.Data.Tools/eQuantic.Core.Data.Tools.csproj" />
     </ItemGroup>
 
 </Project>

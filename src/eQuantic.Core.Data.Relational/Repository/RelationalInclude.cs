@@ -1,5 +1,8 @@
 using System.Collections;
+using System.Linq.Expressions;
 using System.Reflection;
+using eQuantic.Core.Data.Query;
+using eQuantic.Core.Data.Repository.Options;
 
 namespace eQuantic.Core.Data.Relational.Repository;
 
@@ -15,6 +18,11 @@ namespace eQuantic.Core.Data.Relational.Repository;
 ///     </list>
 ///     A dotted path (<c>"Items.Product"</c>) loads level by level — each segment costs one query over the
 ///     previous segment's results. Both entity types must be registered in the <see cref="RelationalModel" />.
+///     A shaped collection include (<c>Include(x =&gt; x.Steps, s =&gt; s.Where(…).OrderBy(…).Take(3))</c>) puts its
+///     filter in the follow-up query's <c>WHERE</c> and its order in the <c>ORDER BY</c>; a skip or a limit per
+///     parent ranks each parent's rows with <c>ROW_NUMBER() OVER (PARTITION BY fk ORDER BY …)</c>, so only the rows
+///     each parent keeps travel. Keys past the dialect's parameter limit (2,100 on SQL Server) split the follow-up
+///     query into as many statements as the limit needs.
 /// </summary>
 internal static class RelationalInclude
 {
@@ -22,7 +30,8 @@ internal static class RelationalInclude
 
     /// <summary>Loads every include path into the materialized entities.</summary>
     public static async Task ApplyAsync<TEntity>(RelationalUnitOfWork unitOfWork, List<TEntity> entities,
-        IReadOnlyCollection<string> paths, CancellationToken cancellationToken)
+        IReadOnlyCollection<string> paths, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, IncludeShape>? shapes = null)
         where TEntity : class
     {
         if (entities.Count == 0)
@@ -39,9 +48,12 @@ internal static class RelationalInclude
 
             IReadOnlyList<object> current = entities;
             var currentType = typeof(TEntity);
+            var depth = 0;
             foreach (var segment in path.Split('.', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
             {
-                (current, currentType) = await ApplySegmentAsync(unitOfWork, current, currentType, segment, cancellationToken)
+                // A shape belongs to a navigation of the read entity itself: the first segment of a path.
+                var shape = depth++ == 0 && shapes is not null && shapes.TryGetValue(segment, out var declared) ? declared : null;
+                (current, currentType) = await ApplySegmentAsync(unitOfWork, current, currentType, segment, shape, cancellationToken)
                     .ConfigureAwait(false);
                 if (current.Count == 0)
                 {
@@ -54,15 +66,42 @@ internal static class RelationalInclude
     /// <summary>Loads one path segment into the current level's entities; returns the loaded targets for the next level.</summary>
     private static async Task<(IReadOnlyList<object> Targets, Type Type)> ApplySegmentAsync(
         RelationalUnitOfWork unitOfWork, IReadOnlyList<object> entities, Type entityType, string segment,
-        CancellationToken cancellationToken)
+        IncludeShape? shape, CancellationToken cancellationToken)
     {
         var navigation = entityType.GetProperty(segment, Members)
                          ?? throw new NotSupportedException(
                              $"Cannot include '{segment}': '{entityType.Name}' has no such navigation property.");
 
-        return ElementType(navigation.PropertyType) is { } elementType
-            ? (await CollectionAsync(unitOfWork, entities, entityType, navigation, elementType, cancellationToken).ConfigureAwait(false), elementType)
-            : (await ReferenceAsync(unitOfWork, entities, entityType, navigation, cancellationToken).ConfigureAwait(false), navigation.PropertyType);
+        if (ElementType(navigation.PropertyType) is { } elementType)
+        {
+            return (await CollectionAsync(unitOfWork, entities, entityType, navigation, elementType, shape, cancellationToken)
+                .ConfigureAwait(false), elementType);
+        }
+
+        if (shape is not null)
+        {
+            throw new NotSupportedException(
+                $"Cannot shape the include '{segment}': a filter, an order or a limit applies to a collection, and it is a reference.");
+        }
+
+        return (await ReferenceAsync(unitOfWork, entities, entityType, navigation, cancellationToken).ConfigureAwait(false),
+            navigation.PropertyType);
+    }
+
+    /// <summary>
+    ///     Resolves a collection navigation: the element's mapping, the parent's mapping and the element's foreign-key
+    ///     column back to the parent's key — the declared navigation first, the <c>{Entity}Id</c> convention after.
+    /// </summary>
+    internal static (RelationalEntityConfiguration Element, RelationalEntityConfiguration Parent, RelationalColumn ForeignKey)
+        Collection(RelationalModel model, Type entityType, PropertyInfo navigation, Type elementType)
+    {
+        var configuration = model.For(elementType);
+        var parentConfiguration = model.For(entityType);
+        var foreignKeyName = parentConfiguration.NavigationFor(navigation.Name)?.ForeignKey ?? entityType.Name + "Id";
+        var foreignKey = configuration.ColumnFor(foreignKeyName)
+                         ?? throw new NotSupportedException(
+                             $"Cannot load '{navigation.Name}': no '{foreignKeyName}' property found on '{elementType.Name}'.");
+        return (configuration, parentConfiguration, foreignKey);
     }
 
     private static async Task<IReadOnlyList<object>> ReferenceAsync(RelationalUnitOfWork unitOfWork,
@@ -104,17 +143,10 @@ internal static class RelationalInclude
     }
 
     private static async Task<IReadOnlyList<object>> CollectionAsync(RelationalUnitOfWork unitOfWork,
-        IReadOnlyList<object> entities, Type entityType, PropertyInfo navigation, Type elementType,
+        IReadOnlyList<object> entities, Type entityType, PropertyInfo navigation, Type elementType, IncludeShape? shape,
         CancellationToken cancellationToken)
     {
-        var configuration = unitOfWork.Model.For(elementType);
-        var parentConfiguration = unitOfWork.Model.For(entityType);
-
-        // The declared navigation wins; the {Entity}Id convention covers the rest.
-        var foreignKeyName = parentConfiguration.NavigationFor(navigation.Name)?.ForeignKey ?? entityType.Name + "Id";
-        var foreignKey = configuration.ColumnFor(foreignKeyName)
-                         ?? throw new NotSupportedException(
-                             $"Cannot include '{navigation.Name}': no '{foreignKeyName}' property found on '{elementType.Name}'.");
+        var (configuration, parentConfiguration, foreignKey) = Collection(unitOfWork.Model, entityType, navigation, elementType);
 
         var keys = entities.Select(parentConfiguration.Key.Property.GetValue).Where(key => key is not null).Distinct().ToList();
         if (keys.Count == 0)
@@ -122,7 +154,14 @@ internal static class RelationalInclude
             return [];
         }
 
-        var elements = await LoadAsync(unitOfWork, configuration, foreignKey, keys, cancellationToken).ConfigureAwait(false);
+        // A shape that keeps no row per parent has its answer already: every parent gets an empty collection, unasked.
+        var elements = shape is { TakeCount: 0 }
+            ? []
+            : shape is null
+                ? await LoadAsync(unitOfWork, configuration, foreignKey, keys, cancellationToken).ConfigureAwait(false)
+                : await LoadShapedAsync(unitOfWork, configuration, foreignKey, keys, shape, cancellationToken).ConfigureAwait(false);
+
+        // GroupBy keeps the rows' order within each group, so a shaped include's order survives the stitching.
         var byParent = elements.GroupBy(element => foreignKey.Property.GetValue(element)!)
             .ToDictionary(group => group.Key, group => group.ToList());
 
@@ -143,27 +182,132 @@ internal static class RelationalInclude
         return elements;
     }
 
+    /// <summary>
+    ///     Loads a shaped collection: the shape's filter joins the <c>IN</c> in the <c>WHERE</c>, its order is the
+    ///     <c>ORDER BY</c>, and a skip or a limit ranks each parent's rows with <c>ROW_NUMBER()</c> partitioned by the
+    ///     foreign key, keeping the ranks the window allows. Only the rows a parent keeps leave the database. The parents'
+    ///     keys go in as many statements as the dialect's parameter limit needs: a parent's rows are ranked within one
+    ///     statement, since all of them answer to its one key.
+    /// </summary>
+    private static async Task<List<object>> LoadShapedAsync(RelationalUnitOfWork unitOfWork,
+        RelationalEntityConfiguration configuration, RelationalColumn foreignKey, IReadOnlyList<object?> keys,
+        IncludeShape shape, CancellationToken cancellationToken)
+    {
+        var dialect = unitOfWork.Dialect;
+        var filter = shape.Filter is null ? null : FilterInterpreter.Interpret(shape.Filter);
+        var ranked = shape.SkipCount is not null || shape.TakeCount is not null;
+
+        // What every statement binds besides the keys: the filter's values and the bounds of the ranks.
+        var shared = new List<object?>();
+        if (filter is not null)
+        {
+            SqlFilterRenderer.Render(dialect, configuration, filter, shared);
+        }
+
+        var bound = shared.Count + (!ranked ? 0 : shape.TakeCount is null ? 1 : 2);
+
+        var order = shape.Sortings.Count > 0
+            ? string.Join(", ", shape.Sortings.Select(sort =>
+            {
+                var sorted = SortColumn(configuration, sort.KeySelector);
+                return dialect.OrderTerm(dialect.SortKey(sorted, dialect.Quote(sorted.Name)), sort.Descending, sort.Nulls);
+            }))
+            : string.Join(", ", configuration.Keys.Select(key => dialect.Quote(key.Name) + " ASC"));
+        var columns = string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)));
+        var table = dialect.Quote(configuration.TableName);
+
+        var loaded = new List<object>();
+        foreach (var chunk in Chunks(keys, dialect.MaxParameters - bound))
+        {
+            var parameters = chunk.Select(dialect.BindValue).ToList();
+            var placeholders = string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index));
+            var where = $"{dialect.Quote(foreignKey.Name)} IN ({placeholders})";
+            if (filter is not null)
+            {
+                where += " AND " + SqlFilterRenderer.Render(dialect, configuration, filter, parameters);
+            }
+
+            string sql;
+            if (!ranked)
+            {
+                sql = $"SELECT {columns} FROM {table} WHERE {where} ORDER BY {order}";
+            }
+            else
+            {
+                var rank = dialect.Quote("eq_rank");
+                var skip = shape.SkipCount ?? 0;
+                parameters.Add(skip);
+                var bounds = $"{rank} > @p{parameters.Count - 1}";
+                if (shape.TakeCount is { } take)
+                {
+                    parameters.Add(skip + take);
+                    bounds += $" AND {rank} <= @p{parameters.Count - 1}";
+                }
+
+                sql = $"SELECT {columns} FROM (SELECT {columns}, ROW_NUMBER() OVER (PARTITION BY {dialect.Quote(foreignKey.Name)} " +
+                      $"ORDER BY {order}) AS {rank} FROM {table} WHERE {where}) {dialect.Quote("eq_ranked")} " +
+                      $"WHERE {bounds} ORDER BY {rank}";
+            }
+
+            await ReadIntoAsync(unitOfWork, configuration, sql, parameters, loaded, cancellationToken).ConfigureAwait(false);
+        }
+
+        return loaded;
+    }
+
+    /// <summary>The column a sort of a related entity names (<c>s =&gt; s.StartedAt</c>).</summary>
+    internal static RelationalColumn SortColumn(RelationalEntityConfiguration configuration, LambdaExpression selector)
+    {
+        var body = selector.Body;
+        while (body is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } unary)
+        {
+            body = unary.Operand;
+        }
+
+        return body is MemberExpression { Expression: ParameterExpression } member
+               && configuration.ColumnFor(member.Member.Name) is { } column
+            ? column
+            : throw new NotSupportedException(
+                $"'{configuration.EntityType.Name}' can only be ordered by a mapped member; '{selector}' is not one.");
+    }
+
+    /// <summary>
+    ///     Loads the rows whose column holds one of the values: one <c>IN</c> per as many values as the dialect binds in a
+    ///     statement.
+    /// </summary>
     private static async Task<List<object>> LoadAsync(RelationalUnitOfWork unitOfWork,
         RelationalEntityConfiguration configuration, RelationalColumn filterColumn, IReadOnlyList<object?> values,
         CancellationToken cancellationToken)
     {
         var dialect = unitOfWork.Dialect;
-        var parameters = values.Select(dialect.BindValue).ToList();
-        var placeholders = string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index));
-        var sql = $"SELECT {string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)))}"
-                  + $" FROM {dialect.Quote(configuration.TableName)} WHERE {dialect.Quote(filterColumn.Name)} IN ({placeholders})";
-
-        await using var command = await unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var select = $"SELECT {string.Join(", ", configuration.Columns.Select(column => dialect.Quote(column.Name)))}"
+                     + $" FROM {dialect.Quote(configuration.TableName)} WHERE {dialect.Quote(filterColumn.Name)} IN (";
 
         var loaded = new List<object>();
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        foreach (var chunk in Chunks(values, dialect.MaxParameters))
         {
-            loaded.Add(RelationalMaterializer.Materialize(configuration.EntityType, reader, configuration.Columns));
+            var parameters = chunk.Select(dialect.BindValue).ToList();
+            var sql = select + string.Join(", ", Enumerable.Range(0, parameters.Count).Select(index => "@p" + index)) + ")";
+            await ReadIntoAsync(unitOfWork, configuration, sql, parameters, loaded, cancellationToken).ConfigureAwait(false);
         }
 
         return loaded;
     }
+
+    /// <summary>Runs a read of entities and adds what it returns to <paramref name="loaded" />.</summary>
+    private static async Task ReadIntoAsync(RelationalUnitOfWork unitOfWork, RelationalEntityConfiguration configuration,
+        string sql, IReadOnlyList<object?> parameters, List<object> loaded, CancellationToken cancellationToken)
+    {
+        await using var command = await unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            loaded.Add(RelationalMaterializer.Materialize(configuration.EntityType, reader, configuration.Columns));
+        }
+    }
+
+    /// <summary>The values in runs of at most <paramref name="size" /> (one at least, whatever else a statement binds).</summary>
+    private static IEnumerable<object?[]> Chunks(IReadOnlyList<object?> values, int size) => values.Chunk(Math.Max(1, size));
 
     private static Type? ElementType(Type type)
     {

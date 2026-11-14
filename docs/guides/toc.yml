@@ -36,6 +36,8 @@
   items:
     - name: Pushdown and the honest gates
       href: querying/pushdown.md
+    - name: Relations and text in filters
+      href: querying/predicates.md
     - name: Sorting and paging
       href: querying/paging.md
     - name: Projections
@@ -52,10 +54,14 @@
       href: writing/transactions.md
     - name: Optimistic concurrency
       href: writing/concurrency.md
+    - name: Upserts and write outcomes
+      href: writing/upserts.md
     - name: Lifecycle — stamps and soft delete
       href: writing/lifecycle.md
     - name: Time to live
       href: writing/ttl.md
+    - name: Named locks
+      href: writing/locks.md
     - name: Bulk loading and raw SQL
       href: writing/bulk-and-raw-sql.md
 - name: Migrations

@@ -98,6 +98,75 @@ public sealed class StringFilter(string member, StringOperator op, string value)
     public string Value { get; } = value;
 }
 
+/// <summary>How a <see cref="TextFilter" /> places the value in the member's text.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public enum TextMatch
+{
+    /// <summary>The text is the value.</summary>
+    Equals,
+
+    /// <summary>The text starts with the value.</summary>
+    StartsWith,
+
+    /// <summary>The text ends with the value.</summary>
+    EndsWith,
+
+    /// <summary>The text contains the value.</summary>
+    Contains,
+}
+
+/// <summary>What a <see cref="TextFilter" /> does with letter case.</summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public enum TextCase
+{
+    /// <summary>Case is ignored on both sides (<c>StringComparison.OrdinalIgnoreCase</c>).</summary>
+    Ignore,
+
+    /// <summary>The member's text is lower-cased and compared with the value as it is (<c>x.Name.ToLower() == v</c>).</summary>
+    Lower,
+
+    /// <summary>The member's text is upper-cased and compared with the value as it is (<c>x.Name.ToUpper() == v</c>).</summary>
+    Upper,
+}
+
+/// <summary>
+///     A text test that does not follow the store's collation: equality, prefix, suffix or containment, either without
+///     regard to case (<c>string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)</c>,
+///     <c>x.Name.Contains(v, StringComparison.OrdinalIgnoreCase)</c>) or against the member's lower- or upper-cased text
+///     (<c>x.Name.ToLower() == v</c>, <c>x.Name.ToUpper().StartsWith(v)</c>). The value's wildcard characters are
+///     literal: a renderer escapes them.
+/// </summary>
+/// <param name="member">The member path.</param>
+/// <param name="match">Where the value has to be in the text.</param>
+/// <param name="value">The value.</param>
+/// <param name="textCase">What is done with letter case.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public sealed class TextFilter(string member, TextMatch match, string value, TextCase textCase) : QueryFilter
+{
+    /// <summary>The member path.</summary>
+    public string Member { get; } = member;
+
+    /// <summary>Where the value has to be in the text.</summary>
+    public TextMatch Match { get; } = match;
+
+    /// <summary>The value.</summary>
+    public string Value { get; } = value;
+
+    /// <summary>What is done with letter case.</summary>
+    public TextCase Case { get; } = textCase;
+
+    /// <summary>
+    ///     Whether the test can hold at all: the member's lower-cased text never holds an upper-case letter (nor the
+    ///     upper-cased one a lower-case letter), so a value that does matches nothing — exactly as in C#.
+    /// </summary>
+    public bool CanMatch => Case switch
+    {
+        TextCase.Lower => Value == Value.ToLowerInvariant(),
+        TextCase.Upper => Value == Value.ToUpperInvariant(),
+        _ => true,
+    };
+}
+
 /// <summary>
 ///     A function applied to a member — used directly as a predicate (<c>fn(member, args)</c>) or compared to a
 ///     constant (<c>fn(member, args) op value</c>). The function is referenced by <b>name</b>: a dialect renders

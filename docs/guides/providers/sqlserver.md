@@ -10,9 +10,14 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
 | Atomic commit | batched flush in a transaction; identity keys via `OUTPUT INSERTED` |
 | Filtered indexes | fully supported, typed predicates (`o.Filtered(x => x.Quantity > 0)`) |
 | Concurrency | versioned token — see [Concurrency](../writing/concurrency.md) |
+| Named locks | `sp_getapplock` (exclusive), owned by the transaction inside one and by a pinned session outside one, waiting on the server; result codes checked — see [Named locks](../writing/locks.md) |
 | Composite keys / facets / converters / includes | full relational engine surface |
+| Filters across relations | a correlated `EXISTS` / `NOT EXISTS` in reads, counts and set-based writes (`UPDATE … OUTPUT INSERTED` included) — see [Relations and text in filters](../querying/predicates.md) |
+| Text ignoring case | `LOWER(col) = LOWER(@p)` and `LOWER(col) LIKE LOWER(@p) ESCAPE '!'`, with `%`, `_` **and `[`** escaped (SQL Server's `LIKE` reads `[` as a character class) |
 | GROUP BY / HAVING / UNION | fully native |
 | Paging | `OFFSET … FETCH`; keyset continuation over the key |
+| Upserts | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` (race-free; a filtered unique index is the conflict filter); `InsertManyAsync(…, skipDuplicates: true)` is a `TRY…CATCH` per row; `UpdateAndGetAsync` is `UPDATE … OUTPUT INSERTED`; errors 2627/2601 are `DuplicateKeyException` — see [Upserts and write outcomes](../writing/upserts.md) |
+| Read shapes | shaped includes ranked with `ROW_NUMBER()`, relation counts as correlated subqueries, nulls placed by ordering on `CASE WHEN col IS NULL` (SQL Server has no `NULLS FIRST`), `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
 
 ## Dialect specifics
 

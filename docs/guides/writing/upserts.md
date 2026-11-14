@@ -1,0 +1,196 @@
+# Upserts and write outcomes
+
+"This row, whether or not it exists yet", "these rows, except the ones already there", "that key is
+taken", "how many rows did my condition match", "what does the row hold now". Each is one call that
+means the same thing on every engine, through the engine's own mechanism — and where an engine's
+guarantee is weaker, the tables below say so.
+
+Upserts, inserts skipping duplicates and returning updates run **at once** (they are not staged for
+the next `Commit`) and join an open [explicit transaction](transactions.md) on the relational stores
+and MongoDB. On Cosmos DB and Cassandra an explicit transaction is a batch of the *staged* writes,
+deferred to its commit, which a write that has to read first cannot join: there they run on their
+own. The member-scoped `Modify` is staged, like any `Modify`, and commits with the rest. They live on
+capability interfaces every provider's repository implements — cast to them, or resolve them from DI:
+
+| Interface | What it adds |
+|---|---|
+| `IUpsertRepository<TEntity, TKey>` | `UpsertAsync`, `InsertManyAsync(items, skipDuplicates)` |
+| `IReturningUpdateRepository<TEntity, TKey>` | `UpdateAndGetAsync(filter, update)` — a set-based update that returns the rows it wrote |
+| `IPartialModifyRepository<TEntity, TKey>` | `Modify`/`ModifyAsync(entity, members)` — a staged update of the named members only |
+
+```csharp
+var upserts = (IUpsertRepository<Secret, Guid>)repo;        // or inject IUpsertRepository<Secret, Guid>
+```
+
+## Upserts
+
+```csharp
+// On the key: insert the entity, or overwrite the row's non-key members with it.
+var stored = await upserts.UpsertAsync(secret);
+
+// On a unique key, with a set-based update for the existing row:
+var stored = await upserts.UpsertAsync(
+    new Secret { WorkspaceId = w, Name = "token", Value = "a" },
+    on: x => new { x.WorkspaceId, x.Name },
+    update: x => new Secret { Value = "b", Uses = x.Uses + 1 });
+
+// On a partial unique index (the rows not soft-deleted):
+var stored = await upserts.UpsertAsync(label, x => x.Name, conflictFilter: x => x.DeletedAt == null);
+```
+
+The conflict filter reads the row's own members, as a partial index's predicate does, and means what
+it means in any other filter (an enum stored as labels compares by member value, text ignoring case
+matches without regard to case). A filter that crosses a relation (`x => x.Box.Name == "inbox"`) is
+refused with `NotSupportedException` on every engine before anything is written.
+
+What an upsert promises, everywhere:
+
+- **One row, never a lost race.** Two upserts of the same target at the same time leave one row and
+  neither fails on that target — *provided the store holds the target unique* (a unique index or
+  constraint, the primary key, a Cosmos DB unique key). Without that, the guarantee is the store's,
+  and the table says what that is.
+- **The row as stored comes back**, including what the store assigned — the existing row keeps its
+  key (an upsert on `WorkspaceId, Name` never changes the row's `Id`).
+- **The insert is an insert, the update an update.** The insert takes the store's values for
+  [store-generated](../modeling/annotations.md) members and the insert's lifecycle stamps
+  (`CreatedAt`); the update never writes store-generated members or the creation stamps, and stamps
+  `UpdatedAt` — see [Lifecycle](lifecycle.md). A concurrency token is bumped on the update.
+- **The update** is `update` applied to the existing row (assignments that read the row, such as
+  `x.Uses + 1`, read the *existing* row), or, without one, the entity's mapped non-key members.
+- **A key or unique key other than the target** that the insert would take fails with
+  `DuplicateKeyException` — the upsert does not silently turn into an update of some other row.
+- **On a key the store generates**, the target is the row holding the entity's key; when no row
+  holds it, the upsert inserts a row the store numbers, as an insert of a new entity does — the
+  entity's key is never written into a new row, where it could later collide with a number the store
+  hands out. MySQL, which cannot hand back a key it generates, refuses an upsert on one
+  (`NotSupportedException`) before writing anything; MariaDB hands it back with `RETURNING`.
+
+| Store | Mechanism | Guarantee |
+|---|---|---|
+| PostgreSQL | `INSERT … ON CONFLICT (target) [WHERE filter] DO UPDATE … RETURNING`; the conflict filter is written with its values in place, as the partial index's own predicate is, since PostgreSQL matches it when it plans the statement — bound as parameters it stops matching once the driver prepares the statement and the store plans it for any value. On a generated key the insert writes the entity's key when a row holds it, and the identity's next number otherwise | atomic, race-free; the target needs a matching unique index or constraint (PostgreSQL refuses one it cannot infer), and the conflict filter must imply a partial index's predicate |
+| SQL Server | `MERGE … WITH (HOLDLOCK) … OUTPUT INSERTED` (the conflict filter's values in place, as on PostgreSQL) | atomic, race-free — `HOLDLOCK` keeps the target's range locked from the match to the insert |
+| MySQL / MariaDB | in a transaction (the caller's, or one of its own): first the engine's named lock on the target (`GET_LOCK`, through the same machinery as [named locks](locks.md), released when that transaction ends); then the target read without a row lock; a row found, read again with `SELECT … FOR UPDATE` and updated by key; a row not found, inserted — and when another insert of the target won (one the transaction's snapshot predates, or a writer that is not an upsert), the store refuses this one with a duplicate key (rolling back that statement alone), and the row that won is read with `SELECT … FOR UPDATE` and updated. A deadlock outside an explicit transaction runs it again | atomic, race-free with a unique index on the target. **Upserts of one target run one after another**, each from before its first read to the end of its transaction, so any number of them at once all succeed, inside explicit transactions or not; upserts of different targets take different locks and never wait for each other's (save text that differs only in trailing spaces, below). The lock is named by the table and the target's values, hashed to fit MySQL's 64 characters and its case-insensitive lock names: a text value by its column's collation (`WEIGHT_STRING`), so `Race` and `race` under a case-insensitive collation are one target and one lock, with trailing spaces never counted (under a NO PAD collation two values that differ only in them share a lock); any other value as given, in one form per kind (an `int` and a `long` of one number, or `1.50m` and `1.5m`, are one name, while a date more precise than its column is named by all its digits). A target the store numbers (a generated key) takes no lock: its insert never meets another's. The wait for the lock is the session's `innodb_lock_wait_timeout`, after which the upsert fails with `TimeoutException`, having written nothing. InnoDB does not see the named lock, so a cycle through it — a transaction that locked the target's row or gap with a write that is not an upsert, and then upserts that target while another upsert of it holds the lock — is broken only when one side gives up at `innodb_lock_wait_timeout`. The first read takes no row lock: a locking read of a row that is not there locks the gap where it goes, and two such gap locks (two targets in one gap) deadlock their inserts. `ON DUPLICATE KEY UPDATE` is not used: it fires on *any* unique key and cannot be told which one is the target |
+| MongoDB | `findOneAndUpdate` of the target (returning the document after it); when nothing matches, an upsert of `$setOnInsert` — and when that finds the target after all, the update runs again; an unset id takes the one the driver generates (`ObjectId`, a string represented as one, `Guid`) first | race-free with a unique index on the target (the losing insert gets E11000 and becomes the update); **without one, MongoDB itself can insert twice** |
+| Cosmos DB | the target read (by id, or by a query inside the entity's partition), then a replace (or a patch of the update) under its `_etag`, or a create; a 412 or 409 reads it again | race-free on the id and on a container's unique key, both of which hold **within a partition**; a target nothing holds unique can be created twice |
+| Cassandra | `INSERT … IF NOT EXISTS`, then `UPDATE … IF EXISTS` (or `IF column = value read`, for a value computed from the row) — lightweight transactions | race-free on the **primary key, the only key Cassandra holds unique**: an upsert on any other members is refused (`NotSupportedException`), and a conflict filter the stored row does not match is a `DuplicateKeyException` |
+
+Cassandra's lightweight transactions are Paxos rounds: an upsert costs two of them when the row
+exists, and under contention one can time out with its outcome unknown. The provider settles it with
+a serial read, for what that read proves: a write of values set outright counts as applied when the
+row holds them and is written again otherwise; a version the update conditions on and bumps proves it
+did not apply when the row is still at the version read, and the upsert runs again; a value computed
+from the row (`x.Uses + 1`) can come back to a value it held, so it is never written twice and its
+timeout reaches you as a `TimeoutException` with the driver's inside. A set-based write runs one
+partition's transactions one at a time, so it does not contend with itself.
+
+## Inserting a batch, skipping the rows already there
+
+```csharp
+long inserted = await upserts.InsertManyAsync(items, skipDuplicates: true);
+```
+
+Every entity whose key and unique keys are free is inserted; one whose key or unique key is taken —
+by a stored row, or by an earlier entity of the batch — is left out without failing, and the count
+says how many went in. With `skipDuplicates: false`, a taken key fails the call with
+`DuplicateKeyException`. Lifecycle stamps apply as they do to a staged insert; the values the store
+assigns are not read back onto the entities (read the rows if you need them).
+
+| Store | Mechanism | Atomic? |
+|---|---|---|
+| PostgreSQL | multi-row `INSERT … ON CONFLICT DO NOTHING` | **yes** — one transaction; without skipping, nothing is written |
+| SQL Server | one `INSERT` per row in `TRY…CATCH` swallowing only errors 2627/2601 (a duplicate leaves the transaction committable) | **yes** |
+| MySQL / MariaDB | one `INSERT` per row in a transaction, discarding only error 1062 | **yes** |
+| MongoDB | `insertMany`, unordered when skipping (discarding only E11000), ordered otherwise; inside an explicit transaction, the taken keys found first (below) and only the free documents inserted | no: an ordered insert stops at the taken key and the documents before it stay — unless an explicit transaction is open, which makes the call part of it |
+| Cosmos DB | one create per item, 32 at a time, discarding only 409 | per item: without skipping, the call fails after every create has answered, and the others stay |
+| Cassandra | one `INSERT … IF NOT EXISTS` per row, one partition's at a time; every sequence number reserved first, in one compare-and-set | per row, as above |
+
+MongoDB aborts a transaction on **any** write error, a duplicate key included, so inside an explicit
+transaction the duplicates cannot be discarded after the fact. There the batch is checked first,
+inside the session: the `_id`s, and the values of every unique index `listIndexes` reports (read
+outside the session, as MongoDB requires), are looked up among the stored documents — a sparse index
+holding only documents with one of its fields, a partial index only those its
+`partialFilterExpression` matches, a collated index comparing under its collation (the batch's own
+repeats compared with the platform's culture comparison at that strength), and a number compared by its
+exact value whatever its BSON type, as the index compares it (`10`, `10.0` and `10.00m` are one key, while
+`0.1 + 0.2` and `0.3` are two, and so are a long past 2^53 and the double nearest it; a partial index's
+filter compares numbers the same way) — and the documents whose
+keys are taken, or repeat an earlier one of the batch, are left out before anything is written. A
+concurrent writer that takes one of the free keys between the check and the insert makes MongoDB
+answer with its **transient write conflict** (`WriteConflict`, labelled `TransientTransactionError`):
+the transaction is aborted, and retrying it is MongoDB's own remedy.
+
+MySQL and MariaDB do not use `ON DUPLICATE KEY UPDATE` here either: the driver reports the rows a
+statement *found* (which matched counts need), and under that a skipped row and an inserted one both
+count one — the number of rows inserted cannot be read back.
+
+## `DuplicateKeyException`
+
+A store that refuses a write because a key or a unique key is taken answers, on every engine and
+every write path — a staged insert or update at commit, a bulk load, a set-based update, an upsert
+that lands on another unique key, `InsertManyAsync` without skipping — with one exception:
+
+```csharp
+try { await uow.CommitAsync(); }
+catch (DuplicateKeyException taken) when (taken.ConstraintName == "ix_users_email")
+{
+    return Conflict("That e-mail is already registered.");
+}
+```
+
+`ConstraintName` is what the store named; `InnerException` is the driver's own exception.
+
+| Store | Read from | `ConstraintName` |
+|---|---|---|
+| PostgreSQL | SQLSTATE `23505` | the constraint or index |
+| SQL Server | errors 2627 and 2601 | parsed from the message |
+| MySQL / MariaDB | error 1062 (a bulk load's duplicate-key warning too: the load is rolled back whole, to a savepoint inside an explicit transaction) | parsed from the message (MySQL's `table.` prefix dropped) |
+| MongoDB | E11000, from a write, a bulk write or a command | the index |
+| Cosmos DB | 409 on a create (a taken id or unique key), in a transactional batch too | none — Cosmos DB does not say |
+| Cassandra | an `INSERT … IF NOT EXISTS` that did not apply | none |
+
+Cassandra's plain insert overwrites by definition (an `INSERT` is an upsert there), so a staged `Add`
+of a taken key is not a refusal: the refusals are those of its lightweight transactions —
+`InsertManyAsync`, and `AddIfNotExistsAsync`, which answers `false`.
+
+## A set-based update that returns its rows
+
+```csharp
+var rows = await ((IReturningUpdateRepository<ItemType, Guid>)repo).UpdateAndGetAsync(
+    x => x.Id == id,
+    x => new ItemType { NextSequence = x.NextSequence + 1 });
+var issued = rows.Single().NextSequence;      // incremented and read in one atomic call
+```
+
+The update applies as `UpdateManyAsync` does — at once, each row only while it still matches the
+filter — and every row it updated comes back as stored after it, store-generated members included.
+
+| Store | Mechanism | Atomic? |
+|---|---|---|
+| PostgreSQL | `UPDATE … RETURNING` | yes |
+| SQL Server | `UPDATE … OUTPUT INSERTED` | yes |
+| MySQL / MariaDB | `SELECT … FOR UPDATE` of the keys, `UPDATE` by key, then the rows read back — one transaction (MariaDB has `RETURNING` for an insert, not for an update); the keys spread over as many statements as the dialect's parameter limit needs | yes |
+| MongoDB | the matching ids, then `findOneAndUpdate` per document (filtered on its id *and* the filter), returning it after the update | per document; the set is one unit only inside an explicit transaction |
+| Cosmos DB | a patch per matching item under the filter (`FilterPredicate`), which answers with the item; an update of more than ten paths patches the item several times in one transactional batch, the first patch under the filter | per item |
+| Cassandra | a lightweight transaction per row: `UPDATE … IF EXISTS` (or `IF` the filter's other members), and `IF column = value read` for a value computed from the row; the row returned is the row read with the update's values | per row |
+
+## Updating only the members you changed
+
+```csharp
+page.Title = "final";
+await ((IPartialModifyRepository<Page, Guid>)repo).ModifyAsync(page, x => x.Title);
+// or several: x => new { x.Title, x.Locked }
+await uow.CommitAsync();
+```
+
+A full `Modify` writes every column, so two requests that each changed a different member of one row
+write back each other's stale value — the last commit undoes the first. `ModifyAsync(entity, members)`
+stages an update of the named members (plus the concurrency token and the `UpdatedAt`/`UpdatedById`
+stamps the model declares) and leaves every other stored member as it is: both requests keep their
+change. Naming the key, a store-generated member or the token is refused.
+
+| Store | The staged write |
+|---|---|
+| Relational | `UPDATE … SET named columns WHERE key [AND version = @old]`, in the commit's transaction |
+| MongoDB | `updateOne` with a `$set` of the named elements (filtered on the version read, with a token) |
+| Cosmos DB | a patch of the named paths (under `If-Match` with a token); beyond the ten paths Cosmos DB takes in one patch, several patches of the item in one transactional batch, the first under `If-Match`, applied whole or not at all |
+| Cassandra | `UPDATE … SET named columns WHERE key` (`IF version = ?` with a token); Cassandra's `UPDATE` is an upsert, so a row deleted meanwhile is written again, with those columns only |

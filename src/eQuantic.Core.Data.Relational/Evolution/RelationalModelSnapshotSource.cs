@@ -6,9 +6,16 @@ namespace eQuantic.Core.Data.Relational.Evolution;
 ///     Describes a <see cref="RelationalModel" /> as a store-neutral snapshot: tables become collections, columns
 ///     become fields, and the facets that size a column travel with them so a later comparison can see a
 ///     <c>varchar(50)</c> widen to a <c>varchar(200)</c>.
+///     <para>
+///         A column of an enum the dialect stores as its labels is recorded as those labels
+///         (<see cref="StoredForm.Labels" />), and a store-generated column with what the store assigns it, because
+///         neither shows in the CLR type: switching an enum to its labels, or a column to an identity, changes what
+///         the table holds while the member's type stays the same.
+///     </para>
 /// </summary>
 public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
 {
+    private readonly SqlDialect _dialect;
     private readonly RelationalModel _model;
 
     /// <summary>Initializes the source over the registered model.</summary>
@@ -17,6 +24,7 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
     public RelationalModelSnapshotSource(RelationalModel model, SqlDialect dialect)
     {
         _model = model;
+        _dialect = dialect;
         Provider = dialect.System;
     }
 
@@ -29,7 +37,7 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
         .OrderBy(entity => entity.EntityType, StringComparer.Ordinal)
         .ToList());
 
-    private static EntitySnapshot Describe(RelationalEntityConfiguration configuration) =>
+    private EntitySnapshot Describe(RelationalEntityConfiguration configuration) =>
         new(configuration.EntityType.FullName ?? configuration.EntityType.Name,
             configuration.TableName,
             configuration.Columns
@@ -48,11 +56,12 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
                 .ToList(),
         };
 
-    private static FieldSnapshot Describe(RelationalColumn column)
+    private FieldSnapshot Describe(RelationalColumn column)
     {
         var stored = column.StoredType;
         var underlying = Nullable.GetUnderlyingType(stored);
-        return new FieldSnapshot(column.Property.Name, column.Name, (underlying ?? stored).FullName ?? stored.Name)
+        var labels = LabelEnumOf(column);
+        return new FieldSnapshot(column.Property.Name, column.Name, StoredTypeOf(column))
         {
             Length = column.Length,
             Precision = column.Precision,
@@ -62,6 +71,36 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
             Nullable = underlying is not null || !stored.IsValueType,
             PreviousNames = column.PreviousNames,
             DefaultLiteral = CSharpLiteral.Render(column.DefaultValue),
+            Generated = GeneratedOf(column),
+            Labels = labels is null ? [] : LabelSnapshot.Of(labels),
         };
     }
+
+    /// <summary>
+    ///     The stored CLR type's full name, or the labels of the enum the dialect stores the column as (alone, or the
+    ///     elements of an array column). A converted column stores what its converter writes, whatever the member is.
+    /// </summary>
+    private string StoredTypeOf(RelationalColumn column)
+    {
+        var stored = Nullable.GetUnderlyingType(column.StoredType) ?? column.StoredType;
+        if (LabelEnumOf(column) is { } enumType)
+        {
+            return stored.IsEnum ? StoredForm.Labels(enumType) : StoredForm.LabelCollection(enumType);
+        }
+
+        return stored.FullName ?? stored.Name;
+    }
+
+    /// <summary>The enum the dialect stores the column as labels of (alone, or an array's elements), or <c>null</c>.</summary>
+    private Type? LabelEnumOf(RelationalColumn column) =>
+        column.Converter is null && RelationalNativeEnum.EnumOf(column.StoredType) is { } enumType &&
+        _dialect.NativeEnumOf(enumType) is not null
+            ? enumType
+            : null;
+
+    /// <summary>What the store assigns the column on insert, or <c>null</c> when the application writes it.</summary>
+    private static string? GeneratedOf(RelationalColumn column) =>
+        !column.IsStoreGenerated ? null
+        : column.StoreDefaultSql is { } sql ? StoredForm.GeneratedDefault(sql)
+        : StoredForm.Generated(column.StoreValue);
 }

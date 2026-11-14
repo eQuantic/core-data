@@ -5,6 +5,7 @@ using eQuantic.Core.Data.Diagnostics;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 using eQuantic.Core.Data.Repository.Options;
+using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
 using MongoDB.Driver.Linq;
@@ -18,13 +19,14 @@ namespace eQuantic.Core.Data.MongoDb.Repository;
 ///     Explicit multi-document transactions are a separate concern: open one with
 ///     <see cref="BeginTransactionAsync" /> and the commit flushes inside it.
 /// </summary>
-public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
+public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 {
     protected readonly IServiceProvider ServiceProvider;
     protected readonly IMongoClient Client;
     protected readonly IMongoDatabase Database;
 
     private readonly Dictionary<Type, IPendingCollectionWrites> _pending = new();
+    private readonly List<(object Entity, Type EntityType)> _generatedInserts = [];
     private IClientSessionHandle? _session;
     private bool _disposed;
 
@@ -40,6 +42,16 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
     internal IMongoCollection<TEntity> GetCollection<TEntity>() =>
         Database.GetCollection<TEntity>(CollectionName<TEntity>());
+
+    private static readonly MethodInfo CollectionNameMethod = typeof(MongoUnitOfWork)
+        .GetMethod(nameof(CollectionName), BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    /// <summary>
+    ///     The collection this unit of work keeps <paramref name="entityType" /> in — its <see cref="CollectionName{TEntity}" />,
+    ///     overridden or not — for the stages that name a collection by type (a <c>$lookup</c>'s <c>from</c>).
+    /// </summary>
+    internal string CollectionNameOf(Type entityType) =>
+        (string)CollectionNameMethod.MakeGenericMethod(entityType).Invoke(this, null)!;
 
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
@@ -135,14 +147,16 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         var collection = GetCollection<TDocument>();
         var query = _session is null ? collection.AsQueryable() : collection.AsQueryable(_session);
 
+        // The branch's filters read as every filter does: an ordered comparison of an enum stored as its labels by the
+        // members' values, text without regard to case as a regular expression.
         if (!branch.IgnoreQueryFilters && GlobalFilter<TDocument>() is { } global)
         {
-            query = query.Where(global);
+            query = query.Where((Expression<Func<TDocument, bool>>)MongoPredicates.Rendered(global));
         }
 
         foreach (var filter in branch.Filters)
         {
-            query = query.Where((Expression<Func<TDocument, bool>>)filter);
+            query = query.Where((Expression<Func<TDocument, bool>>)MongoPredicates.Rendered(filter));
         }
 
         return query.Select((Expression<Func<TDocument, TResult>>)branch.Projection);
@@ -151,13 +165,26 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     private static IQueryable<TResult> OrderCombined<TResult>(IQueryable<TResult> combined,
         IReadOnlyList<UnionOrder> order, IReadOnlyList<string> targets)
     {
+        var missing = order.FirstOrDefault(key => !targets.Contains(key.Member, StringComparer.OrdinalIgnoreCase));
+        if (missing is not null)
+        {
+            throw new NotSupportedException($"The union projects no member '{missing.Member}' to order by.");
+        }
+
+        // A projected member holding an enum's labels orders by the value each label stands for, as C# orders the enum:
+        // the order runs as stages ranking each label ($addFields of a $switch, then $sort), which LINQ has no word for.
+        var sorts = order.Select(key =>
+        {
+            var row = Expression.Parameter(typeof(TResult), "row");
+            return new MemorySort(Expression.Lambda(Expression.PropertyOrField(row, key.Member), row), key.Descending, NullsOrder.Default);
+        }).ToList();
+        if (sorts.Any(sort => MongoStages.SortsByLabels(sort.Key)))
+        {
+            return MongoStages.Append(combined, MongoStages.Sort<TResult>(sorts));
+        }
+
         for (var index = 0; index < order.Count; index++)
         {
-            if (!targets.Contains(order[index].Member, StringComparer.OrdinalIgnoreCase))
-            {
-                throw new NotSupportedException($"The union projects no member '{order[index].Member}' to order by.");
-            }
-
             var row = Expression.Parameter(typeof(TResult), "row");
             var member = Expression.PropertyOrField(row, order[index].Member);
             var selector = Expression.Lambda(member, row);
@@ -182,6 +209,11 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     {
         EntityLifecycle.StampForInsert(item, Conventions, ServiceProvider);
         StampInitialVersion(item);
+        if (MongoModeling.StoreGenerated(typeof(TEntity)).Count > 0)
+        {
+            _generatedInserts.Add((item, typeof(TEntity)));
+        }
+
         Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
     }
 
@@ -189,23 +221,6 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     {
         EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
         Buffer<TEntity>().Add(VersionedReplace(item, upsert: false), conditional: HasToken<TEntity>());
-    }
-
-    internal void StageUpsert<TEntity>(TEntity item) where TEntity : class
-    {
-        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
-
-        // A token entity at its initial version is a new document: insert it (a duplicate key surfaces as an
-        // error rather than silently overwriting a concurrent writer's document).
-        if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
-            && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
-        {
-            StampInitialVersion(item);
-            Buffer<TEntity>().Add(new InsertOneModel<TEntity>(item));
-            return;
-        }
-
-        Buffer<TEntity>().Add(VersionedReplace(item, upsert: !HasToken<TEntity>()), conditional: HasToken<TEntity>());
     }
 
     internal void StageDelete<TEntity>(TEntity item) where TEntity : class
@@ -229,11 +244,70 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         Buffer<TEntity>().Add(new DeleteOneModel<TEntity>(IdFilter(item)));
     }
 
+    /// <summary>
+    ///     Stages an update of the named members only (and of the concurrency token and the update's lifecycle stamps the
+    ///     model declares): one <c>$set</c> of those elements, filtered on the version read when the entity carries a
+    ///     token. Every other element keeps what the document holds.
+    /// </summary>
+    internal void StagePartialUpdate<TEntity>(TEntity item, IReadOnlyList<string> members) where TEntity : class
+    {
+        var classMap = BsonClassMap.LookupClassMap(typeof(TEntity));
+        var token = MongoModeling.ConcurrencyMember(typeof(TEntity));
+        var generated = MongoModeling.StoreGenerated(typeof(TEntity));
+        foreach (var member in members)
+        {
+            if (classMap.AllMemberMaps.FirstOrDefault(map => map.MemberName == member) is null)
+            {
+                throw new NotSupportedException($"'{typeof(TEntity).Name}' has no stored member '{member}' to modify.");
+            }
+
+            if (classMap.IdMemberMap?.MemberName == member)
+            {
+                throw new NotSupportedException($"'{member}' is '{typeof(TEntity).Name}''s _id, which identifies the document and is never modified.");
+            }
+
+            if (generated.Any(generatedMember => generatedMember.Property.Name == member))
+            {
+                throw new NotSupportedException($"'{member}' is store-generated: the store assigns it, and an update never writes it.");
+            }
+
+            if (token?.Name == member)
+            {
+                throw new NotSupportedException(
+                    $"'{member}' is the concurrency token, which the engine bumps on every update; name the members you changed.");
+            }
+        }
+
+        EntityLifecycle.StampForUpdate(item, Conventions, ServiceProvider);
+        var set = new BsonDocument();
+        foreach (var member in members.Concat(EntityLifecycle.UpdateStamps(typeof(TEntity), Conventions, ServiceProvider)
+                     .Select(stamp => stamp.Name)
+                     .Where(name => classMap.AllMemberMaps.Any(map => map.MemberName == name))).Distinct())
+        {
+            var property = typeof(TEntity).GetProperty(member)!;
+            set[MongoFieldNames.Resolve(typeof(TEntity), property)] = MongoFieldNames.Serialize(typeof(TEntity), property, property.GetValue(item));
+        }
+
+        var filter = IdFilter(item);
+        if (token is not null)
+        {
+            var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
+            token.SetValue(item, Convert.ChangeType(current + 1, Nullable.GetUnderlyingType(token.PropertyType) ?? token.PropertyType));
+            // Through the member's serializer like every other element of the $set: an int token stays an int, and a
+            // representation the member declares holds, so the document reads the same as a replace would leave it.
+            set[MongoFieldNames.Resolve(typeof(TEntity), token)] = MongoFieldNames.Serialize(typeof(TEntity), token, token.GetValue(item));
+            filter = Builders<TEntity>.Filter.And(filter,
+                Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(MongoFieldNames.Resolve(typeof(TEntity), token)), current));
+        }
+
+        Buffer<TEntity>().Add(new UpdateOneModel<TEntity>(filter, new BsonDocument("$set", set)), conditional: token is not null);
+    }
+
     private static bool HasToken<TEntity>() where TEntity : class =>
         MongoModeling.ConcurrencyMember(typeof(TEntity)) is not null;
 
     /// <summary>Sets a token entity's version to 1 when unset — the first persisted version.</summary>
-    private static void StampInitialVersion<TEntity>(TEntity item) where TEntity : class
+    internal static void StampInitialVersion<TEntity>(TEntity item) where TEntity : class
     {
         if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is { } token
             && Convert.ToInt64(token.GetValue(item) ?? 0L) == 0)
@@ -247,11 +321,11 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     ///     The replace model for an entity: a token entity filters on the version it was read at and carries the
     ///     bump, so a concurrent writer's document never gets silently overwritten.
     /// </summary>
-    private ReplaceOneModel<TEntity> VersionedReplace<TEntity>(TEntity item, bool upsert) where TEntity : class
+    private WriteModel<TEntity> VersionedReplace<TEntity>(TEntity item, bool upsert) where TEntity : class
     {
         if (MongoModeling.ConcurrencyMember(typeof(TEntity)) is not { } token)
         {
-            return new ReplaceOneModel<TEntity>(IdFilter(item), item) { IsUpsert = upsert };
+            return Replace(IdFilter(item), item, upsert);
         }
 
         var current = Convert.ToInt64(token.GetValue(item) ?? 0L);
@@ -260,7 +334,21 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
         var filter = Builders<TEntity>.Filter.And(IdFilter(item),
             Builders<TEntity>.Filter.Eq(new StringFieldDefinition<TEntity, long>(token.Name), current));
-        return new ReplaceOneModel<TEntity>(filter, item) { IsUpsert = false };
+        return Replace(filter, item, upsert: false);
+    }
+
+    /// <summary>
+    ///     A replace of the document, which keeps the stored value of every store-generated member: an update never
+    ///     writes what the store assigned (a pipeline update that takes those elements from the stored document).
+    /// </summary>
+    private static WriteModel<TEntity> Replace<TEntity>(FilterDefinition<TEntity> filter, TEntity item, bool upsert)
+        where TEntity : class
+    {
+        var generated = MongoModeling.StoreGenerated(typeof(TEntity));
+        return generated.Count == 0
+            ? new ReplaceOneModel<TEntity>(filter, item) { IsUpsert = upsert }
+            : new UpdateOneModel<TEntity>(filter,
+                new KeepStoreGeneratedReplace<TEntity>(item, generated.Select(member => member.ElementName).ToList())) { IsUpsert = upsert };
     }
 
     private PendingCollectionWrites<TEntity> Buffer<TEntity>() where TEntity : class
@@ -297,10 +385,17 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         activity?.SetTag("db.system", "mongodb");
         activity?.SetTag("equantic.writes", _pending.Values.Sum(pending => pending.Count));
 
+        // The store's values go onto the entities before the writes serialize them: the inserts carry them, and
+        // the commit hands them back on the entities.
+        await AssignStoreGeneratedAsync(cancellationToken).ConfigureAwait(false);
+
         long affected = 0;
         foreach (var pending in _pending.Values)
         {
-            affected += await pending.FlushAsync(_session, cancellationToken).ConfigureAwait(false);
+            // A taken key fails the commit as a DuplicateKeyException; the collections flushed before it stay written
+            // (a MongoDB commit is one ordered bulk write per collection, atomic only inside an explicit transaction).
+            affected += await MongoDuplicateKeys.TranslatingAsync(() => pending.FlushAsync(_session, cancellationToken))
+                .ConfigureAwait(false);
         }
 
         _pending.Clear();
@@ -314,8 +409,74 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
     public Task<int> CommitAndRefreshChangesAsync(CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
     public Task<int> CommitAndRefreshChangesAsync(Action<SaveOptions> options, CancellationToken cancellationToken = default) => CommitAsync(cancellationToken);
 
+    /// <summary>
+    ///     Gives every staged insert the values the store assigns its store-generated members: the next numbers of
+    ///     each counter (one atomic <c>$inc</c> per counter for the whole commit, outside any open transaction) and the
+    ///     server's clock (read once, the same instant for every insert of the commit). The inserts stay listed until
+    ///     every value is on its entity: a commit that fails reading the clock or a counter keeps them staged, and the
+    ///     retried commit assigns them again (a counter advanced before the failure leaves a gap, never a repeat).
+    /// </summary>
+    private async Task AssignStoreGeneratedAsync(CancellationToken cancellationToken)
+    {
+        if (_generatedInserts.Count == 0)
+        {
+            return;
+        }
+
+        await AssignStoreGeneratedAsync(_generatedInserts.ToList(), cancellationToken).ConfigureAwait(false);
+        _generatedInserts.Clear();
+    }
+
+    /// <summary>
+    ///     Gives these inserts the values the store assigns their store-generated members. A counter advances outside the
+    ///     open transaction, as a PostgreSQL sequence does: concurrent transactions inserting into one collection never
+    ///     write-lock its counter until they end (which MongoDB answers with a write conflict), and a transaction that
+    ///     rolls back leaves the numbers it took unused, a gap.
+    /// </summary>
+    internal async Task AssignStoreGeneratedAsync(IReadOnlyList<(object Entity, Type EntityType)> generatedInserts,
+        CancellationToken cancellationToken)
+    {
+        var inserts = generatedInserts
+            .SelectMany(insert => MongoModeling.StoreGenerated(insert.EntityType)
+                .Select(member => (insert.Entity, insert.EntityType, Member: member)))
+            .ToList();
+        if (inserts.Count == 0)
+        {
+            return;
+        }
+
+        if (inserts.Any(insert => insert.Member.Value == Modeling.StoreValue.Clock))
+        {
+            var now = await MongoSequences.ServerClockAsync(Database, cancellationToken).ConfigureAwait(false);
+            foreach (var insert in inserts.Where(insert => insert.Member.Value == Modeling.StoreValue.Clock))
+            {
+                insert.Member.Assign(insert.Entity, now);
+            }
+        }
+
+        // One counter per collection this unit of work writes (its CollectionName<TEntity>(), overridden or not) and element:
+        // two units that keep an entity in two collections number each one on its own.
+        foreach (var counter in inserts
+                     .Where(insert => insert.Member.Value == Modeling.StoreValue.Sequence)
+                     .GroupBy(insert => (Collection: CollectionNameOf(insert.EntityType), insert.Member.ElementName)))
+        {
+            var count = counter.Count();
+            var last = await MongoSequences.AdvanceAsync(Database, counter.Key.Collection, counter.Key.ElementName, count, cancellationToken)
+                .ConfigureAwait(false);
+            var next = last - count + 1;
+            foreach (var insert in counter)
+            {
+                insert.Member.Assign(insert.Entity, next++);
+            }
+        }
+    }
+
     /// <summary>Discards every staged (uncommitted) write.</summary>
-    public void RollbackChanges() => _pending.Clear();
+    public void RollbackChanges()
+    {
+        _pending.Clear();
+        _generatedInserts.Clear();
+    }
 
     public virtual SaveOptions GetSaveOptions() => new();
 
@@ -335,6 +496,8 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         {
             await _session.CommitTransactionAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     /// <summary>Aborts the active transaction and discards staged writes.</summary>
@@ -346,6 +509,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
         }
 
         RollbackChanges();
+        await EndTransactionLocksAsync().ConfigureAwait(false);
     }
 
     // -------------------------------------------------------------- repositories / sets
@@ -411,6 +575,7 @@ public abstract class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQueryRunner
 
         if (disposing)
         {
+            ReleaseNamedLocks();
             _session?.Dispose();
         }
 

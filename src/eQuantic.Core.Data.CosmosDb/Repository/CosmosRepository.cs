@@ -1,5 +1,7 @@
 using System.Linq.Expressions;
+using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.Repository.Write;
 using eQuantic.Linq.Specification;
 
 namespace eQuantic.Core.Data.CosmosDb.Repository;
@@ -8,7 +10,8 @@ namespace eQuantic.Core.Data.CosmosDb.Repository;
 ///     The native Azure Cosmos DB repository — the read surface from <see cref="CosmosReadRepository{TEntity, TKey}" />
 ///     plus writes. Entity writes (<c>Add</c>/<c>Modify</c>/<c>Remove</c>/<c>Merge</c>) are staged on the unit of
 ///     work and flushed on commit; set-based writes (<c>DeleteMany</c>/<c>UpdateMany</c>) query the matching items
-///     and then delete or patch each one immediately.
+///     and then delete or patch each one immediately, each only while it still matches the filter. Upserts (guarded by
+///     the <c>_etag</c>), inserts skipping duplicates and returning updates run immediately too.
 /// </summary>
 /// <typeparam name="TEntity">The entity type.</typeparam>
 /// <typeparam name="TKey">The key type.</typeparam>
@@ -17,7 +20,10 @@ public class CosmosRepository<TEntity, TKey> :
     IRepository<TEntity, TKey>,
     IAsyncRepository<TEntity, TKey>,
     IQueryableRepository<TEntity, TKey>,
-    IAsyncQueryableRepository<TEntity, TKey>
+    IAsyncQueryableRepository<TEntity, TKey>,
+    IUpsertRepository<TEntity, TKey>,
+    IReturningUpdateRepository<TEntity, TKey>,
+    IPartialModifyRepository<TEntity, TKey>
     where TEntity : class, IEntity<TKey>
 {
     /// <summary>Initializes the repository over a unit of work.</summary>
@@ -122,4 +128,46 @@ public class CosmosRepository<TEntity, TKey> :
     /// <inheritdoc />
     public Task<long> UpdateManyAsync(ISpecification<TEntity> specification, Expression<Func<TEntity, TEntity>> updateFactory, CancellationToken cancellationToken = default) =>
         Set().UpdateManyAsync(specification.SatisfiedBy(), updateFactory, cancellationToken);
+
+    // ---------------------------------------------------------------- upserts and returning updates (immediate)
+
+    private static void TakeKey(TEntity target, TEntity source) => target.SetKey(source.GetKey());
+
+    /// <inheritdoc />
+    public Task<TEntity> UpsertAsync(TEntity entity, CancellationToken cancellationToken = default) =>
+        Set().UpsertAsync(entity, null, null, null, TakeKey, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<TEntity> UpsertAsync(TEntity entity, Expression<Func<TEntity, object?>> on,
+        Expression<Func<TEntity, TEntity>>? update = null, Expression<Func<TEntity, bool>>? conflictFilter = null,
+        CancellationToken cancellationToken = default) =>
+        Set().UpsertAsync(entity, MemberSelection.Names(on), update, conflictFilter, TakeKey, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<long> InsertManyAsync(IEnumerable<TEntity> items, bool skipDuplicates = false,
+        CancellationToken cancellationToken = default) =>
+        Set().InsertManyAsync(items, skipDuplicates, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(Expression<Func<TEntity, bool>> filter,
+        Expression<Func<TEntity, TEntity>> update, CancellationToken cancellationToken = default) =>
+        Set().UpdateAndGetAsync(filter, update, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<TEntity>> UpdateAndGetAsync(ISpecification<TEntity> specification,
+        Expression<Func<TEntity, TEntity>> update, CancellationToken cancellationToken = default) =>
+        Set().UpdateAndGetAsync(specification.SatisfiedBy(), update, cancellationToken);
+
+    // ---------------------------------------------------------------- member-scoped staged updates
+
+    /// <inheritdoc />
+    public void Modify(TEntity item, Expression<Func<TEntity, object?>> members) =>
+        UnitOfWork.StagePartialUpdate(item, MemberSelection.Names(members));
+
+    /// <inheritdoc />
+    public Task ModifyAsync(TEntity item, Expression<Func<TEntity, object?>> members)
+    {
+        UnitOfWork.StagePartialUpdate(item, MemberSelection.Names(members));
+        return Task.CompletedTask;
+    }
 }

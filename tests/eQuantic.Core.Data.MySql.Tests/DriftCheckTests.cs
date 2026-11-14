@@ -47,4 +47,26 @@ public sealed class DriftCheckTests : MySqlIntegrationTest
         Assert.That(finding.Kind, Is.EqualTo(DriftKind.MissingField));
         Assert.That(finding.Field, Is.EqualTo("customer"));
     }
+
+    [Test]
+    public async Task An_enum_column_still_holding_numbers_is_found()
+    {
+        using var db = await NewSchemaAsync();
+
+        // A model that stores RunState as its labels, against a column that still holds its numbers.
+        await using (var connection = await db.Resolve<DbDataSource>().OpenConnectionAsync())
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "ALTER TABLE run_record MODIFY state int NULL";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var finding = (await CheckAsync(db)).Findings.Single();
+
+        Assert.That(finding.Kind, Is.EqualTo(DriftKind.TypeDiffers));
+        Assert.That(finding.Field, Is.EqualTo("state"));
+        Assert.That(finding.Expected, Is.EqualTo("enum('queued','in_progress','completed')"));
+        Assert.That(finding.Found, Is.EqualTo("int"));
+        Assert.That(finding.Breaks, Is.True);
+    }
 }

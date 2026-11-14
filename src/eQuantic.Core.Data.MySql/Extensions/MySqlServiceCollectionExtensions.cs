@@ -42,7 +42,7 @@ public static class MySqlServiceCollectionExtensions
                 provider.GetRequiredService<RelationalModel>(), provider.GetRequiredService<SqlDialect>(),
                 provider.GetRequiredService<DbDataSource>()));
 
-        services.TryAddSingleton(_ => new MySqlDataSourceBuilder(connectionString).Build());
+        services.TryAddSingleton(_ => DataSource(connectionString));
         services.TryAddSingleton<DbDataSource>(sp => sp.GetRequiredService<MySqlDataSource>());
 
         return services;
@@ -79,7 +79,7 @@ public static class MySqlServiceCollectionExtensions
                 provider.GetRequiredService<RelationalModel>(), provider.GetRequiredService<SqlDialect>(),
                 provider.GetRequiredService<DbDataSource>()));
 
-        services.TryAddSingleton(_ => new MySqlDataSourceBuilder(connectionString).Build());
+        services.TryAddSingleton(_ => DataSource(connectionString));
         services.TryAddSingleton<DbDataSource>(sp => sp.GetRequiredService<MySqlDataSource>());
 
         return services;
@@ -112,4 +112,17 @@ public static class MySqlServiceCollectionExtensions
     /// <returns>The same service collection for chaining.</returns>
     public static IServiceCollection AddMySqlMigrations(this IServiceCollection services, params Assembly[] assemblies) =>
         services.AddRelationalMigrations(assemblies.Length > 0 ? assemblies : [Assembly.GetCallingAssembly()]);
+
+    /// <summary>
+    ///     The pooled data source. It always reports the rows a statement <b>found</b>, never only the ones it changed
+    ///     (<c>UseAffectedRows=false</c>, MySqlConnector's default, held here whatever the connection string says): a
+    ///     set-based update counts the rows its filter matched on every engine, and an update that writes a row's own
+    ///     values back still matched it.
+    /// </summary>
+    private static MySqlDataSource DataSource(string connectionString)
+    {
+        var builder = new MySqlDataSourceBuilder(connectionString);
+        builder.ConnectionStringBuilder.UseAffectedRows = false;
+        return builder.Build();
+    }
 }

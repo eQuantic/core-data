@@ -116,7 +116,7 @@ public sealed class PostgreSqlTestDatabase : IDisposable
     public PostgreSqlTestDatabase(string connectionString, Action<IServiceCollection>? configure)
     {
         var services = new ServiceCollection();
-        services.AddPostgreSqlDatabase(connectionString, TestSchema.Configure);
+        services.AddPostgreSqlDatabase(connectionString, model => TestSchema.Configure(ReadShapesSchema.Configure(model)));
         services.AddPostgreSqlRepositories();
         services.AddPostgreSqlMigrations(typeof(TestSchema).Assembly);
         configure?.Invoke(services);
@@ -126,6 +126,9 @@ public sealed class PostgreSqlTestDatabase : IDisposable
     }
 
     public T Resolve<T>() where T : notnull => _scope.ServiceProvider.GetRequiredService<T>();
+
+    /// <summary>A scope of its own — its own unit of work — over the same database.</summary>
+    public IServiceScope NewScope() => _provider.CreateScope();
 
     public void Dispose()
     {

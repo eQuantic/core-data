@@ -39,5 +39,9 @@ combined rows.
 
 - The projections must produce the **same shape** (same member names/types); the engine validates
   and names the mismatch otherwise.
-- `OrderBy` selects a *projected* member — you order the combined rows, not either source.
+- `OrderBy` selects a *projected* member — you order the combined rows, not either source. A projected
+  member stored as an enum's labels orders by the members' values, as C# does: on the relational engines
+  the union runs as a derived table ordered by `CASE col WHEN 'low' THEN 1 … END` (a union's own
+  `ORDER BY` takes output columns alone), on MongoDB by a `$switch` rank (`$addFields`, `$sort`). Each
+  branch's filter compares such a member by value too.
 - Branch count is unbounded; each branch is a full citizen (filters, specifications, query filters).

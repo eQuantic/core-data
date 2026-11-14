@@ -29,6 +29,36 @@ public enum ModelChangeKind
 
     /// <summary>The same member and type, sized differently.</summary>
     ChangeFacets,
+
+    /// <summary>
+    ///     The same member, assigned differently by the store: it became store-generated, changed what the store
+    ///     assigns it (a sequence, the clock, a SQL default), or stopped being store-generated.
+    ///     <see cref="ModelChange.From" /> and <see cref="ModelChange.To" /> carry the snapshot's spelling of each
+    ///     side (<c>sequence</c>, <c>clock</c>, <c>default …</c>), <c>null</c> where the application writes it.
+    /// </summary>
+    ChangeGeneration,
+
+    /// <summary>
+    ///     The same member, storing the same enum as its labels, whose labels changed: one added, renamed, removed or
+    ///     moved. <see cref="ModelChange.LabelsBefore" /> and <see cref="ModelChange.LabelsAfter" /> carry both lists.
+    /// </summary>
+    ChangeLabels,
+
+    /// <summary>
+    ///     The same entity and key, whose key the store now numbers, or no longer does (<c>KeyIsGenerated</c>).
+    ///     <see cref="ModelChange.From" /> and <see cref="ModelChange.To" /> are <c>sequence</c> where the store numbers
+    ///     it and <c>null</c> where the application gives it.
+    /// </summary>
+    ChangeKeyGeneration,
+
+    /// <summary>
+    ///     The same member, whose search index promises another match: declared, no longer declared, or matching another
+    ///     way (a mode, or with or without regard to case). <see cref="ModelChange.From" /> and <see cref="ModelChange.To" />
+    ///     carry the snapshot's spelling of each side, <c>null</c> where the member has no search index; the stored names
+    ///     are in <see cref="ModelChange.Collection" /> and <see cref="ModelChange.Field" />. An index already built does not
+    ///     change with its declaration, so the migration says what has to be rebuilt.
+    /// </summary>
+    ChangeSearch,
 }
 
 /// <summary>
@@ -67,6 +97,28 @@ public sealed record ModelChange(ModelChangeKind Kind, string EntityType)
     ///     member turns the pair into a rename that keeps it.
     /// </summary>
     public string? AmbiguousRenameHint { get; init; }
+
+    /// <summary>
+    ///     What the store assigns the member the change adds (<c>sequence</c>, <c>clock</c>, <c>default …</c>), or
+    ///     <c>null</c> when the application writes it. A store that fills the rows already there itself needs no value
+    ///     for them; one that does not is told so by the migration.
+    /// </summary>
+    public string? Generated { get; init; }
+
+    /// <summary>The member's stored type, where the change depends on it (the enum whose labels changed).</summary>
+    public string? StoredType { get; init; }
+
+    /// <summary>The enum's labels as they were, for a change of its labels.</summary>
+    public IReadOnlyList<LabelSnapshot> LabelsBefore { get; init; } = [];
+
+    /// <summary>The enum's labels as they are, for a change of its labels.</summary>
+    public IReadOnlyList<LabelSnapshot> LabelsAfter { get; init; } = [];
+
+    /// <summary>The entity's stored name (its table), where the change's step has to name it (a search index).</summary>
+    public string? Collection { get; init; }
+
+    /// <summary>The member's stored name (its column), where the change's step has to name it (a search index).</summary>
+    public string? Field { get; init; }
 }
 
 /// <summary>

@@ -36,9 +36,10 @@ public sealed class EntityKeyAttribute : Attribute
 
 /// <summary>
 ///     The member's stored name — a column (relational), a document field (MongoDB) — when the provider's
-///     naming convention does not fit.
+///     naming convention does not fit. On a member of an enum declared native (relational
+///     <c>Enum&lt;TEnum&gt;(...)</c>), it is the label the enum type stores for that member.
 /// </summary>
-[AttributeUsage(AttributeTargets.Property)]
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Field)]
 public sealed class StoredAsAttribute(string name) : Attribute
 {
     /// <summary>The stored name.</summary>
@@ -163,6 +164,13 @@ public sealed class SearchIndexAttribute : Attribute
 {
     /// <summary>The matching mode (<see cref="SearchMode.Contains" /> by default).</summary>
     public SearchMode Mode { get; set; } = SearchMode.Contains;
+
+    /// <summary>
+    ///     Whether the index matches without regard to case (<c>false</c> by default): text tests that ignore case
+    ///     (<c>string.Equals(x.Name, v, StringComparison.OrdinalIgnoreCase)</c>, <c>Contains(v, …IgnoreCase)</c>,
+    ///     <c>x.Name.ToLower() == v</c>) push down on it (Cassandra SASI with a non-tokenizing, case-insensitive analyzer).
+    /// </summary>
+    public bool CaseInsensitive { get; set; }
 }
 
 /// <summary>Declares the entity's default time-to-live (Cosmos DB container TTL).</summary>

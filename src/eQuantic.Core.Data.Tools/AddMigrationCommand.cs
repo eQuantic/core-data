@@ -17,6 +17,8 @@ internal static class AddMigrationCommand
     /// <param name="options">What was asked for on the command line.</param>
     public static int Run(AddMigrationOptions options)
     {
+        // Read before anything is built: a folder that cannot name a namespace is refused before the wait.
+        var folder = MigrationFolder.Parse(options.Output);
         var project = TargetProject.Open(options.Project, options.Startup, options.Configuration, options.Build);
         var host = DesignTimeHost.Enter(project, options.Arguments);
 
@@ -41,8 +43,8 @@ internal static class AddMigrationCommand
         }
 
         var stamp = DateTime.UtcNow;
-        var directory = Path.Combine(project.Directory, options.Output);
-        var namespaceName = $"{project.RootNamespace}.{options.Output.Replace(Path.DirectorySeparatorChar, '.')}";
+        var directory = folder.PathUnder(project.Directory);
+        var namespaceName = folder.Namespace(project.RootNamespace);
 
         var migrationPath = Path.Combine(directory, $"{stamp:yyyyMMddHHmmss}_{options.Name}.cs");
         if (File.Exists(migrationPath))
@@ -51,7 +53,8 @@ internal static class AddMigrationCommand
         }
 
         Directory.CreateDirectory(directory);
-        File.WriteAllText(migrationPath, MigrationWriter.Write(difference, options.Name, namespaceName, stamp));
+        var migration = MigrationWriter.Write(difference, options.Name, namespaceName, stamp);
+        File.WriteAllText(migrationPath, migration);
         File.WriteAllText(Path.Combine(directory, "DataModelSnapshot.g.cs"),
             ModelSnapshotWriter.Write(current, namespaceName));
 
@@ -61,8 +64,11 @@ internal static class AddMigrationCommand
 
         Summarize(difference);
 
-        var decisions = difference.Changes.Count(change => change.NeedsValue) +
-                        difference.Changes.Count(change => change.AmbiguousRenameHint is not null);
+        // Counted from the file itself: every decision it hands back is one #error line, whatever raised it — a
+        // missing value, an undeclared rename, a dropped collection, a conversion no store performs faithfully.
+        var decisions = migration
+            .Split('\n')
+            .Count(line => line.StartsWith("#error ", StringComparison.Ordinal));
 
         if (decisions > 0)
         {
@@ -101,6 +107,14 @@ internal static class AddMigrationCommand
         ModelChangeKind.RenameField => $"rename {change.From} to {change.To}",
         ModelChangeKind.ConvertField => $"convert {change.Member} from {change.From} to {change.To}",
         ModelChangeKind.ChangeFacets => $"resize {change.Member} from {change.From} to {change.To}",
+        ModelChangeKind.ChangeGeneration =>
+            $"store-generated {change.Member}: {change.From ?? "written by the application"} to " +
+            $"{change.To ?? "written by the application"} — needs a step",
+        ModelChangeKind.ChangeLabels => $"relabel {change.Member} from ({change.From}) to ({change.To})",
+        ModelChangeKind.ChangeKeyGeneration =>
+            $"key {change.Member}: {(change.To is null ? "given by the application" : "numbered by the store")} — needs a step",
+        ModelChangeKind.ChangeSearch =>
+            $"search index on {change.Member}: {change.From ?? "none"} to {change.To ?? "none"} — the index must be rebuilt",
         _ => change.Kind.ToString(),
     };
 

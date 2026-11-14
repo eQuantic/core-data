@@ -77,6 +77,38 @@ public sealed class DriftCheckTests : PostgreSqlIntegrationTest
     }
 
     [Test]
+    public async Task An_enum_column_still_holding_numbers_is_found()
+    {
+        using var db = await NewSchemaAsync();
+        // A model that switched RunState to its labels, against a column no step moved: what a migration
+        // generated before the switch was recorded would have left behind.
+        await AlterAsync(db, "ALTER TABLE run_record ALTER COLUMN state TYPE integer USING 0");
+
+        var finding = (await CheckAsync(db)).Findings.Single();
+
+        Assert.That(finding.Kind, Is.EqualTo(DriftKind.TypeDiffers));
+        Assert.That(finding.Field, Is.EqualTo("state"));
+        Assert.That(finding.Expected, Is.EqualTo("runstate"), "the enum type the model stores the labels in");
+        Assert.That(finding.Found, Is.EqualTo("integer"));
+        Assert.That(finding.Breaks, Is.True, "every read of the column fails on a number where a label belongs");
+    }
+
+    [Test]
+    public async Task A_numbers_column_holding_labels_is_found()
+    {
+        using var db = await NewSchemaAsync();
+        // The other way round: the model stores Weekday as its number, and the column became an enum type.
+        await AlterAsync(db, "ALTER TABLE run_record ALTER COLUMN day TYPE \"RunState\" USING 'Queued'::\"RunState\"");
+
+        var finding = (await CheckAsync(db)).Findings.Single();
+
+        Assert.That(finding.Kind, Is.EqualTo(DriftKind.TypeDiffers));
+        Assert.That(finding.Field, Is.EqualTo("day"));
+        Assert.That(finding.Expected, Is.EqualTo("integer"));
+        Assert.That(finding.Found, Is.EqualTo("runstate"));
+    }
+
+    [Test]
     public async Task A_column_tightened_by_hand_is_found()
     {
         using var db = await NewSchemaAsync();

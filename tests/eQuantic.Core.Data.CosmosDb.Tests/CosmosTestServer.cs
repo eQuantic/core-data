@@ -22,6 +22,11 @@ public sealed class CosmosTestServer
 {
     public const string DatabaseName = "tests";
     public const string ContainerName = "products";
+    public const string SecretsContainer = "secrets";
+    public const string UsersContainer = "users";
+
+    private static readonly string[] RelationContainers =
+        ["rel_items", "rel_mentions", "rel_runs", "rel_boxes", "rel_artifacts", "rel_repos", "rel_spaces", "shape_logs", "shape_runners"];
 
     // The well-known emulator account key (identical across the classic and vNext emulators).
     private const string EmulatorKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
@@ -30,6 +35,12 @@ public sealed class CosmosTestServer
     private static CosmosClient? _client;
     private static ServiceProvider? _provider;
     private static Exception? _startupError;
+
+    /// <summary>The container of the entity whose clock read a test makes fail by removing the container.</summary>
+    public const string ClockProbeContainer = "clock_probe";
+
+    /// <summary>Counts the requests the shared client has in flight against one container, while a test watches.</summary>
+    public static InFlightRequests Requests { get; } = new();
 
     /// <summary>The shared service provider (repositories, unit of work, migrations) over the emulator.</summary>
     public static ServiceProvider Provider => _provider!;
@@ -63,6 +74,7 @@ public sealed class CosmosTestServer
                 Serializer = new CosmosEntitySerializer(CosmosEntitySerializer.BuildOptions(model)),
                 RequestTimeout = TimeSpan.FromMinutes(2),
             };
+            options.CustomHandlers.Add(Requests);
             _client = new CosmosClient(endpoint, EmulatorKey, options);
 
             // The gateway health probe flips to ready before the vNext data-plane (the pgcosmos engine) finishes
@@ -71,6 +83,22 @@ public sealed class CosmosTestServer
             var database = await BootstrapAsync(async () =>
                 (await _client.CreateDatabaseIfNotExistsAsync(DatabaseName)).Database);
             await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(ContainerName, "/category")));
+
+            // The write-outcome tests' containers hold their targets unique: a unique key per partition.
+            await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(SecretsContainer, "/category")
+            {
+                UniqueKeyPolicy = new UniqueKeyPolicy { UniqueKeys = { new UniqueKey { Paths = { "/workspaceId", "/name" } } } },
+            }));
+            await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(UsersContainer, "/category")
+            {
+                UniqueKeyPolicy = new UniqueKeyPolicy { UniqueKeys = { new UniqueKey { Paths = { "/email" } } } },
+            }));
+
+            // The query-predicate entities each live in a container of their own: a relation crosses containers.
+            foreach (var relationContainer in RelationContainers)
+            {
+                await BootstrapAsync(() => database.CreateContainerIfNotExistsAsync(new ContainerProperties(relationContainer, "/category")));
+            }
 
             var services = new ServiceCollection();
             services.AddSingleton(_client);
@@ -96,7 +124,7 @@ public sealed class CosmosTestServer
     }
 
     /// <summary>The entity model shared by the client's serializer and the DI registration.</summary>
-    private static void RegisterEntities(CosmosModelBuilder model) => model
+    private static void RegisterEntities(CosmosModelBuilder model) => ReadShapesModel.Configure(model)
         .Converts<GadgetGrade, string>(
             grade => grade.ToString().ToLowerInvariant(),
             stored => Enum.Parse<GadgetGrade>(stored, ignoreCase: true))
@@ -108,7 +136,35 @@ public sealed class CosmosTestServer
             .Container(ContainerName)
             .PartitionKey(x => x.Category))
         .Entity<GeoEvent>(entity => entity
-            .Container("geo_events"));
+            .Container("geo_events"))
+        .Enum<Channel>()
+        .Entity<RunRecord>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category))
+        .Entity<Receipt>(entity => entity
+            .Container(ContainerName)
+            .PartitionKey(x => x.Category)
+            .Generated(x => x.Number)
+            .Generated(x => x.IssuedAt, eQuantic.Core.Data.Modeling.StoreValue.Clock))
+        .Entity<Secret>(entity => entity.Container(SecretsContainer).PartitionKey(x => x.Category))
+        .Entity<UserAccount>(entity => entity.Container(UsersContainer).PartitionKey(x => x.Category))
+        .Entity<NumberedAccount>(entity => entity.Container(UsersContainer).PartitionKey(x => x.Category).Generated(x => x.Number))
+        .Entity<ClockStamp>(entity => entity.Container(ClockProbeContainer).PartitionKey(x => x.Category)
+            .Generated(x => x.At, eQuantic.Core.Data.Modeling.StoreValue.Clock))
+        .Entity<Label>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<WideRecord>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category).ConcurrencyToken(x => x.ETag))
+        .Entity<RelItem>(entity => entity.Container("rel_items").PartitionKey(x => x.Category))
+        .Entity<RelMention>(entity => entity.Container("rel_mentions").PartitionKey(x => x.Category))
+        .Entity<RelRun>(entity => entity.Container("rel_runs").PartitionKey(x => x.Category))
+        .Entity<RelBox>(entity => entity.Container("rel_boxes").PartitionKey(x => x.Category))
+        .Entity<RelArtifact>(entity => entity.Container("rel_artifacts").PartitionKey(x => x.Category))
+        .Entity<RelRepo>(entity => entity.Container("rel_repos").PartitionKey(x => x.Category))
+        .Entity<RelSpace>(entity => entity.Container("rel_spaces").PartitionKey(x => x.Category))
+        .Entity<RelCompany>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<RelTicket>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category));
 
     [OneTimeTearDown]
     public async Task StopAsync()
@@ -151,6 +207,60 @@ public sealed class CosmosTestServer
         if (_startupError is not null)
         {
             Assert.Ignore($"Cosmos emulator is unavailable (Docker required): {_startupError.Message}");
+        }
+    }
+}
+
+/// <summary>
+///     A request handler of the shared client that counts the requests in flight against one container while a test
+///     watches it, and the most it saw at once. Retries run below the custom handlers, so each request counts once.
+/// </summary>
+public sealed class InFlightRequests : RequestHandler
+{
+    private string? _watched;
+    private int _current;
+    private int _peak;
+
+    /// <summary>The most requests against the watched container seen in flight at once since <see cref="Watch" />.</summary>
+    public int Peak => Volatile.Read(ref _peak);
+
+    /// <summary>Starts counting the requests against <paramref name="container" />, from zero.</summary>
+    public void Watch(string container)
+    {
+        Volatile.Write(ref _peak, 0);
+        Volatile.Write(ref _watched, "/colls/" + container + "/");
+    }
+
+    /// <summary>Stops counting.</summary>
+    public void Stop() => Volatile.Write(ref _watched, null);
+
+    public override async Task<ResponseMessage> SendAsync(RequestMessage request, CancellationToken cancellationToken)
+    {
+        // An item's own request names it under the container (/colls/x/docs/id); a create names the container alone.
+        var watched = Volatile.Read(ref _watched);
+        var uri = request.RequestUri?.OriginalString;
+        if (watched is null || uri is null
+            || !uri.Contains(watched, StringComparison.Ordinal) && !uri.EndsWith(watched[..^1], StringComparison.Ordinal))
+        {
+            return await base.SendAsync(request, cancellationToken);
+        }
+
+        var current = Interlocked.Increment(ref _current);
+        for (var peak = Volatile.Read(ref _peak); current > peak; peak = Volatile.Read(ref _peak))
+        {
+            if (Interlocked.CompareExchange(ref _peak, current, peak) == peak)
+            {
+                break;
+            }
+        }
+
+        try
+        {
+            return await base.SendAsync(request, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _current);
         }
     }
 }

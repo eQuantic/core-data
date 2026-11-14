@@ -94,11 +94,15 @@ public static class MongoServiceCollectionExtensions
         services.TryAdd(new ServiceDescriptor(typeof(TUnitOfWork), typeof(TUnitOfWork), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(ILockingUnitOfWork), sp => sp.GetRequiredService<TUnitOfWork>(), lifetime));
 
         services.TryAdd(new ServiceDescriptor(typeof(IRepository<,>), typeof(MongoRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IQueryableRepository<,>), typeof(MongoRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncRepository<,>), typeof(MongoRepository<,>), lifetime));
         services.TryAdd(new ServiceDescriptor(typeof(IAsyncQueryableRepository<,>), typeof(MongoRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IUpsertRepository<,>), typeof(MongoRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IReturningUpdateRepository<,>), typeof(MongoRepository<,>), lifetime));
+        services.TryAdd(new ServiceDescriptor(typeof(Data.Repository.Write.IPartialModifyRepository<,>), typeof(MongoRepository<,>), lifetime));
 
         return services;
     }

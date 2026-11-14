@@ -45,7 +45,7 @@ internal sealed class PendingCollectionWrites<TEntity>(IMongoCollection<TEntity>
         {
             _ = model switch
             {
-                ReplaceOneModel<TEntity> => _conditionalReplaces++,
+                ReplaceOneModel<TEntity> or UpdateOneModel<TEntity> => _conditionalReplaces++,
                 DeleteOneModel<TEntity> => _conditionalDeletes++,
                 _ => 0,
             };
