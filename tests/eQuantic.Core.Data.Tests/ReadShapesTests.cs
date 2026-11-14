@@ -16,6 +16,16 @@ public sealed class Album
     public List<string> Genres { get; set; } = [];
 }
 
+/// <summary>A parent whose related entities are an array.</summary>
+public sealed class Playlist
+{
+    public int Id { get; set; }
+
+    public string Name { get; set; } = "";
+
+    public Track[]? Tracks { get; set; }
+}
+
 /// <summary>A related entity holding the foreign key back to its album.</summary>
 public sealed class Track
 {
@@ -52,6 +62,22 @@ public sealed class ReadShapesTests
         var row = projection.Projection.Compile()(new Album { Title = "Blue" }, [7, 5, 7]);
         Assert.That(row.ToString(), Is.EqualTo("{ Title = Blue, All = 7, Named = 5, Size = 7 }"),
             "each count reads its slot, converted to the type the map asked for");
+    }
+
+    [Test]
+    public void The_length_of_an_array_relation_is_a_count()
+    {
+        // C# compiles an array's Length to an ArrayLength node, not to a read of the Length property.
+        var projection = RelationCountInterpreter.Interpret<Playlist, object>(
+            x => new { x.Name, Size = x.Tracks!.Length, Long = x.Tracks!.LongLength },
+            property => property.Name == nameof(Playlist.Tracks))!;
+
+        Assert.That(projection, Is.Not.Null, "the array's length is counted by the store, not read off an array never loaded");
+        Assert.That(projection.Counts, Has.Count.EqualTo(2));
+        Assert.That(projection.Counts.All(count => count.Predicate is null && count.ElementType == typeof(Track)), Is.True);
+        Assert.That(projection.Members, Is.EquivalentTo(new[] { nameof(Playlist.Name) }), "the navigation is no longer read");
+        Assert.That(projection.Projection.Compile()(new Playlist { Name = "Road" }, [4, 4]).ToString(),
+            Is.EqualTo("{ Name = Road, Size = 4, Long = 4 }"));
     }
 
     [Test]

@@ -8,7 +8,7 @@ namespace eQuantic.Core.Data.Query;
 
 /// <summary>
 ///     One relation count a projection asks for: <c>x.Versions.Count()</c>, <c>x.Versions.Count(v =&gt; v.DeletedAt == null)</c>,
-///     <c>LongCount</c>, or the collection's <c>Count</c> property.
+///     <c>LongCount</c>, the collection's <c>Count</c> property, or an array's <c>Length</c>/<c>LongLength</c>.
 /// </summary>
 /// <param name="Navigation">The collection navigation counted.</param>
 /// <param name="ElementType">The related entity type.</param>
@@ -58,8 +58,8 @@ public static class RelationCountInterpreter
 {
     /// <summary>
     ///     Takes the relation counts out of <paramref name="map" />, or answers <c>null</c> when it has none. A count
-    ///     is a call to <c>Count</c>/<c>LongCount</c> (with or without a predicate) or a read of the <c>Count</c>
-    ///     property, on a member of the entity the provider says is a relation.
+    ///     is a call to <c>Count</c>/<c>LongCount</c> (with or without a predicate), a read of the <c>Count</c>
+    ///     property or of an array's <c>Length</c>/<c>LongLength</c>, on a member of the entity the provider says is a relation.
     /// </summary>
     /// <typeparam name="TEntity">The entity type.</typeparam>
     /// <typeparam name="TResult">The projected type.</typeparam>
@@ -124,10 +124,22 @@ public static class RelationCountInterpreter
             return base.VisitMethodCall(node);
         }
 
+        protected override Expression VisitUnary(UnaryExpression node)
+        {
+            // x.Versions.Length on an array: C# compiles it to an ArrayLength node, not to a read of the property.
+            if (node.NodeType == ExpressionType.ArrayLength && Relation(node.Operand) is { } navigation)
+            {
+                return Slot(navigation, null, node.Type);
+            }
+
+            return base.VisitUnary(node);
+        }
+
         protected override Expression VisitMember(MemberExpression node)
         {
-            // x.Versions.Count (List<T>, ICollection<T>, IReadOnlyCollection<T>) and x.Versions.Length (arrays).
-            if (node.Member.Name is "Count" or "Length"
+            // x.Versions.Count (List<T>, ICollection<T>, IReadOnlyCollection<T>), and an array's Length or LongLength
+            // read as a property (an expression built by hand, or a LongLength).
+            if (node.Member.Name is "Count" or "Length" or "LongLength"
                 && node.Member is PropertyInfo { PropertyType: var type } && (type == typeof(int) || type == typeof(long))
                 && node.Expression is not null && Relation(node.Expression) is { } navigation)
             {

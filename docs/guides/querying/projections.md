@@ -48,7 +48,8 @@ var rows = await packages.GetMappedAsync(p => new
 }, new QueryOptions<Package>().Where(p => p.OwnerId == owner));
 ```
 
-`Count()`, `Count(filter)`, `LongCount(…)` and the collection's `Count` property all count; the
+`Count()`, `Count(filter)`, `LongCount(…)`, the collection's `Count` property and an array's
+`Length` (or `LongLength`) all count; the
 filter may read captured values. A member counts as a relation when its elements are entities with
 a foreign key back to the parent (the same resolution [includes](includes.md) use), so a count over
 a member the document embeds (`p.Tags.Count`) stays the store's ordinary projection.
