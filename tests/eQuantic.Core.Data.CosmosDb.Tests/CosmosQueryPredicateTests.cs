@@ -567,6 +567,35 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
         Assert.That(await TicketTitles(x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
     }
 
+    /// <summary>
+    ///     A folded text compared with null is the member's own null test, on every engine: null folds to null and a text
+    ///     folds to a text, so <c>x.Alias.ToLower() == null</c> keeps the rows whose alias is null, <c>!= null</c> the others,
+    ///     and a folded text's <c>Equals(null)</c> holds for none.
+    /// </summary>
+    [Test]
+    public async Task A_folded_text_compared_with_null_is_the_member_s_null_test()
+    {
+        await SeedTicketsAsync();
+        string? nothing = null;
+
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() == null), Is.EqualTo(new[] { "t2" }), "null folds to null");
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() == nothing), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToUpper() == null), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(x => nothing == x.Alias!.ToUpperInvariant()), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() != null), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToUpper() != nothing), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => !(x.Alias!.ToLowerInvariant() == null)), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower() == null || x.Alias == "beta"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(x => x.Alias!.ToLower().Equals(nothing)), Is.Empty, "a folded text never equals null");
+        Assert.That(await TicketTitles(x => x.Alias!.ToUpper().Equals(null)), Is.Empty);
+        Assert.That(await TicketTitles(x => !x.Alias!.ToLower().Equals(nothing)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+
+        using var scope = NewScope();
+        var partition = Partition;
+        Assert.That(await RepoOf<RelTicket>(scope).CountAsync(new QueryOptions<RelTicket>().Where(x => x.Category == partition && x.Alias!.ToUpper() != null)),
+            Is.EqualTo(3L));
+    }
+
     [Test]
     public async Task A_set_based_update_matching_text_without_regard_to_case_patches_and_counts_its_matches()
     {

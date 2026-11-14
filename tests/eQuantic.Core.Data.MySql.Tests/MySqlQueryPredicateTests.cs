@@ -57,6 +57,9 @@ public sealed class MySqlQueryPredicateTests : MySqlIntegrationTest
     public Task A_negated_text_equality_keeps_the_rows_whose_member_is_null() => QueryPredicateScenarios.NegatedTextEqualityKeepsNull(NewScope);
 
     [Test]
+    public Task A_folded_text_compared_with_null_is_the_member_s_null_test() => QueryPredicateScenarios.FoldedTextAgainstNullIsTheMemberNullTest(NewScope);
+
+    [Test]
     public void A_relation_condition_in_a_delegate_is_refused() => QueryPredicateScenarios.RelationConditionInADelegateIsRefused(NewScope);
 
     [Test]

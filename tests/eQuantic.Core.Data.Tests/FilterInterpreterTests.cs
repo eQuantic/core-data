@@ -312,6 +312,62 @@ public sealed class FilterInterpreterTests
         Assert.That(PredicateNormalizer.CompileResidual<Alias>(instance)(new Alias { Name = "Alpha" }), Is.True);
     }
 
+    [Test]
+    public void A_folded_text_compared_with_null_is_the_member_s_null_test()
+    {
+        string? nothing = null;
+        Expression<Func<Alias, bool>>[] isNull =
+        [
+            x => x.Name!.ToLower() == null,
+            x => x.Name!.ToUpper() == nothing,
+            x => nothing == x.Name!.ToLowerInvariant(),
+            x => !(x.Name!.ToUpperInvariant() != null),
+        ];
+        Expression<Func<Alias, bool>>[] isNotNull =
+        [
+            x => x.Name!.ToLower() != null,
+            x => null != x.Name!.ToUpper(),
+            x => !(x.Name!.ToLower() == nothing),
+        ];
+
+        foreach (var (predicates, op) in new[] { (isNull, ComparisonOperator.Equal), (isNotNull, ComparisonOperator.NotEqual) })
+        {
+            foreach (var predicate in predicates)
+            {
+                var filter = (ComparisonFilter)FilterInterpreter.Interpret(predicate);
+                Assert.That((filter.Member, filter.Operator, filter.Value), Is.EqualTo(("Name", op, (object?)null)), predicate.ToString());
+            }
+        }
+    }
+
+    [Test]
+    public void A_folded_text_s_equality_with_null_holds_for_no_row_and_its_negation_for_every_row()
+    {
+        string? nothing = null;
+        var equals = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => x.Name!.ToLower().Equals(nothing));
+        Assert.That(equals.Operator, Is.EqualTo(LogicalOperator.And));
+        Assert.That(equals.Operands.Cast<ComparisonFilter>().Select(comparison => (comparison.Member, comparison.Operator, comparison.Value)),
+            Is.EqualTo(new[] { ("Name", ComparisonOperator.NotEqual, (object?)null), ("Name", ComparisonOperator.Equal, (object?)null) }),
+            "the member is a text, and its text is null: never both");
+
+        var negated = (LogicalFilter)FilterInterpreter.Interpret<Alias>(x => !x.Name!.ToUpper().Equals(null));
+        Assert.That(negated.Operator, Is.EqualTo(LogicalOperator.Not));
+        Assert.That(negated.Operands.Single(), Is.InstanceOf<LogicalFilter>());
+    }
+
+    [Test]
+    public void The_residual_reads_a_folded_text_against_null_as_the_interpreter_does()
+    {
+        string? nothing = null;
+        var rows = new[] { new Alias(), new Alias { Name = "Alpha" } };
+        bool[] Kept(Expression<Func<Alias, bool>> predicate) => rows.Select(PredicateNormalizer.CompileResidual<Alias>(predicate)).ToArray();
+
+        Assert.That(Kept(x => x.Name!.ToLower() == nothing), Is.EqualTo(new[] { true, false }), "null folds to null");
+        Assert.That(Kept(x => x.Name!.ToUpper() != null), Is.EqualTo(new[] { false, true }));
+        Assert.That(Kept(x => x.Name!.ToLower().Equals(nothing)), Is.EqualTo(new[] { false, false }), "a folded text never equals null");
+        Assert.That(Kept(x => !x.Name!.ToLower().Equals(nothing)), Is.EqualTo(new[] { true, true }));
+    }
+
     /// <summary>A member that may hold no text.</summary>
     public sealed class Alias
     {

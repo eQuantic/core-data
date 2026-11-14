@@ -136,11 +136,13 @@ text fails a text test and stays null when folded instead of throwing).
 A **null value**: `string.Equals(x.Name, null, …IgnoreCase)` (either argument) and
 `x.Name.Equals(null, …IgnoreCase)` are `x.Name == null` on every store, and `Contains`/`StartsWith`/
 `EndsWith` against null is refused (`NotSupportedException`), as C# refuses it. A folded text against
-null reads as the residual reads it on MongoDB, Cosmos DB and Cassandra (`x.Name.ToLower() == null`
-holds for a null `Name`, since null folds to null, and `x.Name.ToLower().Equals(null)` for none),
-while the relational engines refuse the comparison. On Cosmos DB, whose `STRINGEQUALS`, `STARTSWITH`
-and `LOWER` answer undefined for null, `string.Equals(x.A, x.B, …)` also holds where both are null,
-and a test with no member is evaluated as C# evaluates it.
+null is the member's own null test on every store, since null folds to null and a text to a text:
+`x.Name.ToLower() == null` (and `ToUpper()`, the invariant forms, `null` on either side) holds for a
+null `Name`, `!= null` for the others, and `x.Name.ToLower().Equals(null)` for none, so its negation
+holds for every row (`IS NULL`/`IS NOT NULL`, pushed down, on the relational engines; the residual on
+Cassandra, behind `.AllowClientEvaluation()`, as any null test there). On Cosmos DB, whose
+`STRINGEQUALS`, `STARTSWITH` and `LOWER` answer undefined for null, `string.Equals(x.A, x.B, …)` also
+holds where both are null, and a test with no member is evaluated as C# evaluates it.
 
 `InvariantCultureIgnoreCase` reads as `OrdinalIgnoreCase`. The value's wildcard characters are
 **literal** on every store (`%`, `_`, `[`, a regular expression's metacharacters), escaped where the

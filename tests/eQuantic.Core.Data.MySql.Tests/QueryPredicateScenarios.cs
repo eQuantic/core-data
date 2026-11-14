@@ -574,6 +574,32 @@ internal static class QueryPredicateScenarios
         Assert.That(await TicketTitles(newScope, x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
     }
 
+    /// <summary>
+    ///     A folded text compared with null is the member's own null test, as the residual and the document stores read it:
+    ///     null folds to null and a text folds to a text, so <c>x.Alias.ToLower() == null</c> keeps the rows whose alias is
+    ///     null, <c>!= null</c> the others, and a folded text's <c>Equals(null)</c> holds for none.
+    /// </summary>
+    public static async Task FoldedTextAgainstNullIsTheMemberNullTest(Func<IServiceScope> newScope)
+    {
+        await SeedTicketsAsync(newScope);
+        string? nothing = null;
+
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower() == null), Is.EqualTo(new[] { "t2" }), "null folds to null");
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower() == nothing), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToUpper() == null), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(newScope, x => nothing == x.Alias!.ToUpperInvariant()), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower() != null), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToUpper() != nothing), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => !(x.Alias!.ToLowerInvariant() == null)), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower() == null || x.Alias == "beta"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToLower().Equals(nothing)), Is.Empty, "a folded text never equals null");
+        Assert.That(await TicketTitles(newScope, x => x.Alias!.ToUpper().Equals(null)), Is.Empty);
+        Assert.That(await TicketTitles(newScope, x => !x.Alias!.ToLower().Equals(nothing)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+
+        using var scope = newScope();
+        Assert.That(await Repo<RelTicket>(scope).CountAsync(new QueryOptions<RelTicket>().Where(x => x.Alias!.ToUpper() != null)), Is.EqualTo(3L));
+    }
+
     /// <summary>A relation's condition held in a delegate cannot be read: refused, naming the navigation, never dropped.</summary>
     public static void RelationConditionInADelegateIsRefused(Func<IServiceScope> newScope)
     {

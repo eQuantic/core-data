@@ -726,6 +726,34 @@ public sealed class CassandraQueryPredicateTests : CassandraIntegrationTest
         Assert.That(await TicketTitles(board, x => !(x.Alias!.ToUpper() == "ALPHA")), Is.EqualTo(new[] { "t2", "t3" }));
     }
 
+    /// <summary>
+    ///     A folded text compared with null is the member's own null test, on every engine: null folds to null and a text
+    ///     folds to a text, so <c>x.Alias.ToLower() == null</c> keeps the rows whose alias is null, <c>!= null</c> the others,
+    ///     and a folded text's <c>Equals(null)</c> holds for none.
+    /// </summary>
+    [Test]
+    public async Task A_folded_text_compared_with_null_is_the_member_s_null_test()
+    {
+        var board = await SeedTicketsAsync();
+        string? nothing = null;
+
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower() == null), Is.EqualTo(new[] { "t2" }), "null folds to null");
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower() == nothing), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToUpper() == null), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(board, x => nothing == x.Alias!.ToUpperInvariant()), Is.EqualTo(new[] { "t2" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower() != null), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToUpper() != nothing), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(board, x => !(x.Alias!.ToLowerInvariant() == null)), Is.EqualTo(new[] { "t1", "t3", "t4" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower() == null || x.Alias == "beta"), Is.EqualTo(new[] { "t2", "t3" }));
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToLower().Equals(nothing)), Is.Empty, "a folded text never equals null");
+        Assert.That(await TicketTitles(board, x => x.Alias!.ToUpper().Equals(null)), Is.Empty);
+        Assert.That(await TicketTitles(board, x => !x.Alias!.ToLower().Equals(nothing)), Is.EqualTo(new[] { "t1", "t2", "t3", "t4" }));
+
+        using var scope = NewScope();
+        Assert.That(await Repo<RelTicket>(scope).CountAsync(new QueryOptions<RelTicket>().Where(x => x.Board == board && x.Alias!.ToUpper() != null)
+            .AllowFiltering().AllowClientEvaluation()), Is.EqualTo(3L));
+    }
+
     [Test]
     public void A_relation_condition_in_a_delegate_is_refused()
     {

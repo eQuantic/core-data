@@ -146,6 +146,15 @@ public static class FilterInterpreter
             return op == ComparisonOperator.Equal ? folded : NotText(folded);
         }
 
+        // x.Name.ToLower() == null (or !=, ToUpper, either side): null folds to null and a text folds to a text, so it is
+        // the member's own null test, as the residual reads it (PredicateNormalizer.CompileResidual) and as the document
+        // stores answer it.
+        if (op is ComparisonOperator.Equal or ComparisonOperator.NotEqual
+            && (FoldedNull(binary.Left, binary.Right) ?? FoldedNull(binary.Right, binary.Left)) is { } nullable)
+        {
+            return new ComparisonFilter(nullable, op, null);
+        }
+
         if (Path(binary.Left) is { } leftMember)
         {
             return new ComparisonFilter(leftMember, op, Value(binary.Right));
@@ -338,10 +347,24 @@ public static class FilterInterpreter
         }
 
         // x.Name.ToLower().Op(v)
-        if (arguments.Count == 1 && Folding(receiver) is { } folding && NodeEvaluation.TryValue(arguments[0], out var value) && value is string text)
+        if (arguments.Count == 1 && Folding(receiver) is { } folding && NodeEvaluation.TryValue(arguments[0], out var value))
         {
-            filter = new TextFilter(folding.Member, match.Value, text, folding.Case);
-            return true;
+            switch (value)
+            {
+                case string text:
+                    filter = new TextFilter(folding.Member, match.Value, text, folding.Case);
+                    return true;
+                case null when match == TextMatch.Equals:
+                    // x.Name.ToLower().Equals(null) holds for no row, as the residual reads it: a null member fails a text
+                    // test, and a text never equals null. Written as that reading ("the member is a text, and its folded
+                    // text is null"), it stays two-valued under a negation, which then holds for every row.
+                    filter = new LogicalFilter(LogicalOperator.And,
+                    [
+                        new ComparisonFilter(folding.Member, ComparisonOperator.NotEqual, null),
+                        new ComparisonFilter(folding.Member, ComparisonOperator.Equal, null),
+                    ]);
+                    return true;
+            }
         }
 
         return false;
@@ -377,6 +400,10 @@ public static class FilterInterpreter
         filter = new TextFilter(folding.Member, TextMatch.Equals, text, folding.Case);
         return true;
     }
+
+    /// <summary>The member of <c>x.Name.ToLower() == null</c>: the folded member on one side, a null value on the other; else <c>null</c>.</summary>
+    private static string? FoldedNull(ExpressionNode foldedNode, ExpressionNode valueNode) =>
+        Folding(foldedNode) is { } folding && NodeEvaluation.TryValue(valueNode, out var value) && value is null ? folding.Member : null;
 
     /// <summary>The member and the case of <c>x.Name.ToLower()</c> / <c>ToLowerInvariant()</c> / <c>ToUpper()</c> / <c>ToUpperInvariant()</c>.</summary>
     private static (string Member, TextCase Case)? Folding(ExpressionNode node)
