@@ -29,6 +29,9 @@ public sealed class SqlServerWriteOutcomeTests : SqlServerIntegrationTest
     private IServiceScope NewScope() => _db.NewScope();
 
     [Test]
+    public Task An_upsert_advances_a_token_the_row_holds_unset() => WriteOutcomeScenarios.UpsertAdvancesAnUnsetToken(NewScope);
+
+    [Test]
     public Task An_upsert_inserts_then_updates() => WriteOutcomeScenarios.UpsertInsertsThenUpdates(NewScope);
 
     [Test]

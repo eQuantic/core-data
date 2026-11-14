@@ -133,6 +133,20 @@ public sealed class Runner : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>A record versioned by a token that may be unset: a row written without a version holds NULL.</summary>
+public sealed class Revisioned : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string Note { get; set; } = "";
+
+    public int? Version { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The write-outcome entities' mapping and migration, shared by every relational suite.</summary>
 internal static class WriteOutcomeSchema
 {
@@ -144,7 +158,8 @@ internal static class WriteOutcomeSchema
         .Entity<Page>(_ => { })
         .Entity<UserAccount>(entity => entity.Table("users"))
         .Entity<Sprint>(entity => entity.Key(x => x.Id, generated: true))
-        .Entity<Runner>(_ => { });
+        .Entity<Runner>(_ => { })
+        .Entity<Revisioned>(entity => entity.ConcurrencyToken(x => x.Version));
 
     /// <summary>The tables and their unique indexes; a partial one only where the store has them.</summary>
     public static IMigrationBuilder Migrate(IMigrationBuilder migration, bool partialIndexes) => migration
@@ -166,6 +181,7 @@ internal static class WriteOutcomeSchema
             .EnsureCollection()
             .Index(x => x.Email, options => options.Unique().Named("ix_users_email")))
         .For<Sprint>(sprint => sprint.EnsureCollection())
+        .For<Revisioned>(revisioned => revisioned.EnsureCollection())
         .For<Runner>(runner =>
         {
             runner.EnsureCollection();
@@ -189,6 +205,25 @@ internal static class WriteOutcomeScenarios
         Resolve<IAsyncRepository<TEntity, Guid>>(scope);
 
     private static Task Commit(IServiceScope scope) => Resolve<IUnitOfWork>(scope).CommitAsync();
+
+    /// <summary>
+    ///     An upsert's update advances a concurrency token the row holds unset, as the unit of work does (an unset version
+    ///     is followed by 1): in SQL, NULL + 1 is NULL, and the version would never move.
+    /// </summary>
+    public static async Task UpsertAdvancesAnUnsetToken(Func<IServiceScope> newScope)
+    {
+        using var scope = newScope();
+        var upserts = Resolve<IUpsertRepository<Revisioned, Guid>>(scope);
+        var record = new Revisioned { Note = "first" };
+
+        var inserted = await upserts.UpsertAsync(record);
+        Assert.That(inserted.Version, Is.Null, "the insert writes the version the entity carries, none");
+
+        var updated = await upserts.UpsertAsync(new Revisioned { Id = record.Id, Note = "second" });
+        Assert.That((updated.Note, updated.Version), Is.EqualTo(("second", (int?)1)), "an unset version is followed by 1");
+        var again = await upserts.UpsertAsync(new Revisioned { Id = record.Id, Note = "third" }, x => x.Id, x => new Revisioned { Note = "third" });
+        Assert.That((again.Note, again.Version), Is.EqualTo(("third", (int?)2)));
+    }
 
     /// <summary>An upsert of an entity whose key no row has inserts it; again with a changed member, it updates that row.</summary>
     public static async Task UpsertInsertsThenUpdates(Func<IServiceScope> newScope)

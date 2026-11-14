@@ -633,8 +633,10 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             var quoted = _dialect.Quote(token.Name);
             var current = existingRow is null ? quoted : existingRow + "." + quoted;
             var type = Nullable.GetUnderlyingType(token.Property.PropertyType) ?? token.Property.PropertyType;
+            // An unset version is followed by 1, as the unit of work's next version is: NULL + 1 alone is NULL.
+            var number = Nullable.GetUnderlyingType(token.Property.PropertyType) is null ? current : $"COALESCE({current}, 0)";
             assignments.Add(type == typeof(int) || type == typeof(long)
-                ? $"{quoted} = {current} + 1"
+                ? $"{quoted} = {number} + 1"
                 : $"{quoted} = {Bind(parameters, RelationalUnitOfWork.NextVersion(null, type))}");
         }
 
