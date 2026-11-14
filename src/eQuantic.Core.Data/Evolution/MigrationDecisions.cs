@@ -411,6 +411,46 @@ internal static class MigrationDecisions
             string.Join(", ", labels.Select(label => $"'{label.Label}'"));
     }
 
+    /// <summary>
+    ///     The decision for a search index whose declaration changed, or <c>null</c> where the store's index already serves
+    ///     the new one (PostgreSQL's trigram index serves every mode) or the store builds none (SQL Server, MySQL, MariaDB,
+    ///     the document stores, where the declaration names a pattern the provider matches without an index).
+    /// </summary>
+    public static string? Search(string provider, string entityType, ModelChange change)
+    {
+        var engine = EngineOf(provider);
+        var member = $"'{entityType}.{change.Member}'";
+        var from = change.From ?? "no search index";
+        var to = change.To ?? "no search index";
+        return engine switch
+        {
+            Engine.Cassandra when change.From is null =>
+                $"{member} gains a search index ({to}). Add .EnsureCollection() to this migration: it creates the SASI index " +
+                $"{CassandraSearchIndex(change)} with the declared options, and LIKE pushes down once it exists. Then delete this line.",
+            Engine.Cassandra when change.To is null =>
+                $"{member} no longer declares its search index ({from}). Write a Run step that drops it " +
+                $"(DROP INDEX IF EXISTS {CassandraSearchIndex(change)}), or keep it if something else reads it. Then delete this line.",
+            Engine.Cassandra =>
+                $"The search index on {member} changes from {from} to {to}, and Cassandra cannot change a SASI index's options in " +
+                $"place: the index already built keeps matching as it did, so it must be rebuilt. Write a Run step that drops it " +
+                $"(DROP INDEX IF EXISTS {CassandraSearchIndex(change)}) and add .EnsureCollection() after it, which creates it again " +
+                "with the new options. Until then the provider reads the cluster's schema and pushes a match that ignores case " +
+                "down only on an index that ignores case; anywhere else it runs client-side, behind .AllowClientEvaluation(). " +
+                "Then delete this line.",
+            Engine.PostgreSql when change.From is null =>
+                $"{member} gains a search index ({to}). Add .EnsureCollection() to this migration: it creates the trigram " +
+                $"index ix_{change.Collection}_{change.Field}_search the declaration asks for. Then delete this line.",
+            Engine.PostgreSql when change.To is null =>
+                $"{member} no longer declares its search index ({from}). Write a Run step that drops it " +
+                $"(DROP INDEX IF EXISTS \"ix_{change.Collection}_{change.Field}_search\"), or keep it if something else reads it. " +
+                "Then delete this line.",
+            _ => null,
+        };
+    }
+
+    /// <summary>The name the Cassandra migration gives a search index (<c>{table}_{column}_search</c>).</summary>
+    private static string CassandraSearchIndex(ModelChange change) => $"{change.Collection}_{change.Field}_search";
+
     private static Engine EngineOf(string provider) => provider.ToLowerInvariant() switch
     {
         "postgresql" => Engine.PostgreSql,

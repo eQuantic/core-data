@@ -457,4 +457,46 @@ public sealed class MigrationWriterTests
         Assert.That(decision, Does.Contain("is added stamped with the store's clock, which reaches new inserts only"));
         Assert.That(decision, Does.Contain("Update step"));
     }
+
+    // ---- search indexes ----------------------------------------------------------------------------
+
+    private static string Search(string provider, string? from, string? to)
+    {
+        EntitySnapshot Entity(string? mode) =>
+            new(Order, "orders", [new FieldSnapshot("Id", "id", "System.Guid"), new FieldSnapshot("Name", "name", "text")])
+            {
+                Keys = ["Id"],
+                Search = mode is null ? [] : [new SearchSnapshot("Name", mode)],
+            };
+
+        return MigrationWriter.Write(ModelDiffer.Compare(new ModelSnapshot(provider, [Entity(from)]), new ModelSnapshot(provider, [Entity(to)])),
+            "Evolve", "Shop.Migrations", Stamp);
+    }
+
+    [TestCase("Contains", "Contains, case-insensitive")]
+    [TestCase("Contains, case-insensitive", "Contains")]
+    [TestCase("Prefix", "Contains")]
+    public void A_cassandra_search_index_that_matches_another_way_must_be_rebuilt(string from, string to)
+    {
+        var decision = Decisions(Search("cassandra", from, to)).Single();
+
+        Assert.That(decision, Does.Contain($"changes from {from} to {to}"));
+        Assert.That(decision, Does.Contain("DROP INDEX IF EXISTS orders_name_search"));
+        Assert.That(decision, Does.Contain(".EnsureCollection()"));
+        Assert.That(decision, Does.Contain("must be rebuilt"));
+    }
+
+    [Test]
+    public void A_cassandra_search_index_declared_or_dropped_says_how()
+    {
+        Assert.That(Decisions(Search("cassandra", null, "Contains")).Single(), Does.Contain(".EnsureCollection()"));
+        Assert.That(Decisions(Search("cassandra", "Contains", null)).Single(), Does.Contain("DROP INDEX IF EXISTS orders_name_search"));
+    }
+
+    [Test]
+    public void A_postgresql_search_index_serves_every_mode_and_needs_no_rebuild()
+    {
+        Assert.That(Decisions(Search("postgresql", "Prefix", "Contains")), Is.Empty, "the trigram index serves both");
+        Assert.That(Decisions(Search("postgresql", null, "Contains")).Single(), Does.Contain(".EnsureCollection()"));
+    }
 }

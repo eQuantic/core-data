@@ -111,6 +111,8 @@ internal static class AddMigrationCommand
         ModelChangeKind.ChangeLabels => $"relabel {change.Member} from ({change.From}) to ({change.To})",
         ModelChangeKind.ChangeKeyGeneration =>
             $"key {change.Member}: {(change.To is null ? "given by the application" : "numbered by the store")} — needs a step",
+        ModelChangeKind.ChangeSearch =>
+            $"search index on {change.Member}: {change.From ?? "none"} to {change.To ?? "none"} — the index must be rebuilt",
         _ => change.Kind.ToString(),
     };
 

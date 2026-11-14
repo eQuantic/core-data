@@ -50,6 +50,15 @@ public enum ModelChangeKind
     ///     it and <c>null</c> where the application gives it.
     /// </summary>
     ChangeKeyGeneration,
+
+    /// <summary>
+    ///     The same member, whose search index promises another match: declared, no longer declared, or matching another
+    ///     way (a mode, or with or without regard to case). <see cref="ModelChange.From" /> and <see cref="ModelChange.To" />
+    ///     carry the snapshot's spelling of each side, <c>null</c> where the member has no search index; the stored names
+    ///     are in <see cref="ModelChange.Collection" /> and <see cref="ModelChange.Field" />. An index already built does not
+    ///     change with its declaration, so the migration says what has to be rebuilt.
+    /// </summary>
+    ChangeSearch,
 }
 
 /// <summary>
@@ -104,6 +113,12 @@ public sealed record ModelChange(ModelChangeKind Kind, string EntityType)
 
     /// <summary>The enum's labels as they are, for a change of its labels.</summary>
     public IReadOnlyList<LabelSnapshot> LabelsAfter { get; init; } = [];
+
+    /// <summary>The entity's stored name (its table), where the change's step has to name it (a search index).</summary>
+    public string? Collection { get; init; }
+
+    /// <summary>The member's stored name (its column), where the change's step has to name it (a search index).</summary>
+    public string? Field { get; init; }
 }
 
 /// <summary>
