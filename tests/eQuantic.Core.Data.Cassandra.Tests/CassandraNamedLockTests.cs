@@ -141,7 +141,9 @@ public sealed class CassandraNamedLockTests : CassandraIntegrationTest
             var row = await Row(name);
             Assert.That(row, Is.Not.Null);
             Assert.That(row!.GetValue<string>("owner"), Does.Contain(Environment.MachineName));
-            Assert.That(row.GetValue<int?>("ttl"), Is.InRange(1, (int)Lease.TotalSeconds), "the row expires on its own");
+            // Written with the lease rounded up plus the second Cassandra may cut from it, and counting down since.
+            Assert.That(row.GetValue<int?>("ttl"), Is.InRange((int)Lease.TotalSeconds, CassandraNamedLocks.Ttl(Lease)),
+                "the row expires on its own, and not before the lease has run");
         }
 
         Assert.That(await Row(name), Is.Null, "released: the row is deleted");
