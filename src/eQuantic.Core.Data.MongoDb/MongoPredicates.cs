@@ -4,16 +4,16 @@ using System.Text.RegularExpressions;
 using eQuantic.Core.Data.MongoDb.Repository;
 using eQuantic.Core.Data.Query;
 using MongoDB.Driver;
-using MongoDB.Driver.Linq;
 
 namespace eQuantic.Core.Data.MongoDb;
 
 /// <summary>
 ///     Prepares a predicate (or a whole LINQ query) for the driver: an array's <c>Contains</c> rewritten to the shape
 ///     LINQ providers read, text matched without regard to case rewritten to an escaped case-insensitive regular
-///     expression, and each test across a relation resolved into the related keys — the related documents' keys read
-///     first (one aggregation per test — <c>$match</c>, then <c>$group</c> on the key — through the driver, inside the open
-///     transaction's session), then an <c>$in</c> over them.
+///     expression, and each test across a relation resolved (<see cref="MongoRelations" />): the related documents' keys
+///     read first (one aggregation per test — <c>$match</c>, then <c>$group</c> on the key — through the driver, inside the
+///     open transaction's session), then an <c>$in</c> over them; or, when they are more than an <c>$in</c> should carry,
+///     a <c>$lookup</c> of the related documents in the read's own aggregation.
 ///     <para>
 ///         A navigation follows the conventions an include follows: a collection of documents of another collection
 ///         holding a foreign key back to the owner (<c>[ForeignKey("Owner")]</c> or <c>{Owner}Id</c>), or a reference
@@ -56,11 +56,15 @@ internal static class MongoPredicates
     /// <summary>Whether a query crosses a relation (and so reads related keys before it runs).</summary>
     public static bool Crosses(Expression query) => RelationPredicates.Crosses(query, Navigation);
 
-    /// <summary>The query ready for the driver: normalized, case-insensitive text as regular expressions, relations resolved.</summary>
+    /// <summary>
+    ///     The query ready for the driver: normalized, case-insensitive text as regular expressions, relations resolved —
+    ///     the related keys read asynchronously, cancelled by <paramref name="cancellationToken" />.
+    /// </summary>
     public static async Task<IQueryable<T>> ReadyAsync<T>(IQueryable<T> query, MongoUnitOfWork unitOfWork, CancellationToken cancellationToken)
     {
         var expression = Rewrite(query.Expression);
-        expression = await RelationPredicates.ResolveQueryAsync(expression, Navigation, Keys(unitOfWork), cancellationToken).ConfigureAwait(false);
+        expression = await new MongoRelations(unitOfWork, synchronous: false, cancellationToken)
+            .QueryAsync(expression, query.Provider).ConfigureAwait(false);
         return ReferenceEquals(expression, query.Expression) ? query : query.Provider.CreateQuery<T>(expression);
     }
 
@@ -71,25 +75,29 @@ internal static class MongoPredicates
     public static IQueryable<T> Ready<T>(IQueryable<T> query, MongoUnitOfWork unitOfWork)
     {
         var expression = Rewrite(query.Expression);
-        var resolution = RelationPredicates.ResolveQueryAsync(expression, Navigation, SynchronousKeys(unitOfWork), CancellationToken.None);
+        var resolution = new MongoRelations(unitOfWork, synchronous: true, CancellationToken.None).QueryAsync(expression, query.Provider);
         // Every read above completes synchronously (the driver's own synchronous API), so the task has already finished.
         expression = resolution.GetAwaiter().GetResult();
         return ReferenceEquals(expression, query.Expression) ? query : query.Provider.CreateQuery<T>(expression);
     }
 
-    /// <summary>The filter ready for a set-based write: normalized, case-insensitive text as regular expressions, relations resolved.</summary>
-    public static async Task<Expression<Func<T, bool>>> ReadyAsync<T>(Expression<Func<T, bool>> filter, MongoUnitOfWork unitOfWork,
-        CancellationToken cancellationToken)
-    {
-        var rewritten = (Expression<Func<T, bool>>)Rewrite(filter);
-        return await RelationPredicates.ResolveAsync(rewritten, Navigation, Keys(unitOfWork), cancellationToken).ConfigureAwait(false);
-    }
+    /// <summary>
+    ///     The filters a set-based write runs, in turn: normalized, case-insensitive text as regular expressions, and its
+    ///     relations resolved. One filter, with the related keys as <c>$in</c>, when every relation's keys fit in one; when
+    ///     one does not (a write's filter cannot hold a <c>$lookup</c>), the ids of the documents the filter matches are
+    ///     read first by one aggregation with the <c>$lookup</c>, and each filter is a batch of them and the filter again,
+    ///     each relation the <c>$lookup</c> resolved taken as it held for those documents.
+    /// </summary>
+    public static Task<IReadOnlyList<FilterDefinition<T>>> WriteFiltersAsync<T>(Expression<Func<T, bool>> filter,
+        MongoUnitOfWork unitOfWork, IMongoCollection<T> collection, CancellationToken cancellationToken) =>
+        new MongoRelations(unitOfWork, synchronous: false, cancellationToken)
+            .WriteFiltersAsync((Expression<Func<T, bool>>)Rewrite(filter), collection);
 
     /// <summary>A predicate the driver renders on its own (a <c>$lookup</c>'s <c>$match</c>): normalized and case-insensitive text rewritten.</summary>
     public static LambdaExpression Rendered(LambdaExpression predicate) => (LambdaExpression)Rewrite(predicate);
 
-    /// <summary>The explanation of what a query's relations read first (no read runs).</summary>
-    public static IReadOnlyList<string> Notes(Expression query)
+    /// <summary>The explanation of what a query's relations read first (no read runs), naming the collections the unit of work reads.</summary>
+    public static IReadOnlyList<string> Notes(Expression query, MongoUnitOfWork unitOfWork)
     {
         var notes = new List<string>();
         new QueryLambdas(lambda =>
@@ -97,9 +105,11 @@ internal static class MongoPredicates
             foreach (var relation in RelationPredicates.Find(lambda, Navigation))
             {
                 notes.Add($"'{relation.Text}' resolves first: the distinct {relation.Navigation.TargetKey.Name} of the " +
-                          $"'{MongoModeling.CollectionName(relation.Navigation.Target)}' documents that match is read (one aggregation, " +
+                          $"'{unitOfWork.CollectionNameOf(relation.Navigation.Target)}' documents that match is read (one aggregation, " +
                           $"$match then $group on the key, inside the transaction's session when one is open), and the read takes " +
-                          $"{relation.Navigation.OwnerKey.Name} {(relation.Negated ? "$nin" : "$in")} those keys.");
+                          $"{relation.Navigation.OwnerKey.Name} {(relation.Negated ? "$nin" : "$in")} those keys; past " +
+                          $"{MongoRelations.MaxInKeys} keys or {MongoRelations.MaxInBytes / 1024} KiB of them, a $lookup of the related " +
+                          "documents in the read's own aggregation instead.");
             }
         }).Visit(query);
         return notes;
@@ -113,57 +123,10 @@ internal static class MongoPredicates
             (_, _, _, _) => Task.FromResult<IReadOnlyCollection<object?>>([]), CancellationToken.None).GetAwaiter().GetResult();
     }
 
-    private static RelatedKeysReader Keys(MongoUnitOfWork unitOfWork) => async (target, condition, member, cancellationToken) =>
-        await ((Task<IReadOnlyCollection<object?>>)typeof(MongoPredicates)
-            .GetMethod(nameof(DistinctAsync), BindingFlags.NonPublic | BindingFlags.Static)!
-            .MakeGenericMethod(target, member.PropertyType)
-            .Invoke(null, [unitOfWork, condition, member, cancellationToken])!).ConfigureAwait(false);
-
-    private static RelatedKeysReader SynchronousKeys(MongoUnitOfWork unitOfWork) => (target, condition, member, _) =>
-        Task.FromResult((IReadOnlyCollection<object?>)typeof(MongoPredicates)
-            .GetMethod(nameof(Distinct), BindingFlags.NonPublic | BindingFlags.Static)!
-            .MakeGenericMethod(target, member.PropertyType)
-            .Invoke(null, [unitOfWork, condition, member])!);
-
-    /// <summary>The related documents' query: the target's global filter and the relation's condition, in the open session.</summary>
-    private static IQueryable<TTarget> Related<TTarget>(MongoUnitOfWork unitOfWork, LambdaExpression? condition) where TTarget : class
-    {
-        var collection = unitOfWork.GetCollection<TTarget>();
-        var session = unitOfWork.Session;
-        var query = session is null ? collection.AsQueryable() : collection.AsQueryable(session);
-        if (unitOfWork.GlobalFilter<TTarget>() is { } global)
-        {
-            query = query.Where(global);
-        }
-
-        return condition is null ? query : query.Where((Expression<Func<TTarget, bool>>)condition);
-    }
-
-    private static Expression<Func<TTarget, TMember>> Selector<TTarget, TMember>(PropertyInfo member)
-    {
-        var parameter = Expression.Parameter(typeof(TTarget), "related");
-        return Expression.Lambda<Func<TTarget, TMember>>(Expression.Property(parameter, member), parameter);
-    }
-
-    private static async Task<IReadOnlyCollection<object?>> DistinctAsync<TTarget, TMember>(MongoUnitOfWork unitOfWork,
-        LambdaExpression? condition, PropertyInfo member, CancellationToken cancellationToken) where TTarget : class
-    {
-        var query = await ReadyAsync(Related<TTarget>(unitOfWork, condition), unitOfWork, cancellationToken).ConfigureAwait(false);
-        var values = await query.Select(Selector<TTarget, TMember>(member)).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
-        return values.Cast<object?>().ToList();
-    }
-
-    private static IReadOnlyCollection<object?> Distinct<TTarget, TMember>(MongoUnitOfWork unitOfWork, LambdaExpression? condition,
-        PropertyInfo member) where TTarget : class
-    {
-        var query = Ready(Related<TTarget>(unitOfWork, condition), unitOfWork);
-        return query.Select(Selector<TTarget, TMember>(member)).Distinct().ToList().Cast<object?>().ToList();
-    }
-
     // ---------------------------------------------------------------- text without regard to case
 
     /// <summary>Normalizes the expression and rewrites its case-insensitive text tests into regular expressions.</summary>
-    private static Expression Rewrite(Expression expression) => new CaseInsensitiveText().Visit(PredicateNormalizer.Normalize(expression));
+    internal static Expression Rewrite(Expression expression) => new CaseInsensitiveText().Visit(PredicateNormalizer.Normalize(expression));
 
     /// <summary>
     ///     <c>string.Equals(x.Name, v, OrdinalIgnoreCase)</c>, <c>x.Name.Equals/Contains/StartsWith/EndsWith(v, OrdinalIgnoreCase)</c>

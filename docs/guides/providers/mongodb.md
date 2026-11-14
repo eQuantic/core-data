@@ -14,7 +14,7 @@ queries so they can never disagree.
 | UNION | one aggregation with **`$unionWith`** per extra branch; `Distinct` via `$group` |
 | Includes | server-side `$lookup` joins (reference and collection navigations); a shaped include runs its `$match`/`$sort`/`$skip`/`$limit` inside a `$lookup` pipeline (MongoDB 5.0+); every join reads the collection the unit of work keeps the related type in, an override of `CollectionName<TEntity>()` included |
 | Read shapes | relation counts as `$lookup` + `$count`, nulls placed against MongoDB's order with an is-null flag, `$skip`/`$limit` pages without a count, distinct values via `$group` — see [Querying](../querying/includes.md) |
-| Filters across relations | the related keys resolved first — one aggregation per test over the related collection (`$match`, `$group` on the key), inside the open transaction's session — then `$in`/`$nin`, in reads, counts and set-based writes — see [Relations and text in filters](../querying/predicates.md) |
+| Filters across relations | the related keys resolved first — one aggregation per test over the related collection (`$match`, `$group` on the key), inside the open transaction's session — then `$in`/`$nin`; past 10,000 keys or 1 MiB of them, a `$lookup` in the read's own aggregation, and a set-based write runs over the matching ids in batches — see [below](#filters-across-relations-in-or-lookup) and [Relations and text in filters](../querying/predicates.md) |
 | Text ignoring case | an escaped, anchored, case-insensitive regular expression (`/^…\z/i`); `ToLower() == v` keeps C#'s meaning (a value with an upper-case letter matches nothing) |
 | Set-based writes | native operators: `$set`, `$inc`, `$mul`, `$push`, `$addToSet`, `$pull` |
 | Concurrency | `[ConcurrencyToken]` → version-filtered conditional replaces/deletes |
@@ -111,6 +111,28 @@ concurrent writer taking a key in between surfaces as MongoDB's transient write 
 `UpdateAndGetAsync` runs `findOneAndUpdate` per matching document. E11000 — from a write, a bulk write
 or a command — is `DuplicateKeyException` naming the index. See
 [Upserts and write outcomes](../writing/upserts.md).
+
+## Filters across relations: `$in` or `$lookup`
+
+A filter that crosses a relation (`x.Mentions.Any(m => m.UserId == u)`, `x.Repository.WorkspaceId == w`,
+`x.Container == null`) first reads the distinct keys of the related documents that meet it — one
+aggregation, inside the open transaction's session, through the asynchronous API with the read's
+cancellation token (the synchronous reads use the synchronous API). Which form the test then takes
+depends on how many keys that read finds:
+
+- **Up to 10,000 keys and 1 MiB of them**: an `$in` over them (`$nin` negated) in the read's
+  `$match`, so the owner's key is matched through its own index.
+- **Past either bound**: the key read stops there (the keys are never all held), and the test runs
+  in the read's own aggregation instead — a `$lookup` of one related document meeting the condition
+  (and its type's global filter), correlated by the owner's key and the related key, whose presence
+  is the test's answer (MongoDB 5.0 or later). An `$in` past 16 MB would not even reach the server;
+  the `$lookup` has no such bound, and costs a lookup per owner document that reaches it — an index
+  on the related key (`x.ItemId` for a collection) keeps each to one seek.
+- **A set-based write past the bound** (`UpdateManyAsync`, `DeleteManyAsync`, `UpdateAndGetAsync`):
+  a write's filter cannot hold a `$lookup`, so one aggregation that holds it reads the ids of the
+  documents the filter matches, with each relation's answer for each, and the write runs over them in
+  batches of 10,000 ids or 1 MiB, each filtered on its ids and on the rest of the filter again. The
+  relations are taken as they held when they were read, as the keys of the `$in` form are.
 
 ## Embedded vs referenced
 

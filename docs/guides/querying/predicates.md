@@ -45,7 +45,7 @@ filtered as one (`x.Address.City == …`). Both entities are registered in the m
 | Store | A read or a count | A set-based write |
 |---|---|---|
 | PostgreSQL, SQL Server, MySQL, MariaDB | a **correlated `EXISTS`** (`NOT EXISTS` for `!Any`, `All` and `== null`) in the statement's own `WHERE` — one statement, inside the transaction | the same `EXISTS` in the `UPDATE`/`DELETE` — one statement; on MySQL and MariaDB, when the relation reads the written table itself, the matching keys are read first with `FOR UPDATE` and the write runs by them (below) |
-| MongoDB | the **related keys resolved first**: one aggregation over the related collection per test (`$match`, then `$group` on the key), inside the open transaction's session, then `$in` (`$nin`) over them | the same: the keys first, then `updateMany`/`deleteMany`/`findOneAndUpdate` filtered by them — a write's filter cannot hold a `$lookup` |
+| MongoDB | the **related keys resolved first**: one aggregation over the related collection per test (`$match`, then `$group` on the key), inside the open transaction's session, then `$in` (`$nin`) over them; past 10,000 keys or 1 MiB of them, a **`$lookup`** of a related document meeting the test, in the read's own aggregation | the same: the keys first, then `updateMany`/`deleteMany`/`findOneAndUpdate` filtered by them — a write's filter cannot hold a `$lookup`, so past the bound one aggregation with it reads the matching ids, and the write runs over them in batches |
 | Cosmos DB | the **related keys resolved first**: one `SELECT DISTINCT VALUE` over the related container per test (cross-partition), then `IN` (`NOT IN`) over them | the same; each item is then patched (or deleted) **under the filter holding those keys** |
 | Cassandra | the **related keys resolved first**, through the same planner and gates as any read and **under the read's own opt-ins** (`SELECT DISTINCT` when the key is the related table's partition key), then `IN` over them where the table's key serves it — `NOT IN` and anything else CQL cannot express runs client-side behind `.AllowClientEvaluation()` | the keys first, then the write finds its rows by them as by any key: a write carries no opt-ins, so its related read has to be one the table serves natively, and the filter has to address the written table's partition; a negated test leaves out, of the rows the rest of the filter finds, those whose key the related read returned, and writes each other row by its full key in a lightweight transaction |
 
@@ -70,7 +70,10 @@ explain runs nothing).
 - **MongoDB, Cosmos DB and Cassandra** read the related keys **before** the filtered read or write,
   and **every key travels** into its `IN` — a test that matches many related rows makes a long list.
   `!x.Runs.Any()` and `x.Container == null` read the keys of *every* related row (over the whole
-  collection, container or table), so they cost a full read of the related keys.
+  collection, container or table), so they cost a full read of the related keys. MongoDB stops reading
+  them past 10,000 keys or 1 MiB and joins the related documents with a `$lookup` in the read's own
+  aggregation instead, one lookup per owner document — index the related key, as on the relational
+  stores (see [MongoDB](../providers/mongodb.md#filters-across-relations-in-or-lookup)).
 - The keys and the read are **two operations**, not one snapshot: a related row written between them
   is seen or not by chance. MongoDB reads both inside the open transaction's session, so inside an
   explicit transaction they are one snapshot; Cosmos DB and Cassandra have no read transaction to

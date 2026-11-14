@@ -145,8 +145,7 @@ internal static class MongoInclude
         });
 
     private static BsonDocument RenderFilter(Type elementType, System.Linq.Expressions.LambdaExpression predicate) =>
-        (BsonDocument)typeof(MongoStages).GetMethod(nameof(MongoStages.Filter))!
-            .MakeGenericMethod(elementType).Invoke(null, [predicate])!;
+        MongoStages.Filter(elementType, predicate);
 
     private static IReadOnlyList<BsonDocument> SortStages(Type elementType, IReadOnlyList<MemorySort> sorts) =>
         sorts.Count == 0

@@ -155,19 +155,22 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
     /// <inheritdoc />
     public async Task<TEntity?> GetAsync(TKey id, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Windowed(options, 1, query => query.Where(IdPredicate(id))).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, 1, cancellationToken, query => query.Where(IdPredicate(id))).ConfigureAwait(false))
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetAllAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Windowed(options, null).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, null, cancellationToken).ConfigureAwait(false)).ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> GetFilteredAsync(Expression<Func<TEntity, bool>> filter, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Windowed(options, null, query => query.Where(NotNull(filter))).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, null, cancellationToken, query => query.Where(NotNull(filter))).ConfigureAwait(false))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IEnumerable<TEntity>> AllMatchingAsync(ISpecification<TEntity> specification, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Windowed(options, null, query => query.Where(NotNull(specification).SatisfiedBy())).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, null, cancellationToken, query => query.Where(NotNull(specification).SatisfiedBy())).ConfigureAwait(false))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     /// <remarks>
@@ -176,26 +179,28 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     ///     related document travels.
     /// </remarks>
     public async Task<IEnumerable<TResult>> GetMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        await Project(Windowed(options, null), NotNull(map)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await Project(await WindowedAsync(options, null, cancellationToken).ConfigureAwait(false), NotNull(map))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TEntity?> GetFirstAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        await Windowed(options, 1).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, 1, cancellationToken).ConfigureAwait(false)).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TResult?> GetFirstMappedAsync<TResult>(Expression<Func<TEntity, TResult>> map, QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        await Project(Windowed(options, 1), NotNull(map)).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        await Project(await WindowedAsync(options, 1, cancellationToken).ConfigureAwait(false), NotNull(map))
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TEntity?> GetSingleAsync(QueryOptions<TEntity> options, CancellationToken cancellationToken = default) =>
-        await Windowed(options, 2).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        await (await WindowedAsync(options, 2, cancellationToken).ConfigureAwait(false)).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<PagedResult<TEntity>> GetPagedAsync(PageRequest page, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default)
     {
         NotNull(page);
         ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
-        var query = Query(options);
+        var query = await QueryAsync(options, cancellationToken: cancellationToken).ConfigureAwait(false);
         var total = await query.LongCountAsync(cancellationToken).ConfigureAwait(false);
         var items = await Ordered(query, options).Skip(page.Skip).Take(page.Take).ToListAsync(cancellationToken).ConfigureAwait(false);
         return new PagedResult<TEntity>(items, total, page.PageIndex, page.PageSize);
@@ -206,63 +211,64 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     {
         NotNull(page);
         ReadShapes.RefuseRowWindow(options, "GetPagedAsync");
-        var query = Query(options);
+        var query = await QueryAsync(options, cancellationToken: cancellationToken).ConfigureAwait(false);
         var total = await query.LongCountAsync(cancellationToken).ConfigureAwait(false);
         var items = await Project(Ordered(query, options).Skip(page.Skip).Take(page.Take), NotNull(map)).ToListAsync(cancellationToken).ConfigureAwait(false);
         return new PagedResult<TResult>(items, total, page.PageIndex, page.PageSize);
     }
 
     /// <inheritdoc />
-    public Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "CountAsync").LongCountAsync(cancellationToken);
+    public async Task<long> CountAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "CountAsync", cancellationToken).ConfigureAwait(false)).LongCountAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "AnyAsync").AnyAsync(cancellationToken);
+    public async Task<bool> AnyAsync(QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "AnyAsync", cancellationToken).ConfigureAwait(false)).AnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<bool> AllAsync(Expression<Func<TEntity, bool>> predicate, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        !await Whole(options, "AllAsync", query => query.Where(Negate(NotNull(predicate)))).AnyAsync(cancellationToken).ConfigureAwait(false);
+        !await (await WholeAsync(options, "AllAsync", cancellationToken, query => query.Where(Negate(NotNull(predicate)))).ConfigureAwait(false))
+            .AnyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<int> SumAsync(Expression<Func<TEntity, int>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<int?> SumAsync(Expression<Func<TEntity, int?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<long> SumAsync(Expression<Func<TEntity, long>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<long?> SumAsync(Expression<Func<TEntity, long?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<double> SumAsync(Expression<Func<TEntity, double>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<double?> SumAsync(Expression<Func<TEntity, double?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<float> SumAsync(Expression<Func<TEntity, float>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<float?> SumAsync(Expression<Func<TEntity, float?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<decimal> SumAsync(Expression<Func<TEntity, decimal>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
-        Whole(options, "SumAsync").SumAsync(NotNull(selector), cancellationToken);
+    public async Task<decimal?> SumAsync(Expression<Func<TEntity, decimal?>> selector, QueryOptions<TEntity>? options = null, CancellationToken cancellationToken = default) =>
+        await (await WholeAsync(options, "SumAsync", cancellationToken).ConfigureAwait(false)).SumAsync(NotNull(selector), cancellationToken).ConfigureAwait(false);
 
     // ---------------------------------------------------------------- min / max / average
 
@@ -294,7 +300,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         var aggregate = Expression.Lambda<Func<IGrouping<int, TEntity>, TAggregated>>(
             Expression.Call(typeof(Enumerable), method, typeArguments, grouping, selector), grouping);
 
-        return await Whole(options, "an aggregate").GroupBy(_ => 1).Select(aggregate)
+        return await (await WholeAsync(options, "an aggregate", cancellationToken).ConfigureAwait(false)).GroupBy(_ => 1).Select(aggregate)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -331,7 +337,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
             GroupInterpreter.InterpretHaving(having, group.Key);
         }
 
-        var grouped = Whole(options, "GroupByAsync").GroupBy(keySelector);
+        var grouped = (await WholeAsync(options, "GroupByAsync", cancellationToken).ConfigureAwait(false)).GroupBy(keySelector);
         if (having is not null)
         {
             grouped = grouped.Where(having);
@@ -362,11 +368,9 @@ public abstract class MongoReadRepository<TEntity, TKey> :
                 "Keyset paging orders by the id; custom sortings are not supported — use GetPagedAsync, or sort each page client-side.");
         }
 
-        var query = Whole(options, "GetPageAsync");
-        if (continuationToken is not null)
-        {
-            query = query.Where(IdAfter(ReadToken(continuationToken)));
-        }
+        var after = continuationToken is null ? null : IdAfter(ReadToken(continuationToken));
+        var query = await WholeAsync(options, "GetPageAsync", cancellationToken,
+            after is null ? null : source => source.Where(after)).ConfigureAwait(false);
 
         var items = await Ordered(query, options).Take(pageSize).ToListAsync(cancellationToken).ConfigureAwait(false);
         var token = items.Count < pageSize ? null : WriteToken(IdValue(items[^1]));
@@ -417,7 +421,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         // Streams through the driver cursor: one batch in memory at a time.
-        var source = (IAsyncCursorSource<TEntity>)Whole(options, "GetStreamAsync");
+        var source = (IAsyncCursorSource<TEntity>)await WholeAsync(options, "GetStreamAsync", cancellationToken).ConfigureAwait(false);
         using var cursor = await source.ToCursorAsync(cancellationToken).ConfigureAwait(false);
         while (await cursor.MoveNextAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -468,7 +472,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
             unresolved = unresolved.Where(globalFilter);
         }
 
-        notes.AddRange(MongoPredicates.Notes(unresolved.Expression));
+        notes.AddRange(MongoPredicates.Notes(unresolved.Expression, UnitOfWork));
         var statement = shaped.ToString() ?? string.Empty;
         return new QueryPlan("MongoDb", statement, [], residual: null,
             serverSideFiltering: false, clientEvaluation: false, partitionScoped: false, notes);
@@ -487,7 +491,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     {
         NotNull(selector);
         ReadShapes.RefuseForDistinct(options);
-        var query = Query(options, filter is null ? null : source => source.Where(filter));
+        var query = await QueryAsync(options, filter is null ? null : source => source.Where(filter), cancellationToken).ConfigureAwait(false);
         return await query.Select(selector).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -515,6 +519,19 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     protected IQueryable<TEntity> Query(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null) =>
         Shaped(options, extra, null, null);
 
+    /// <summary>
+    ///     Builds the shaped query for the supplied options, optionally with an extra transform, for an asynchronous read:
+    ///     what <see cref="Query" /> builds, the keys a filter across a relation stands for read asynchronously and
+    ///     cancelled by <paramref name="cancellationToken" />.
+    /// </summary>
+    /// <param name="options">The query options, or <c>null</c>.</param>
+    /// <param name="extra">An optional extra transform (e.g. an id or ad-hoc filter).</param>
+    /// <param name="cancellationToken">Cancels the reads the query needs before it runs.</param>
+    /// <returns>The shaped query.</returns>
+    protected Task<IQueryable<TEntity>> QueryAsync(QueryOptions<TEntity>? options,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null, CancellationToken cancellationToken = default) =>
+        ShapedAsync(options, extra, null, null, cancellationToken);
+
     /// <summary>The shaped query for a read over every matching row, which refuses the options' <c>Skip</c>/<c>Take</c>.</summary>
     private IQueryable<TEntity> Whole(QueryOptions<TEntity>? options, string read,
         Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
@@ -523,12 +540,28 @@ public abstract class MongoReadRepository<TEntity, TKey> :
         return Query(options, extra);
     }
 
+    /// <summary>What <see cref="Whole" /> builds, for an asynchronous read.</summary>
+    private Task<IQueryable<TEntity>> WholeAsync(QueryOptions<TEntity>? options, string read, CancellationToken cancellationToken,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
+    {
+        ReadShapes.RefuseRowWindow(options, read);
+        return QueryAsync(options, extra, cancellationToken);
+    }
+
     /// <summary>The shaped query for a read returning rows: the options' <c>Skip</c>/<c>Take</c> within the read's own limit.</summary>
     private IQueryable<TEntity> Windowed(QueryOptions<TEntity>? options, int? limit,
         Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
     {
         var (offset, effective) = ReadShapes.Window(options, limit);
         return Shaped(options, extra, offset, effective);
+    }
+
+    /// <summary>What <see cref="Windowed" /> builds, for an asynchronous read.</summary>
+    private Task<IQueryable<TEntity>> WindowedAsync(QueryOptions<TEntity>? options, int? limit, CancellationToken cancellationToken,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra = null)
+    {
+        var (offset, effective) = ReadShapes.Window(options, limit);
+        return ShapedAsync(options, extra, offset, effective, cancellationToken);
     }
 
     /// <summary>
@@ -580,6 +613,28 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     private IQueryable<TEntity> Shaped(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra,
         int? offset, int? limit, bool explaining = false)
     {
+        // The filters as the driver reads them: an array's Contains normalized, text without regard to case as an
+        // escaped regular expression, and each test across a relation resolved — the related keys read first, in the
+        // session, through the driver's synchronous API, then an $in over them, or a $lookup when they are too many to
+        // carry (an explain runs nothing, and shows the keys empty).
+        var query = Filtered(options, extra);
+        query = explaining
+            ? query.Provider.CreateQuery<TEntity>(MongoPredicates.Unresolved(query.Expression))
+            : MongoPredicates.Ready(query, UnitOfWork);
+        return Finished(query, options, offset, limit);
+    }
+
+    /// <summary>What <see cref="Shaped" /> builds, for an asynchronous read: the related keys read asynchronously, with the token.</summary>
+    private async Task<IQueryable<TEntity>> ShapedAsync(QueryOptions<TEntity>? options,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra, int? offset, int? limit, CancellationToken cancellationToken)
+    {
+        var query = await MongoPredicates.ReadyAsync(Filtered(options, extra), UnitOfWork, cancellationToken).ConfigureAwait(false);
+        return Finished(query, options, offset, limit);
+    }
+
+    /// <summary>The collection's query in the session, shaped by the options, the global filter and the extra transform.</summary>
+    private IQueryable<TEntity> Filtered(QueryOptions<TEntity>? options, Func<IQueryable<TEntity>, IQueryable<TEntity>>? extra)
+    {
         // Reads join the active transaction session, so a query inside a transaction sees its own writes.
         var session = UnitOfWork.Session;
         var query = (session is null ? Collection.AsQueryable() : Collection.AsQueryable(session)).ApplyQueryOptions(options);
@@ -588,18 +643,12 @@ public abstract class MongoReadRepository<TEntity, TKey> :
             query = query.Where(global);
         }
 
-        if (extra is not null)
-        {
-            query = extra(query);
-        }
+        return extra is null ? query : extra(query);
+    }
 
-        // The filters as the driver reads them: an array's Contains normalized, text without regard to case as an
-        // escaped regular expression, and each test across a relation resolved into the related keys — read first, in
-        // the session, through the driver's synchronous API (an explain runs nothing, and shows the keys empty).
-        query = explaining
-            ? query.Provider.CreateQuery<TEntity>(MongoPredicates.Unresolved(query.Expression))
-            : MongoPredicates.Ready(query, UnitOfWork);
-
+    /// <summary>The window and the includes, over a query whose filters are ready.</summary>
+    private IQueryable<TEntity> Finished(IQueryable<TEntity> query, QueryOptions<TEntity>? options, int? offset, int? limit)
+    {
         // The window applies before the includes, so the joins run over the page only; a skip orders by the id when
         // the read has no order of its own, so pages are stable.
         if (offset is not null)
