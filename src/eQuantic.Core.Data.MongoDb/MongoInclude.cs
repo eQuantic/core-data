@@ -52,7 +52,7 @@ internal static class MongoInclude
             }
 
             query = shapes is not null && shapes.TryGetValue(path.Trim(), out var shape)
-                ? ApplyShaped(query, path.Trim(), shape)
+                ? ApplyShaped(query, unitOfWork, path.Trim(), shape)
                 : ApplyPath(query, unitOfWork, path.Trim());
         }
 
@@ -71,8 +71,9 @@ internal static class MongoInclude
     /// <summary>
     ///     The <c>$lookup</c> of a relation count: the related documents matching the filter, correlated by the foreign
     ///     key, counted inside the lookup (<c>$count</c>) into <paramref name="field" /> — nothing but the count travels.
+    ///     The related documents are read from the collection the unit of work keeps them in.
     /// </summary>
-    public static BsonDocument CountLookup(Type parentType, RelationCount count, string field)
+    public static BsonDocument CountLookup(MongoUnitOfWork unitOfWork, Type parentType, RelationCount count, string field)
     {
         var foreignKey = ForeignKey(count.ElementType, parentType.Name)
                          ?? throw new InvalidOperationException(
@@ -84,10 +85,11 @@ internal static class MongoInclude
         }
 
         pipeline.Add(new BsonDocument("$count", "n"));
-        return Lookup(parentType, PrimaryKey(parentType), count.ElementType, foreignKey, pipeline, field);
+        return Lookup(unitOfWork, parentType, PrimaryKey(parentType), count.ElementType, foreignKey, pipeline, field);
     }
 
-    private static IQueryable<TEntity> ApplyShaped<TEntity>(IQueryable<TEntity> query, string path, IncludeShape shape)
+    private static IQueryable<TEntity> ApplyShaped<TEntity>(IQueryable<TEntity> query, MongoUnitOfWork unitOfWork, string path,
+        IncludeShape shape)
         where TEntity : class
     {
         var navigation = typeof(TEntity).GetProperty(path, Members)
@@ -126,15 +128,16 @@ internal static class MongoInclude
             pipeline.Add(new BsonDocument("$limit", take));
         }
 
-        var lookup = Lookup(typeof(TEntity), PrimaryKey(typeof(TEntity)), elementType, foreignKey, pipeline, target);
+        var lookup = Lookup(unitOfWork, typeof(TEntity), PrimaryKey(typeof(TEntity)), elementType, foreignKey, pipeline, target);
         return MongoStages.Append(query, [lookup]);
     }
 
-    private static BsonDocument Lookup(Type parentType, PropertyInfo localKey, Type elementType, PropertyInfo foreignKey,
-        BsonArray pipeline, string target) =>
+    /// <summary>A <c>$lookup</c> with a pipeline, from the collection the unit of work keeps the element type in.</summary>
+    private static BsonDocument Lookup(MongoUnitOfWork unitOfWork, Type parentType, PropertyInfo localKey, Type elementType,
+        PropertyInfo foreignKey, BsonArray pipeline, string target) =>
         new("$lookup", new BsonDocument
         {
-            { "from", MongoModeling.CollectionName(elementType) },
+            { "from", unitOfWork.CollectionNameOf(elementType) },
             { "localField", MongoStages.ElementName(parentType, localKey.Name) ?? localKey.Name },
             { "foreignField", MongoStages.ElementName(elementType, foreignKey.Name) ?? foreignKey.Name },
             { "pipeline", pipeline },

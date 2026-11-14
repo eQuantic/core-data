@@ -43,6 +43,16 @@ public abstract partial class MongoUnitOfWork : IQueryableUnitOfWork, IUnionQuer
     internal IMongoCollection<TEntity> GetCollection<TEntity>() =>
         Database.GetCollection<TEntity>(CollectionName<TEntity>());
 
+    private static readonly MethodInfo CollectionNameMethod = typeof(MongoUnitOfWork)
+        .GetMethod(nameof(CollectionName), BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    /// <summary>
+    ///     The collection this unit of work keeps <paramref name="entityType" /> in — its <see cref="CollectionName{TEntity}" />,
+    ///     overridden or not — for the stages that name a collection by type (a <c>$lookup</c>'s <c>from</c>).
+    /// </summary>
+    internal string CollectionNameOf(Type entityType) =>
+        (string)CollectionNameMethod.MakeGenericMethod(entityType).Invoke(this, null)!;
+
     private QueryFilters? _queryFilters;
     private bool _queryFiltersResolved;
     private DataConventions? _conventions;

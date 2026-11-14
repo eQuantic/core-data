@@ -535,7 +535,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
     ///     Applies the map — through the driver's LINQ <c>$project</c>, after a <c>$lookup</c> + <c>$count</c> per relation
     ///     count the map holds, whose results ride beside the document into the projection.
     /// </summary>
-    private static IQueryable<TResult> Project<TResult>(IQueryable<TEntity> query, Expression<Func<TEntity, TResult>> map)
+    private IQueryable<TResult> Project<TResult>(IQueryable<TEntity> query, Expression<Func<TEntity, TResult>> map)
     {
         if (RelationCountInterpreter.Interpret(map, property => MongoInclude.IsRelation(typeof(TEntity), property)) is not { } counted)
         {
@@ -544,7 +544,7 @@ public abstract class MongoReadRepository<TEntity, TKey> :
 
         var fields = counted.Counts.Select((_, index) => "__eq_count" + index).ToList();
         query = MongoStages.Append(query,
-            counted.Counts.Select((count, index) => MongoInclude.CountLookup(typeof(TEntity), count, fields[index])));
+            counted.Counts.Select((count, index) => MongoInclude.CountLookup(UnitOfWork, typeof(TEntity), count, fields[index])));
 
         var carry = new BsonDocument("$project", new BsonDocument
         {
