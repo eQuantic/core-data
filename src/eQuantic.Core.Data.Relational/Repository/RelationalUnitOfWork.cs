@@ -203,7 +203,8 @@ public abstract partial class RelationalUnitOfWork : IQueryableUnitOfWork, IUnio
     /// <summary>
     ///     Runs an immediate write that takes several statements as one atomic unit: inside the open explicit
     ///     transaction when there is one, in a transaction of its own otherwise (committed when the work returns,
-    ///     rolled back when it throws). Commands created meanwhile join it.
+    ///     rolled back when it throws). Commands created meanwhile join it, and the named locks taken for it
+    ///     (<see cref="LockForTransactionAsync" />) end with it.
     /// </summary>
     internal async Task<T> AtomicallyAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken)
     {
@@ -236,8 +237,18 @@ public abstract partial class RelationalUnitOfWork : IQueryableUnitOfWork, IUnio
         }
         finally
         {
-            await _localTransaction.DisposeAsync().ConfigureAwait(false);
-            _localTransaction = null;
+            try
+            {
+                await _localTransaction.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _localTransaction = null;
+
+                // The locks taken for this transaction (an upsert's on its target) end with it, as an explicit
+                // transaction's do.
+                await EndLocalTransactionLocksAsync().ConfigureAwait(false);
+            }
         }
     }
 

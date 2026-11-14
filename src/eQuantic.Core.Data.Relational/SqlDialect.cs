@@ -341,6 +341,30 @@ public abstract class SqlDialect
     public virtual string? GeneratedKeyUpsertValue(string quotedTable, RelationalColumn key, string value) => null;
 
     /// <summary>
+    ///     Whether an upsert that reads its target first (a dialect that does not <see cref="UpsertsInOneStatement" />)
+    ///     takes a named lock on its target (<see cref="NamedLocks" />) before its first read, held until the end of the
+    ///     transaction it runs in: upserts of one target then run one after the other, and upserts of targets whose lock
+    ///     names differ never wait for each other's lock. MySQL and MariaDB need it, since three or more inserts of one
+    ///     key that is not there yet can deadlock in InnoDB, which rolls back a whole transaction to break it. The lock
+    ///     is named by the table and the target's values, a text value keyed as its column compares it
+    ///     (<see cref="UpsertTargetKeysSql" />).
+    /// </summary>
+    public virtual bool LocksUpsertTargets => false;
+
+    /// <summary>
+    ///     For a dialect that <see cref="LocksUpsertTargets" />: the statement answering one row, whose first value is how
+    ///     long the upsert waits for its target's lock, in seconds (NULL waits until it is cancelled), followed, for each
+    ///     text value of the target, by a key that is the same for every two values the column compares equal, so that
+    ///     those values take one lock however they are written (a key may also be shared by values the column tells
+    ///     apart, which then merely wait for each other).
+    /// </summary>
+    /// <param name="quotedTable">The quoted table.</param>
+    /// <param name="quotedColumns">The quoted columns of the target's text values, in order (possibly none).</param>
+    /// <param name="parameters">Their bound values' markers, in the same order.</param>
+    public virtual string UpsertTargetKeysSql(string quotedTable, IReadOnlyList<string> quotedColumns, IReadOnlyList<string> parameters) =>
+        throw new NotSupportedException($"{GetType().Name} takes no lock on an upsert's target.");
+
+    /// <summary>
     ///     The statement that inserts the rows and leaves out the ones whose key or unique key is taken, answering the
     ///     number inserted as a scalar; <c>null</c> when the dialect inserts row by row, discarding only duplicate-key
     ///     errors.

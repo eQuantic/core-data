@@ -1,5 +1,7 @@
 using System.Collections;
+using System.Globalization;
 using System.Linq.Expressions;
+using System.Text;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository;
 
@@ -216,10 +218,11 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     /// <summary>
     ///     Inserts the entity, or updates the row matching it on the target members, atomically, and returns the row as
     ///     stored: one statement where the dialect has one (<c>INSERT … ON CONFLICT</c>, <c>MERGE … WITH (HOLDLOCK)</c>);
-    ///     otherwise a plain read of the target, then the update of the row it found, locked, or the insert — and, when a
-    ///     concurrent insert of the target wins, the update of that row (run again only after a deadlock outside an
-    ///     explicit transaction). On a key the store generates, the row holding the entity's key is updated, and a key no
-    ///     row holds inserts a row the store numbers.
+    ///     otherwise, under the dialect's named lock on the target where it takes one
+    ///     (<see cref="SqlDialect.LocksUpsertTargets" />), a plain read of the target, then the update of the row it found,
+    ///     locked, or the insert — and, when a concurrent insert of the target wins, the update of that row (run again only
+    ///     after a deadlock outside an explicit transaction). On a key the store generates, the row holding the entity's key
+    ///     is updated, and a key no row holds inserts a row the store numbers.
     /// </summary>
     internal async Task<TEntity> UpsertAsync(TEntity entity, IReadOnlyList<string>? on,
         Expression<Func<TEntity, TEntity>>? update, Expression<Func<TEntity, bool>>? conflictFilter,
@@ -306,8 +309,9 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
                                               && !_unitOfWork.InExplicitTransaction)
             {
                 // The store chose this upsert as a deadlock's victim and rolled its own transaction back: it runs again.
-                // Inside an explicit transaction the caller's transaction is what the store rolled back, which no retry
-                // can resume.
+                // (Another upsert of its target waits on the target's lock instead, where the dialect takes one: this is
+                // a writer that is not one.) Inside an explicit transaction the caller's transaction is what the store
+                // rolled back, which no retry can resume.
                 await Task.Delay(Random.Shared.Next(5, 20 * attempt), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not DuplicateKeyException && _dialect.DuplicateKey(exception) is { } duplicate)
@@ -318,18 +322,26 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
     }
 
     /// <summary>
-    ///     One attempt of an upsert by reading, in a transaction (the caller's, or one of its own). The target is read
-    ///     without a lock first: a locking read of a row that is not there locks the gap where it would go, and two such
-    ///     gap locks each block the other's insert — the deadlock InnoDB answers by rolling a transaction back, which inside
-    ///     an explicit transaction is the caller's. A row the plain read finds is read again under a lock (an exclusive lock
-    ///     on a row that exists, which two upserts take in turn) and updated. A row it does not find is inserted; when a
-    ///     concurrent insert of the target wins, the store refuses this one with a duplicate key, which rolls back the
-    ///     statement alone, and the row that won is read under a lock and updated.
+    ///     One attempt of an upsert by reading, in a transaction (the caller's, or one of its own). Where the dialect
+    ///     takes one, the target's named lock comes first (<see cref="LockTargetAsync" />), so no other upsert of the
+    ///     target runs until this transaction ends. The target is read without a row lock first: a locking read of a row
+    ///     that is not there locks the gap where it would go, and two such gap locks (two upserts of different targets
+    ///     that fall in one gap) each block the other's insert — the deadlock InnoDB answers by rolling a transaction
+    ///     back, which inside an explicit transaction is the caller's. A row the plain read finds is read again under a
+    ///     lock and updated. A row it does not find is inserted; when another insert of the target won (one this
+    ///     transaction's snapshot predates, or a writer that is not an upsert), the store refuses this one with a
+    ///     duplicate key, which rolls back the statement alone, and the row that won is read under a lock and updated.
+    ///     <para>
+    ///         Without the named lock, three or more upserts of a target that is not there yet deadlock: the inserts
+    ///         that lose each hold a shared lock on the winner's row and then ask for an exclusive one.
+    ///     </para>
     /// </summary>
     private async Task<TEntity> UpsertOnceAsync(TEntity entity, IReadOnlyList<RelationalColumn> target,
         Expression<Func<TEntity, TEntity>>? update, Expression<Func<TEntity, bool>>? conflictFilter,
         CancellationToken cancellationToken)
     {
+        await LockTargetAsync(entity, target, cancellationToken).ConfigureAwait(false);
+
         var row = await ReadTargetAsync(entity, target, conflictFilter, locking: false, cancellationToken).ConfigureAwait(false) is null
             ? null
             : await ReadTargetAsync(entity, target, conflictFilter, locking: true, cancellationToken).ConfigureAwait(false);
@@ -372,6 +384,142 @@ public sealed class RelationalSet<TEntity> : Data.Repository.ISet<TEntity> where
             $"SELECT {ColumnList} FROM {Table} WHERE {TargetWhere(row, _configuration.Keys, null, storedParameters)}",
             storedParameters, cancellationToken).ConfigureAwait(false);
         return stored[0];
+    }
+
+    /// <summary>
+    ///     Takes the upsert target's named lock for the transaction the upsert runs in (the caller's explicit one, or its
+    ///     own), when the dialect <see cref="SqlDialect.LocksUpsertTargets" />. Upserts of one target then run one after
+    ///     the other, from before their first read to the end of their transactions; upserts of different targets take
+    ///     different locks, as far as the store's text keys tell them apart. A target the store numbers (a generated
+    ///     key) takes none: its insert never meets another's.
+    ///     <para>
+    ///         The name is the table's and the target's values': a text value by the key the store answers for it
+    ///         (<see cref="SqlDialect.UpsertTargetKeysSql" />: the same for every two values its column compares equal),
+    ///         any other value in one invariant form per kind (an <c>int</c> and a <c>long</c> of one number, or
+    ///         <c>1.50m</c> and <c>1.5m</c>, are one value). The wait is the one the store answers with the keys; a lock
+    ///         still held after it fails the upsert with <see cref="TimeoutException" /> before anything is written.
+    ///     </para>
+    /// </summary>
+    private async Task LockTargetAsync(TEntity entity, IReadOnlyList<RelationalColumn> target, CancellationToken cancellationToken)
+    {
+        if (!_dialect.LocksUpsertTargets || (_configuration.KeyIsGenerated && target.SequenceEqual(_configuration.Keys)))
+        {
+            return;
+        }
+
+        var values = target.Select(column => column.Read(entity)).ToList();
+        var texts = Enumerable.Range(0, target.Count).Where(index => values[index] is string or char).ToList();
+        var parameters = new List<object?>();
+        var markers = texts.Select(index => Bind(parameters, values[index] is char character ? character.ToString() : values[index])).ToList();
+        var sql = _dialect.UpsertTargetKeysSql(Table, texts.Select(index => _dialect.Quote(target[index].Name)).ToList(), markers);
+
+        object?[] answer;
+        await using (var command = await _unitOfWork.CommandAsync(sql, parameters, cancellationToken).ConfigureAwait(false))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.FieldCount != texts.Count + 1)
+            {
+                throw new InvalidOperationException(
+                    $"{_dialect.System} answered no wait and keys for the upsert target's lock of '{typeof(TEntity).Name}'.");
+            }
+
+            answer = new object?[reader.FieldCount];
+            reader.GetValues(answer!);
+        }
+
+        var wait = answer[0] is null or DBNull
+            ? Timeout.InfiniteTimeSpan
+            : TimeSpan.FromSeconds(Convert.ToDouble(answer[0], CultureInfo.InvariantCulture));
+        var name = new StringBuilder("eQuantic.Core.Data/upsert");
+        AppendLockPart(name, 't', _configuration.TableName);
+        for (var index = 0; index < target.Count; index++)
+        {
+            var text = texts.IndexOf(index);
+            if (text < 0)
+            {
+                AppendLockValue(name, _dialect.BindValue(values[index]));
+            }
+            else if (answer[text + 1] is { } key and not DBNull)
+            {
+                AppendLockPart(name, 's', key is byte[] bytes
+                    ? Convert.ToHexString(bytes)
+                    : Convert.ToString(key, CultureInfo.InvariantCulture)!);
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"{_dialect.System} answered no key for the value of '{target[index].Property.Name}' in the upsert target's lock.");
+            }
+        }
+
+        try
+        {
+            await _unitOfWork.LockForTransactionAsync(name.ToString(), wait, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException timedOut)
+        {
+            throw new TimeoutException(
+                $"The upsert of '{typeof(TEntity).Name}' waited {wait.TotalSeconds:0.###} s, the store's wait for a row lock, for " +
+                "another upsert of the same target to end its transaction; nothing was written.", timedOut);
+        }
+    }
+
+    /// <summary>One part of a target lock's name: its kind, its length and its text, so no two lists of parts read alike.</summary>
+    private static void AppendLockPart(StringBuilder name, char kind, string text) =>
+        name.Append('/').Append(kind).Append(text.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(text);
+
+    /// <summary>A value of an upsert's target that is not text, as bound, in one invariant form per kind of value.</summary>
+    private static void AppendLockValue(StringBuilder name, object? value)
+    {
+        switch (value)
+        {
+            case null:
+                name.Append("/z");
+                return;
+            case bool flag:
+                AppendLockPart(name, 'n', flag ? "1" : "0");
+                return;
+            case sbyte or byte or short or ushort or int or uint or long or ulong:
+                AppendLockPart(name, 'n', Convert.ToString(value, CultureInfo.InvariantCulture)!);
+                return;
+            case decimal number:
+                AppendLockPart(name, 'n', DecimalText(number));
+                return;
+            case float or double:
+                AppendLockPart(name, 'n', ((IFormattable)value).ToString("R", CultureInfo.InvariantCulture));
+                return;
+            case Guid guid:
+                AppendLockPart(name, 'g', guid.ToString("D"));
+                return;
+            case DateTime moment:
+                AppendLockPart(name, 'd', moment.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff", CultureInfo.InvariantCulture));
+                return;
+            case DateTimeOffset moment:
+                AppendLockPart(name, 'd', moment.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff", CultureInfo.InvariantCulture));
+                return;
+            case byte[] bytes:
+                AppendLockPart(name, 'b', Convert.ToHexString(bytes));
+                return;
+            case string text:
+                // Text the dialect bound for a value that is not text (an enum's label): one value, one text.
+                AppendLockPart(name, 'e', text);
+                return;
+            default:
+                AppendLockPart(name, 'x', value.GetType().FullName + ":" + Convert.ToString(value, CultureInfo.InvariantCulture));
+                return;
+        }
+    }
+
+    /// <summary>A decimal without trailing zeros (<c>1.50</c> and <c>1.5</c> are one number).</summary>
+    private static string DecimalText(decimal number)
+    {
+        var text = number.ToString(CultureInfo.InvariantCulture);
+        if (text.Contains('.', StringComparison.Ordinal))
+        {
+            text = text.TrimEnd('0').TrimEnd('.');
+        }
+
+        return text == "-0" ? "0" : text;
     }
 
     /// <summary>The row the upsert targets, read plainly or under a lock that holds it until the transaction ends.</summary>

@@ -377,4 +377,30 @@ public class MySqlDialect : SqlDialect
     /// <remarks>Errors 1213 (a deadlock: InnoDB rolled the transaction back) and 1205 (a lock wait that timed out).</remarks>
     public override bool IsDeadlock(Exception exception) =>
         exception is MySqlException { ErrorCode: MySqlErrorCode.LockDeadlock or MySqlErrorCode.LockWaitTimeout };
+
+    /// <inheritdoc />
+    /// <remarks><c>GET_LOCK</c>, through <see cref="MySqlNamedLocks" />, released by the engine when the transaction ends.</remarks>
+    public override bool LocksUpsertTargets => true;
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     The wait is the session's <c>innodb_lock_wait_timeout</c>, the wait for the row lock the named lock stands in
+    ///     for. A text value's key is <c>SHA2(WEIGHT_STRING(…), 256)</c> of the value in its column's collation (the type
+    ///     of <c>IF(FALSE, column, value)</c> takes the column's, which outranks a bound value's), without its trailing
+    ///     spaces: a PAD SPACE collation ignores them, while <c>WEIGHT_STRING</c> keeps them, and under a NO PAD one two
+    ///     values that differ only in them merely share a lock. The table is joined on <c>FALSE</c>: none of its rows is
+    ///     read.
+    /// </remarks>
+    public override string UpsertTargetKeysSql(string quotedTable, IReadOnlyList<string> quotedColumns, IReadOnlyList<string> parameters)
+    {
+        if (quotedColumns.Count == 0)
+        {
+            return "SELECT @@innodb_lock_wait_timeout";
+        }
+
+        var keys = quotedColumns.Select((column, index) =>
+            $"SHA2(WEIGHT_STRING(TRIM(TRAILING ' ' FROM IF(FALSE, {quotedTable}.{column}, {parameters[index]}))), 256)");
+        return $"SELECT @@innodb_lock_wait_timeout, {string.Join(", ", keys)} " +
+               $"FROM (SELECT 1 AS {Quote("eqcd_key")}) AS {Quote("eqcd_key")} LEFT JOIN {quotedTable} ON FALSE";
+    }
 }

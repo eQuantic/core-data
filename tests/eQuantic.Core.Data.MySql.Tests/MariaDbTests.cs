@@ -132,6 +132,18 @@ public sealed class MariaDbTests
         WriteOutcomeScenarios.UpsertsInExplicitTransactions(NewScope);
 
     [Test]
+    public Task Ten_concurrent_upserts_of_a_missing_target_in_explicit_transactions_all_succeed() =>
+        WriteOutcomeScenarios.UpsertRaceInExplicitTransactions(NewScope);
+
+    [Test]
+    public Task Ten_concurrent_upserts_of_one_target_written_in_different_cases_take_one_lock() =>
+        WriteOutcomeScenarios.UpsertRaceInExplicitTransactions(NewScope, mixedCase: true);
+
+    [Test]
+    public Task An_upsert_target_lock_is_the_targets_alone_and_ends_with_its_transaction() =>
+        WriteOutcomeScenarios.UpsertTargetLocksAreTheTargetsAlone(NewScope);
+
+    [Test]
     public Task A_bulk_load_of_a_taken_key_inside_a_transaction_writes_nothing() =>
         WriteOutcomeScenarios.BulkInsertOfTakenKeyInsideATransaction(NewScope);
 

@@ -40,12 +40,18 @@ truth lives.
 ## Upserts and write outcomes
 
 `ON DUPLICATE KEY UPDATE` fires on **any** unique key and cannot be told which one is the target, so
-`UpsertAsync` reads the target in a transaction — without a lock first, so that two upserts of a row
-that is not there hold no gap lock to deadlock on — and updates the row it finds under
-`SELECT … FOR UPDATE`, or inserts it; when a concurrent insert of the target wins (error 1062, which
-rolls back that statement alone) it updates the row that won. Outside an explicit transaction it runs
-again when InnoDB picks it as a deadlock victim (1213); inside one, the store rolled the caller's
-transaction back and the error reaches the caller. An upsert on a key the store generates is refused
+`UpsertAsync` works in a transaction (the caller's, or one of its own). It first takes the engine's
+named lock on the target — `GET_LOCK`, named by the table and the target's values (a text value by its
+column's collation, so the values the column compares equal take one lock), hashed to fit MySQL's 64
+characters and its case-insensitive lock names, and released when the transaction ends — so upserts of
+one target run one after another, however many there are and whether or not they run inside explicit
+transactions, while upserts of different targets never wait for each other (save text values that
+differ only in trailing spaces, which share a lock). It then reads the target
+without a row lock, updates the row it finds under `SELECT … FOR UPDATE`, or inserts it; when another
+insert of the target won (error 1062, which rolls back that statement alone) it updates the row that
+won. The wait for the lock is the session's `innodb_lock_wait_timeout`, then `TimeoutException`. Outside
+an explicit transaction it also runs again when InnoDB picks it as a deadlock victim (1213) against a
+writer that is not an upsert. An upsert on a key the store generates takes no lock; it is refused
 on MySQL, which cannot hand that key back, and runs on MariaDB, with `RETURNING`. `InsertManyAsync(…, skipDuplicates: true)` inserts row by row in one
 transaction, discarding only error 1062; `UpdateAndGetAsync` locks the matching rows, updates them and
 reads them back in one transaction (neither engine has `RETURNING` for an `UPDATE`). The data source

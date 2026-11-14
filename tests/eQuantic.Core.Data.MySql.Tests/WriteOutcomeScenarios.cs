@@ -636,6 +636,127 @@ internal static class WriteOutcomeScenarios
     }
 
     /// <summary>
+    ///     Ten upserts of one target that is not there yet, at the same time, each inside an explicit transaction of its
+    ///     own, round after round: every one succeeds (none is rolled back as a deadlock's victim), one row is left, it
+    ///     counts one insert and nine updates, and it holds the value one of them wrote. The names are written in
+    ///     different letter cases when <paramref name="mixedCase" /> is set: the column's collation compares them equal,
+    ///     so they are one target, and they take one lock.
+    /// </summary>
+    public static async Task UpsertRaceInExplicitTransactions(Func<IServiceScope> newScope, bool mixedCase = false)
+    {
+        if (mixedCase)
+        {
+            using var scope = newScope();
+            var configuration = Resolve<Relational.RelationalModel>(scope).For(typeof(Secret));
+            await using var command = Resolve<System.Data.Common.DbDataSource>(scope).CreateCommand(
+                "SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() " +
+                $"AND TABLE_NAME = '{configuration.TableName}' AND COLUMN_NAME = '{configuration.ColumnFor(nameof(Secret.Name))!.Name}'");
+            Assert.That(await command.ExecuteScalarAsync() as string, Does.EndWith("_ci"),
+                "the scenario needs a column that compares letter case as one");
+        }
+
+        const int racers = 10;
+        for (var round = 0; round < 5; round++)
+        {
+            var workspace = Guid.NewGuid();
+            var written = Enumerable.Range(0, racers).Select(racer => $"v{racer}").ToList();
+            var scopes = Enumerable.Range(0, racers).Select(_ => newScope()).ToList();
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            try
+            {
+                var tasks = scopes.Select((scope, racer) => Task.Run(async () =>
+                {
+                    var unitOfWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(scope);
+                    await unitOfWork.BeginTransactionAsync();
+                    await start.Task;
+                    var name = mixedCase && racer % 2 == 1 ? "RACE" : mixedCase && racer % 3 == 0 ? "Race" : "race";
+                    var value = written[racer];
+                    await Resolve<IUpsertRepository<Secret, Guid>>(scope).UpsertAsync(
+                        new Secret { WorkspaceId = workspace, Name = name, Value = value },
+                        x => new { x.WorkspaceId, x.Name }, x => new Secret { Value = value, Uses = x.Uses + 1 });
+                    await unitOfWork.CommitTransactionAsync();
+                })).ToList();
+                start.SetResult();
+                await Task.WhenAll(tasks);
+            }
+            finally
+            {
+                scopes.ForEach(scope => scope.Dispose());
+            }
+
+            using var check = newScope();
+            var rows = (await Repo<Secret>(check).GetFilteredAsync(x => x.WorkspaceId == workspace)).ToList();
+            Assert.That(rows, Has.Count.EqualTo(1), $"round {round}: one row");
+            Assert.That(rows[0].Uses, Is.EqualTo(racers - 1), $"round {round}: one insert (Uses = 0) and nine updates, one after another");
+            Assert.That(written, Does.Contain(rows[0].Value), $"round {round}: the value one of the upserts wrote");
+        }
+    }
+
+    /// <summary>
+    ///     The lock an upsert takes on its target is the target's alone, and it lasts as long as the transaction: with
+    ///     a first upsert's transaction still open, an upsert of another target in another open transaction finishes at
+    ///     once, while one of the same target waits for the first transaction to end, and then updates the row it
+    ///     committed. A lock taken by an upsert outside an explicit transaction, or inside one rolled back, ends with its
+    ///     transaction: the next upsert of that target does not wait, although the units of work that took them live on.
+    /// </summary>
+    public static async Task UpsertTargetLocksAreTheTargetsAlone(Func<IServiceScope> newScope)
+    {
+        var workspace = Guid.NewGuid();
+        using var first = newScope();
+        using var second = newScope();
+        using var third = newScope();
+        var firstWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(first);
+        var secondWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(second);
+        var thirdWork = (RelationalUnitOfWork)Resolve<IUnitOfWork>(third);
+
+        Task<Secret> Upsert(IServiceScope scope, string name, string value) =>
+            Resolve<IUpsertRepository<Secret, Guid>>(scope).UpsertAsync(new Secret { WorkspaceId = workspace, Name = name, Value = value },
+                x => new { x.WorkspaceId, x.Name }, x => new Secret { Value = value, Uses = x.Uses + 1 });
+
+        await firstWork.BeginTransactionAsync();
+        await Upsert(first, "a", "first");
+
+        await secondWork.BeginTransactionAsync();
+        var other = Upsert(second, "b", "second");
+        Assert.That(await Task.WhenAny(other, Task.Delay(TimeSpan.FromSeconds(5))), Is.SameAs(other),
+            "another target does not wait for the first transaction");
+        await other;
+
+        await thirdWork.BeginTransactionAsync();
+        var same = Upsert(third, "a", "third");
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        Assert.That(same.IsCompleted, Is.False, "the same target waits while the first transaction is open");
+
+        await firstWork.CommitTransactionAsync();
+        Assert.That(await Task.WhenAny(same, Task.Delay(TimeSpan.FromSeconds(10))), Is.SameAs(same),
+            "the same target goes on once the first transaction ended");
+        var updated = await same;
+        Assert.That((updated.Value, updated.Uses), Is.EqualTo(("third", 1)), "it updated the row the first transaction committed");
+        await secondWork.CommitTransactionAsync();
+        await thirdWork.CommitTransactionAsync();
+
+        // Outside an explicit transaction, the upsert's own transaction ends its lock; the unit of work lives on.
+        await Upsert(first, "c", "outside");
+        await secondWork.BeginTransactionAsync();
+        var afterOutside = Upsert(second, "c", "inside");
+        Assert.That(await Task.WhenAny(afterOutside, Task.Delay(TimeSpan.FromSeconds(5))), Is.SameAs(afterOutside),
+            "the lock of an upsert outside an explicit transaction ended with its own transaction");
+        await afterOutside;
+        await secondWork.CommitTransactionAsync();
+
+        // A rolled-back transaction ends its lock too, and its row was never written.
+        await thirdWork.BeginTransactionAsync();
+        await Upsert(third, "d", "rolled back");
+        await thirdWork.RollbackTransactionAsync();
+        await firstWork.BeginTransactionAsync();
+        var afterRollback = Upsert(first, "d", "after");
+        Assert.That(await Task.WhenAny(afterRollback, Task.Delay(TimeSpan.FromSeconds(5))), Is.SameAs(afterRollback),
+            "the lock of a rolled-back transaction ended with it");
+        Assert.That((await afterRollback).Uses, Is.EqualTo(0), "the rolled-back insert left nothing: this one inserted");
+        await firstWork.CommitTransactionAsync();
+    }
+
+    /// <summary>
     ///     A bulk load of a taken key inside an explicit transaction fails, and none of its rows is written when the
     ///     transaction commits: the load is whole or not at all there too.
     /// </summary>

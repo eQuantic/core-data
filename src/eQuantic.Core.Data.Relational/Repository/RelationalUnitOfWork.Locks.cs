@@ -34,6 +34,57 @@ public abstract partial class RelationalUnitOfWork : ILockingUnitOfWork
             cancellationToken);
     }
 
+    /// <summary>
+    ///     Acquires <paramref name="name" /> for the transaction the unit of work's statements run in now: the explicit
+    ///     one, or the transaction of its own an immediate write opened (<see cref="AtomicallyAsync{T}" />). Either way the
+    ///     lock is taken on the transaction's connection and released when that transaction ends, committed or rolled
+    ///     back, as a lock taken inside an explicit transaction is.
+    /// </summary>
+    /// <param name="name">The lock's name.</param>
+    /// <param name="timeout">How long to wait (<see cref="Timeout.InfiniteTimeSpan" /> waits until cancelled).</param>
+    /// <param name="cancellationToken">Cancels the wait.</param>
+    /// <exception cref="TimeoutException">Another holder kept the lock for the whole timeout.</exception>
+    internal async Task LockForTransactionAsync(string name, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var mechanism = Dialect.NamedLocks ?? throw new NotSupportedException(
+            $"{Dialect.GetType().Name} declares no named-lock mechanism (SqlDialect.NamedLocks); this engine cannot hold a named lock.");
+        if (_transaction is null && _localTransaction is null)
+        {
+            throw new InvalidOperationException("A lock for the transaction is taken only while a transaction is open.");
+        }
+
+        _namedLocks ??= new NamedLockSet(Dialect.System,
+            ServiceProvider.GetService(typeof(NamedLockOptions)) as NamedLockOptions, CommandLogger);
+
+        // Set before the wait, so the immediate write's transaction ends whatever the wait took (a lock taken while
+        // the wait was being cancelled is released by the set itself).
+        _localTransactionLocks |= _transaction is null;
+
+        // Held by the transaction, not by the handle: disposing it would change nothing, and the transaction's end
+        // releases the lock.
+        _ = await _namedLocks.AcquireAsync(name, timeout, inTransaction: true,
+            () => new TransactionLockAttempt(this, mechanism, name), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether a lock was taken for the transaction of an immediate write (<see cref="LockForTransactionAsync" />).</summary>
+    private bool _localTransactionLocks;
+
+    /// <summary>
+    ///     Ends the locks taken for the transaction of an immediate write, once that transaction is over and no longer
+    ///     bound to the commands (a lock released by statement, MySQL's <c>RELEASE_LOCK</c>, runs outside it).
+    /// </summary>
+    private Task EndLocalTransactionLocksAsync()
+    {
+        if (!_localTransactionLocks)
+        {
+            return Task.CompletedTask;
+        }
+
+        _localTransactionLocks = false;
+        return EndTransactionLocksAsync();
+    }
+
     /// <summary>Ends the acquisitions made inside the transaction that just ended, releasing what nothing else holds.</summary>
     private Task EndTransactionLocksAsync() => _namedLocks?.TransactionEndedAsync() ?? Task.CompletedTask;
 
