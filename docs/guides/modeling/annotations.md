@@ -74,7 +74,7 @@ message — instead of at model build:
 | `EQD008` | `[SearchIndex]` on a non-string member |
 | `EQD009` | `[Counter]` on a non-integral member |
 | `EQD010` | `[EntityKey(Generated = true)]` on a type identity cannot generate (non-integral) |
-| `EQD011` | an empty storage name on `[Entity]` / `[StoredAs]` / `[EnumType]` |
+| `EQD011` | an empty or whitespace-only storage name on `[Entity]` / `[StoredAs]` / `[EnumType]` |
 | `EQD012` | `[StoreGenerated]` on a member no store generates in that kind (a sequence numbers an `int`, `long` or `short`; the clock stamps a `DateTime` or `DateTimeOffset`) |
 | `EQD013` | `[StoreGenerated]` on the key (declare `[EntityKey(Generated = true)]`) or on the concurrency token |
 | `EQD014` | an `[EnumType]` enum with an empty label, or a label naming two members |

@@ -241,6 +241,31 @@ public sealed class ModelingAnalyzerTests
         new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(1).WithArguments("Name", "StoredAs"));
 
     [Test]
+    public Task EQD011_reports_whitespace_only_storage_names_on_every_attribute() => Verify("""
+        using eQuantic.Core.Data.Modeling;
+
+        [{|#0:Entity("   ")|}]
+        public sealed class Order
+        {
+            [{|#1:StoredAs(" ")|}] public string Name { get; set; } = "";
+            [{|#2:StoredAs("\t")|}] public string Code { get; set; } = "";
+            [StoredAs(" note ")] public string Note { get; set; } = "";
+        }
+
+        [{|#3:EnumType(" ")|}]
+        public enum Channel { Email, Sms }
+
+        [Entity("orders_archive")]
+        public sealed class ArchivedOrder
+        {
+        }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(0).WithArguments("Order", "Entity"),
+        new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(1).WithArguments("Name", "StoredAs"),
+        new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(2).WithArguments("Code", "StoredAs"),
+        new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(3).WithArguments("Channel", "EnumType"));
+
+    [Test]
     public Task Nullable_token_types_unwrap_before_the_check() => Verify("""
         using eQuantic.Core.Data.Modeling;
 

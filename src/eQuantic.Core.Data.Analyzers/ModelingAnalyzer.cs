@@ -61,7 +61,7 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
         {
             switch (Name(attribute))
             {
-                case "EntityAttribute" when Text(attribute, 0) is { Length: 0 }:
+                case "EntityAttribute" when IsBlank(attribute):
                     context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EmptyStorageName,
                         Location(attribute, type), type.Name, "Entity"));
                     break;
@@ -144,7 +144,7 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
                             Location(attribute, property), property.Name, property.Type.ToDisplayString()));
                         break;
 
-                    case "StoredAsAttribute" when Text(attribute, 0) is { Length: 0 }:
+                    case "StoredAsAttribute" when IsBlank(attribute):
                         context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EmptyStorageName,
                             Location(attribute, property), property.Name, "StoredAs"));
                         break;
@@ -184,6 +184,13 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
         ReportDuplicateOrders(context, type, clusteringOrders, ModelingDiagnostics.DuplicateClusteringKeyOrder);
     }
 
+    /// <summary>
+    ///     Whether a storage name was given and names nothing: empty or only whitespace, the same for <c>[Entity]</c>,
+    ///     <c>[StoredAs]</c> and <c>[EnumType]</c>. A name left out (the default) is not one.
+    /// </summary>
+    private static bool IsBlank(AttributeData attribute) =>
+        Text(attribute, 0) is { } name && string.IsNullOrWhiteSpace(name);
+
     /// <summary>An enum stored as its labels: its name, when given, and each member's label must name one member.</summary>
     private static void AnalyzeEnum(SymbolAnalysisContext context, INamedTypeSymbol type)
     {
@@ -193,7 +200,7 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (Text(declaration, 0) is { } name && string.IsNullOrWhiteSpace(name))
+        if (IsBlank(declaration))
         {
             context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.EmptyStorageName,
                 Location(declaration, type), type.Name, "EnumType"));

@@ -76,11 +76,11 @@ public static class ModelingDiagnostics
         "Generated key type is not identity-capable",
         "[EntityKey(Generated = true)] on '{0}' requires an integral member (an identity column); the store cannot generate '{1}'");
 
-    /// <summary>EQD011 — an empty storage name.</summary>
+    /// <summary>EQD011 — an empty or whitespace-only storage name.</summary>
     public static readonly DiagnosticDescriptor EmptyStorageName = Rule(
         "EQD011",
         "Empty storage name",
-        "The storage name on '{0}' is empty; give [{1}] a real name or remove the attribute");
+        "The storage name on '{0}' is empty or blank; give [{1}] a real name or remove the attribute");
 
     /// <summary>EQD012 — a store-generated member of a type no store generates in that kind.</summary>
     public static readonly DiagnosticDescriptor StoreGeneratedType = Rule(
