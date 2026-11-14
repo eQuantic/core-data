@@ -162,6 +162,52 @@ public sealed class CosmosNamedLockTests : CosmosIntegrationTest
     }
 
     [Test]
+    public async Task The_leases_container_removed_after_its_first_use_is_created_again_by_the_next_acquisition()
+    {
+        using var first = Holder();
+        using var second = Holder();
+        using var third = Holder();
+        var held = NamedLockScenarios.Unique("tenant");
+        var other = NamedLockScenarios.Unique("tenant");
+
+        var before = await first.Acquire(held, TimeSpan.FromSeconds(5));
+        Assert.That(await ReadLease(held), Is.Not.Null, "the lease is in the container this process created");
+
+        // Removed behind the process's back, after the process ensured it: every lease went with it.
+        await Leases.DeleteContainerAsync();
+
+        await using (var taken = await second.Acquire(other, TimeSpan.FromSeconds(30)))
+        {
+            Assert.That((await ReadLease(other))!.Value.GetProperty("owner").GetString(), Does.Contain(Environment.MachineName),
+                "another name: the container is created again and the lease taken in it");
+        }
+
+        await using (var retaken = await third.Acquire(held, TimeSpan.FromSeconds(30)))
+        {
+            var lease = await ReadLease(held);
+            Assert.That(lease, Is.Not.Null, "the same name: its lease went with the container, so it is free in the new one");
+            var owner = lease!.Value.GetProperty("owner").GetString();
+
+            // The first holder's lease is gone: its renewal says so, and its release leaves the new owner's lease alone.
+            var lost = new TaskCompletionSource();
+            await using (before.Lost.Register(() => lost.TrySetResult()))
+            {
+                Assert.That(await Task.WhenAny(lost.Task, Task.Delay(Lease + Lease)), Is.SameAs(lost.Task),
+                    "the first holder is told its lock is lost");
+            }
+
+            await before.DisposeAsync();
+            Assert.That((await ReadLease(held))!.Value.GetProperty("owner").GetString(), Is.EqualTo(owner),
+                "the first holder's release does not touch the lease taken in the new container");
+            Assert.That(async () => await first.Acquire(held, TimeSpan.Zero), Throws.InstanceOf<TimeoutException>(),
+                "the lease in the new container holds the name");
+        }
+
+        Assert.That(await ReadLease(held), Is.Null, "released from the new container");
+        await using var again = await first.Acquire(held, TimeSpan.FromSeconds(5));
+    }
+
+    [Test]
     public Task A_hung_renewal_is_lost_before_another_holder_takes_the_lock() =>
         LeaseScenarios.AHungRenewalIsLostBeforeAnotherHolderTakesTheLock(CosmosNamedLocks.Store(Database), Holder, Lease);
 

@@ -26,6 +26,13 @@ namespace eQuantic.Core.Data.CosmosDb;
 ///         <c>\</c>, <c>?</c> or <c>#</c> (which an id cannot hold); otherwise <c>~</c> and its SHA-256. The
 ///         <c>name</c> property keeps the name as it was given.
 ///     </para>
+///     <para>
+///         A container removed after the process created it answers every lease call with a 404 whose sub-status says
+///         the container is gone (<see cref="CosmosSystemContainers.IsGone(ResponseMessage)" />). An acquisition then
+///         creates it again and takes the lease in it, within its own deadline; the leases went with the container,
+///         so a renewal or a release of a lease taken before answers that it is gone (the holder is told the lock is
+///         lost), and is never written into the new container.
+///     </para>
 /// </summary>
 public static class CosmosNamedLocks
 {
@@ -51,8 +58,19 @@ public static class CosmosNamedLocks
     ///     The leases' container, created on first use (once per database and process, and again once it answered that it
     ///     is gone: <see cref="CosmosSystemContainers" />); an account that accepts writes in several regions is refused.
     /// </summary>
-    internal static Task<Container> LeasesAsync(Database database) =>
-        CosmosSystemContainers.GetAsync(database, ContainerName, Purpose, CancellationToken.None);
+    /// <param name="database">The database holding it.</param>
+    /// <param name="cancellationToken">Bounds the wait for the creation (the creation itself, shared, is never cut off).</param>
+    internal static Task<Container> LeasesAsync(Database database, CancellationToken cancellationToken = default) =>
+        CosmosSystemContainers.GetAsync(database, ContainerName, Purpose, cancellationToken);
+
+    /// <summary>
+    ///     Creates the leases' container again, once a lease call answered that it is gone
+    ///     (<see cref="CosmosSystemContainers.IsGone(CosmosException)" />): it was removed after this process created it.
+    /// </summary>
+    /// <param name="database">The database holding it.</param>
+    /// <param name="cancellationToken">Bounds the wait for the creation (the creation itself, shared, is never cut off).</param>
+    internal static Task<Container> RecreateLeasesAsync(Database database, CancellationToken cancellationToken) =>
+        CosmosSystemContainers.RecreateAsync(database, ContainerName, Purpose, cancellationToken);
 
     /// <summary>The lease item's body.</summary>
     internal static Stream Body(string id, string name, string owner, TimeSpan duration) =>
@@ -67,9 +85,14 @@ public static class CosmosNamedLocks
     /// <summary>Whether a write answered so may have landed all the same (a timeout, or a service unavailable meanwhile).</summary>
     internal static bool AnswerLost(HttpStatusCode status) => status is HttpStatusCode.RequestTimeout or HttpStatusCode.ServiceUnavailable;
 
-    /// <summary>The exception a lease call answered with an unexpected status throws.</summary>
+    /// <summary>
+    ///     The exception a lease call answered with an unexpected status throws, with the response's sub-status (so a
+    ///     container that is gone stays recognisable: <see cref="CosmosSystemContainers.IsGone(CosmosException)" />).
+    /// </summary>
     internal static CosmosException Unexpected(ResponseMessage response) =>
-        new(response.ErrorMessage ?? $"The lease write failed with status {response.StatusCode}.", response.StatusCode, 0,
+        new(response.ErrorMessage ?? $"The lease write failed with status {response.StatusCode}.", response.StatusCode,
+            int.TryParse(response.Headers["x-ms-substatus"], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var subStatus) ? subStatus : 0,
             response.Headers.ActivityId, response.Headers.RequestCharge);
 
     /// <summary>A lease item as read: its owner, the server's time of its last write, and its lease.</summary>
@@ -89,9 +112,38 @@ internal sealed class CosmosLeaseStore(Database database) : LeaseStore
     /// <summary>How many times one call reads the item back after a write whose answer was lost, before it gives up.</summary>
     private const int Settlements = 3;
 
+    /// <summary>
+    ///     How many times one call creates the container again after it answered that it is gone, before the answer
+    ///     reaches the caller (something that keeps removing it is not raced forever).
+    /// </summary>
+    private const int Recreations = 3;
+
     public override async Task<Lease?> TryTakeAsync(string name, string owner, TimeSpan duration, CancellationToken cancellationToken)
     {
-        var container = await CosmosNamedLocks.LeasesAsync(database).ConfigureAwait(false);
+        var container = await CosmosNamedLocks.LeasesAsync(database, cancellationToken).ConfigureAwait(false);
+        for (var recreation = 0; ; recreation++)
+        {
+            try
+            {
+                return await TakeAsync(container, name, owner, duration, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CosmosException gone) when (CosmosSystemContainers.IsGone(gone) && recreation < Recreations)
+            {
+                // The container was removed after this process created it, and every lease with it: it is created
+                // again (the wait bounded by the acquisition's deadline, which the token carries) and the lease is
+                // taken in it from the start.
+                container = await CosmosNamedLocks.RecreateLeasesAsync(database, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     One attempt at the lease in <paramref name="container" />. A response that says the container is gone throws
+    ///     (<see cref="CosmosNamedLocks.Unexpected" />, which keeps its sub-status), so the caller creates it again.
+    /// </summary>
+    private static async Task<Lease?> TakeAsync(Container container, string name, string owner, TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
         var id = CosmosNamedLocks.ItemId(name);
         var partitionKey = new PartitionKey(id);
 
@@ -114,7 +166,7 @@ internal sealed class CosmosLeaseStore(Database database) : LeaseStore
         {
             using var read = await container.ReadItemStreamAsync(id, partitionKey, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
-            if (read.StatusCode == HttpStatusCode.NotFound)
+            if (read.StatusCode == HttpStatusCode.NotFound && !CosmosSystemContainers.IsGone(read))
             {
                 return null; // Released meanwhile, or the create never landed: the next attempt creates it.
             }
@@ -146,6 +198,11 @@ internal sealed class CosmosLeaseStore(Database database) : LeaseStore
                 return new CosmosLease(container, id, name, owner, replaced.Headers.ETag);
             }
 
+            if (CosmosSystemContainers.IsGone(replaced))
+            {
+                throw CosmosNamedLocks.Unexpected(replaced);
+            }
+
             if (replaced.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.NotFound)
             {
                 return null; // Another owner took it over (or it was released) first; the next attempt sees which.
@@ -161,9 +218,13 @@ internal sealed class CosmosLeaseStore(Database database) : LeaseStore
             HttpStatusCode.RequestTimeout, 0, string.Empty, 0);
     }
 
+    /// <remarks>
+    ///     A container that is gone took the lease with it, so there is nothing of this owner's to delete: the read
+    ///     answers 404 and nothing is written (the container is not created again for it).
+    /// </remarks>
     public override async Task ReleaseAsync(string name, string owner, CancellationToken cancellationToken)
     {
-        var container = await CosmosNamedLocks.LeasesAsync(database).ConfigureAwait(false);
+        var container = await CosmosNamedLocks.LeasesAsync(database, cancellationToken).ConfigureAwait(false);
         var id = CosmosNamedLocks.ItemId(name);
         var lease = new CosmosLease(container, id, name, owner, etag: null);
         if (await lease.CurrentEtagIfMineAsync(cancellationToken).ConfigureAwait(false) is { } etag)
@@ -173,7 +234,12 @@ internal sealed class CosmosLeaseStore(Database database) : LeaseStore
     }
 }
 
-/// <summary>A lease this process holds, addressed by the ETag of its last write.</summary>
+/// <summary>
+///     A lease this process holds, addressed by the ETag of its last write. When its container was removed (every call
+///     answers 404 with the sub-status of a container that is gone), the lease went with it: a renewal answers that it
+///     is no longer this owner's, and a release has nothing to delete. Neither writes it into a container created again
+///     since, where another owner may hold the name by now.
+/// </summary>
 internal sealed class CosmosLease(Container container, string id, string name, string owner, string? etag) : Lease
 {
     private const int Attempts = 3;
@@ -195,7 +261,7 @@ internal sealed class CosmosLease(Container container, string id, string name, s
 
             if (replaced.StatusCode == HttpStatusCode.NotFound)
             {
-                return false;
+                return false; // Gone: deleted, or its container removed with every lease in it.
             }
 
             if (replaced.StatusCode != HttpStatusCode.PreconditionFailed && !CosmosNamedLocks.AnswerLost(replaced.StatusCode))
