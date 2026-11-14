@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using eQuantic.Core.Data.Evolution;
 using eQuantic.Core.Data.Migration;
 using eQuantic.Core.Data.Modeling;
 using eQuantic.Core.Data.Repository;
@@ -165,6 +166,18 @@ public sealed class CassandraNativeTypesTests : CassandraIntegrationTest
         Assert.That(types["payload"], Is.EqualTo("text"), "a JSON member is text holding its JSON");
         Assert.That(types["sequence"], Is.EqualTo("bigint"));
         Assert.That(types["recordedat"], Is.EqualTo("timestamp"));
+    }
+
+    [Test]
+    public async Task A_keyspace_with_labels_and_store_generated_members_reports_no_drift()
+    {
+        using var db = await NativeTypesDatabaseAsync();
+        var source = db.Resolve<IDatabaseSnapshotSource>();
+
+        var report = DriftComparer.Compare(source.Expect(), await source.ObserveAsync());
+
+        Assert.That(report.Findings, Is.Empty,
+            "labels as text, a plain enum as its number and the members the store assigns must read as the model wrote them");
     }
 
     [Test]

@@ -14,6 +14,13 @@ namespace eQuantic.Core.Data.Evolution;
 ///         when it does not — flagged, because that pair is how data goes missing. And a change the store cannot
 ///         make is refused by name instead of generated.
 ///     </para>
+///     <para>
+///         Two changes leave the member's CLR type alone and still change what the store holds: an enum switched
+///         between its numbers and its labels, which the snapshot spells apart and this reports as a conversion,
+///         and a member that becomes store-generated, changes what the store assigns, or stops being so, reported
+///         as <see cref="ModelChangeKind.ChangeGeneration" />. Neither is ever generated as a step; the migration
+///         says what the step must do.
+///     </para>
 /// </summary>
 public static class ModelDiffer
 {
@@ -145,6 +152,8 @@ public static class ModelDiffer
             });
         }
 
+        // An enum switched between its numbers and its labels lands here too: the snapshot spells a label enum
+        // apart from the enum itself (labels:…), because the stored values change while the CLR type does not.
         if (!string.Equals(before.StoredType, after.StoredType, StringComparison.Ordinal))
         {
             changes.Add(new ModelChange(ModelChangeKind.ConvertField, entityType)
@@ -162,6 +171,18 @@ public static class ModelDiffer
                 Member = after.Member,
                 From = Facets(before),
                 To = Facets(after),
+            });
+        }
+
+        // A snapshot written before generation was recorded reads null for every member, which is what every
+        // member was then, so an unchanged model still compares clean against it.
+        if (!string.Equals(before.Generated, after.Generated, StringComparison.Ordinal))
+        {
+            changes.Add(new ModelChange(ModelChangeKind.ChangeGeneration, entityType)
+            {
+                Member = after.Member,
+                From = before.Generated,
+                To = after.Generated,
             });
         }
     }

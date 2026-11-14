@@ -131,6 +131,13 @@ public static class ModelSnapshotWriter
             facets.Add($"DefaultLiteral = {Literal(literal)}");
         }
 
+        if (field.Generated is { } generated)
+        {
+            // Written only when there is one, so a model without store-generated members keeps writing the same
+            // file it wrote before the property existed.
+            facets.Add($"Generated = {Literal(generated)}");
+        }
+
         return facets.Count == 0 ? text.ToString() : text.Append(" { ").Append(string.Join(", ", facets)).Append(" }").ToString();
     }
 

@@ -39,6 +39,69 @@ public sealed class ModelSnapshotTests
         public void SetKey(Guid key) => Id = key;
     }
 
+    /// <summary>An enum stored as its number unless the model declares it with <c>Enum&lt;TEnum&gt;()</c>.</summary>
+    public enum Stage
+    {
+        Draft,
+        Published,
+    }
+
+    /// <summary>An enum stored as its labels wherever it is used, by the annotation on it.</summary>
+    [EnumType]
+    public enum Tier
+    {
+        Basic,
+        Gold,
+    }
+
+    private sealed class Release : IEntity<Guid>
+    {
+        public Guid Id { get; set; }
+
+        public Stage Stage { get; set; }
+
+        public Stage? Previous { get; set; }
+
+        public List<Stage> History { get; set; } = [];
+
+        public Tier Tier { get; set; }
+
+        public long Number { get; set; }
+
+        public DateTime StampedAt { get; set; }
+
+        public DateTime IssuedAt { get; set; }
+
+        public Guid GetKey() => Id;
+        public void SetKey(Guid key) => Id = key;
+    }
+
+    private static ModelSnapshot DescribeRelease(bool labels = false, bool generated = false)
+    {
+        var dialect = new PostgreSqlDialect();
+        var builder = new RelationalModelBuilder(dialect);
+        if (labels)
+        {
+            builder.Enum<Stage>();
+        }
+
+        builder.Entity<Release>(entity =>
+        {
+            entity.Table("releases");
+            if (generated)
+            {
+                entity.Generated(x => x.Number)
+                    .Generated(x => x.StampedAt)
+                    .Generated(x => x.IssuedAt, "now()");
+            }
+        });
+        return new RelationalModelSnapshotSource(builder.Build(), dialect).Describe();
+    }
+
+    private static string Migration(ModelSnapshot before, ModelSnapshot after) =>
+        MigrationWriter.Write(ModelDiffer.Compare(before, after), "Evolve", "Shop.Migrations",
+            new DateTime(2026, 11, 13, 12, 0, 0, DateTimeKind.Utc));
+
     private static ModelSnapshot Describe()
     {
         var dialect = new PostgreSqlDialect();
@@ -123,5 +186,84 @@ public sealed class ModelSnapshotTests
         Assert.That(text, Does.Contain("Length = 64"));
         Assert.That(text, Does.Contain("ConcurrencyField = \"Version\""));
         Assert.That(text, Does.Contain("new ClusteringSnapshot(\"IssuedAt\", true)"));
+    }
+
+    [Test]
+    public void An_enum_stored_as_its_number_is_recorded_as_the_enum()
+    {
+        var entity = DescribeRelease().For(typeof(Release).FullName!)!;
+
+        Assert.That(entity.Field("Stage")!.StoredType, Is.EqualTo(typeof(Stage).FullName));
+        Assert.That(entity.Field("Previous")!.StoredType, Is.EqualTo(typeof(Stage).FullName));
+    }
+
+    [Test]
+    public void An_enum_stored_as_its_labels_is_recorded_as_its_labels()
+    {
+        var entity = DescribeRelease(labels: true).For(typeof(Release).FullName!)!;
+
+        Assert.That(entity.Field("Stage")!.StoredType, Is.EqualTo("labels:" + typeof(Stage).FullName),
+            "the CLR type is the same either way; what the table holds is not");
+        Assert.That(entity.Field("Previous")!.StoredType, Is.EqualTo("labels:" + typeof(Stage).FullName));
+        Assert.That(entity.Field("History")!.StoredType, Is.EqualTo("labels:" + typeof(Stage).FullName + "[]"),
+            "an array column of the enum holds its labels too");
+        Assert.That(entity.Field("Tier")!.StoredType, Is.EqualTo("labels:" + typeof(Tier).FullName),
+            "[EnumType] on an enum the model never declares fluently");
+    }
+
+    [Test]
+    public void Switching_an_enum_to_its_labels_is_handed_back_instead_of_converted()
+    {
+        var difference = ModelDiffer.Compare(DescribeRelease(), DescribeRelease(labels: true));
+
+        Assert.That(difference.Changes.Select(change => (change.Kind, change.Member)), Is.EquivalentTo(new[]
+        {
+            (ModelChangeKind.ConvertField, "History"),
+            (ModelChangeKind.ConvertField, "Previous"),
+            (ModelChangeKind.ConvertField, "Stage"),
+        }));
+
+        var migration = Migration(DescribeRelease(), DescribeRelease(labels: true));
+        Assert.That(migration, Does.Not.Contain(".ConvertField("),
+            "ALTER COLUMN … TYPE would cast the number, never map it to its label");
+        Assert.That(migration.Split('\n').Count(line => line.StartsWith("#error ")), Is.EqualTo(3));
+        Assert.That(migration, Does.Contain("CREATE TYPE … AS ENUM"));
+        Assert.That(migration, Does.Contain("rewrites each number in the stored arrays as its label"));
+    }
+
+    [Test]
+    public void A_store_generated_member_is_recorded_with_what_the_store_assigns()
+    {
+        var entity = DescribeRelease(generated: true).For(typeof(Release).FullName!)!;
+
+        Assert.That(entity.Field("Number")!.Generated, Is.EqualTo("sequence"));
+        Assert.That(entity.Field("StampedAt")!.Generated, Is.EqualTo("clock"));
+        Assert.That(entity.Field("IssuedAt")!.Generated, Is.EqualTo("default now()"));
+        Assert.That(entity.Field("Stage")!.Generated, Is.Null, "the application writes it");
+    }
+
+    [Test]
+    public void Making_members_store_generated_is_handed_back_instead_of_ignored()
+    {
+        var difference = ModelDiffer.Compare(DescribeRelease(), DescribeRelease(generated: true));
+
+        Assert.That(difference.Changes.Select(change => change.Kind), Is.All.EqualTo(ModelChangeKind.ChangeGeneration));
+        Assert.That(difference.Changes.Select(change => change.Member),
+            Is.EquivalentTo(new[] { "IssuedAt", "Number", "StampedAt" }));
+
+        var migration = Migration(DescribeRelease(), DescribeRelease(generated: true));
+        Assert.That(migration, Does.Not.Contain("migration.For<"), "no operation makes a column store-generated");
+        Assert.That(migration, Does.Contain("ADD GENERATED BY DEFAULT AS IDENTITY (START WITH the largest value + 1)"));
+        Assert.That(migration, Does.Contain("DEFAULT now() and NOT NULL"));
+    }
+
+    [Test]
+    public void The_written_file_carries_the_labels_and_the_generation()
+    {
+        var text = ModelSnapshotWriter.Write(DescribeRelease(labels: true, generated: true), "Sample.Migrations");
+
+        Assert.That(text, Does.Contain($"\"labels:{typeof(Stage).FullName}\""));
+        Assert.That(text, Does.Contain("Generated = \"sequence\""));
+        Assert.That(text, Does.Contain("Generated = \"default now()\""));
     }
 }

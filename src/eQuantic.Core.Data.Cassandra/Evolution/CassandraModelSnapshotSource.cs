@@ -10,6 +10,12 @@ namespace eQuantic.Core.Data.Cassandra.Evolution;
 ///         relocates every row that already exists, and there is no <c>ALTER</c> that does it — so recording them
 ///         is what lets the comparison say no by name instead of generating a statement the cluster rejects.
 ///     </para>
+///     <para>
+///         A column holding an enum's labels is recorded as those labels rather than as <c>text</c>, and a column the
+///         store assigns on insert with what it assigns. An enum switched from its numbers to its labels moves its
+///         column from an integral type to text, and recorded as <c>int</c> to <c>text</c> it would read as a type
+///         conversion, which writes the number 1 as <c>"1"</c>, never as its label.
+///     </para>
 /// </summary>
 public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelSnapshotSource
 {
@@ -26,7 +32,7 @@ public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelS
         new(configuration.EntityType.FullName ?? configuration.EntityType.Name,
             configuration.TableName,
             configuration.Columns
-                .Select(column => Describe(configuration.EntityType, column))
+                .Select(column => Describe(configuration, column))
                 .OrderBy(field => field.Member, StringComparer.Ordinal)
                 .ToList())
         {
@@ -50,16 +56,23 @@ public sealed class CassandraModelSnapshotSource(CassandraModel model) : IModelS
                 .ToList(),
         };
 
-    private static FieldSnapshot Describe(Type entityType, CassandraColumn column)
+    private static FieldSnapshot Describe(CassandraEntityConfiguration configuration, CassandraColumn column)
     {
-        var member = MemberVocabulary.Find(entityType, column.Member);
+        var member = MemberVocabulary.Find(configuration.EntityType, column.Member);
+        var clr = Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType;
         // The CQL type, not the CLR one: it is what the cluster holds, and a conversion between two CLR types
-        // that land on the same CQL type is not a change to the store.
-        return new FieldSnapshot(column.Member, column.Name, column.CqlType)
+        // that land on the same CQL type is not a change to the store. An enum's labels are the exception: text
+        // holding labels is not text holding anything else.
+        return new FieldSnapshot(column.Member, column.Name,
+            clr.IsEnum && column.CqlType == "text" ? StoredForm.Labels(clr) : column.CqlType)
         {
             Nullable = true,
             PreviousNames = MemberVocabulary.PreviousNames(member),
             DefaultLiteral = MemberVocabulary.DefaultLiteral(member),
+            Generated = configuration.StoreGenerated
+                .FirstOrDefault(generated => CassandraEntityConfiguration.Same(generated.Column, column.Name)) is { } store
+                ? StoredForm.Generated(store.Value)
+                : null,
         };
     }
 }

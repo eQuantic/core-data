@@ -29,6 +29,14 @@ public enum ModelChangeKind
 
     /// <summary>The same member and type, sized differently.</summary>
     ChangeFacets,
+
+    /// <summary>
+    ///     The same member, assigned differently by the store: it became store-generated, changed what the store
+    ///     assigns it (a sequence, the clock, a SQL default), or stopped being store-generated.
+    ///     <see cref="ModelChange.From" /> and <see cref="ModelChange.To" /> carry the snapshot's spelling of each
+    ///     side (<c>sequence</c>, <c>clock</c>, <c>default …</c>), <c>null</c> where the application writes it.
+    /// </summary>
+    ChangeGeneration,
 }
 
 /// <summary>

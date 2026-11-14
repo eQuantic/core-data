@@ -67,7 +67,11 @@ public sealed record EntitySnapshot(string EntityType, string Collection, IReadO
 /// </summary>
 /// <param name="Member">The CLR member name (the identity across versions).</param>
 /// <param name="Name">The stored name — a column, a document element.</param>
-/// <param name="StoredType">The stored CLR type's full name.</param>
+/// <param name="StoredType">
+///     What the store holds for it: the stored CLR type's full name (the CQL type on Cassandra), or, for an enum
+///     stored as its labels, <c>labels:</c> and the enum's full name (<see cref="StoredForm.Labels" />), so a switch
+///     between an enum's numbers and its labels reads as the change to the stored values it is.
+/// </param>
 public sealed record FieldSnapshot(string Member, string Name, string StoredType)
 {
     /// <summary>The maximum text length (0 = the store's default).</summary>
@@ -93,6 +97,14 @@ public sealed record FieldSnapshot(string Member, string Name, string StoredType
     ///     <c>null</c> when none was declared — which is what makes a comparison refuse to add it silently.
     /// </summary>
     public string? DefaultLiteral { get; init; }
+
+    /// <summary>
+    ///     What the store assigns the member on insert, or <c>null</c> when the application writes it:
+    ///     <c>sequence</c>, <c>clock</c>, or <c>default</c> and the SQL a relational store fills it with
+    ///     (<see cref="StoredForm" />). A snapshot written before the property existed reads as <c>null</c> for
+    ///     every member, which is what every member was then.
+    /// </summary>
+    public string? Generated { get; init; }
 }
 
 /// <summary>An ordered-read member and its direction.</summary>
