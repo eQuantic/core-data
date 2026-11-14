@@ -11,8 +11,15 @@ namespace eQuantic.Core.Data.Cassandra;
 ///     the lease is taken with <c>INSERT … IF NOT EXISTS USING TTL</c>, renewed with
 ///     <c>UPDATE … USING TTL … IF owner = ?</c>, and released with <c>DELETE … IF owner = ?</c>. The expiry is the
 ///     row's TTL, counted by the cluster: once it runs out the row is gone and the next <c>IF NOT EXISTS</c> applies.
-///     TTLs count whole seconds, so a lease's duration is rounded up to one. Lease writes never join a <c>LOGGED
-///     BATCH</c>: another holder has to see them while it is pending.
+///     Lease writes never join a <c>LOGGED BATCH</c>: another holder has to see them while it is pending.
+///     <para>
+///         A TTL counts whole seconds from the <b>start</b> of the second the write lands in: Cassandra sets the
+///         expiry to the write's time in seconds, truncated, plus the TTL, and the row is live while the time in
+///         seconds is below it. A row written late in a second therefore expires almost a second before its TTL, and
+///         a lease written with its own duration as the TTL could be taken over before that duration ran out. The TTL
+///         is the duration rounded up to whole seconds plus that second (<see cref="Ttl" />), so a lease never expires
+///         before its duration, and at most a second and a fraction after it.
+///     </para>
 /// </summary>
 public static class CassandraNamedLocks
 {
@@ -25,8 +32,12 @@ public static class CassandraNamedLocks
     internal static LeaseStore Store(ISession session, Microsoft.Extensions.Logging.ILogger? logger, bool sensitive) =>
         new CassandraLeaseStore(session, logger, sensitive);
 
-    /// <summary>A lease's duration as a TTL: whole seconds, at least one.</summary>
-    internal static int Ttl(TimeSpan duration) => (int)Math.Max(1, Math.Ceiling(duration.TotalSeconds));
+    /// <summary>
+    ///     A lease's duration as a TTL: rounded up to whole seconds (at least one), plus the second Cassandra may cut
+    ///     from it by counting the TTL from the start of the write's second.
+    /// </summary>
+    /// <param name="duration">The lease's duration.</param>
+    internal static int Ttl(TimeSpan duration) => (int)Math.Max(1, Math.Ceiling(duration.TotalSeconds)) + 1;
 
     /// <summary>Creates the leases table once per session (a failed creation is tried again next time).</summary>
     internal static async Task EnsureTableAsync(ISession session)

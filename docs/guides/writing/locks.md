@@ -64,8 +64,8 @@ The rules are the same on every store:
 | MySQL | `GET_LOCK`, server-wide | taken on the transaction's session; **released by the engine** right after the commit or rollback (no transaction releases a `GET_LOCK`) | on a pinned connection; `RELEASE_LOCK` on dispose | the server releases it when the session ends | MySQL rounds its wait to whole seconds, so a wait under a second is `GET_LOCK(name, 0)` asked every `PollInterval`; `NULL` (an error) throws |
 | MariaDB | `GET_LOCK`, server-wide | as MySQL | as MySQL | as MySQL | on the server, in slices of `PollInterval` (MariaDB waits fractions of a second) |
 | MongoDB | **lease**: a document in `_locks` | written outside the transaction (others must see it), deleted when it ends | deleted on dispose | **the lease expires** `LeaseDuration` after its last renewal, by the server's clock | polled |
-| Cosmos DB | **lease**: an item in `_locks` (partitioned by `/id`) | written outside the transactional batch, deleted once it has run or been discarded | deleted on dispose | **the lease expires** `LeaseDuration` (up to a second more) after its last renewal, by the server's clock | polled |
-| Cassandra | **lease**: a row in `equantic_locks`, with a TTL | written outside the `LOGGED BATCH`, deleted once it has run or been discarded | deleted on dispose | **the row's TTL runs out** `LeaseDuration` (whole seconds) after its last renewal | polled |
+| Cosmos DB | **lease**: an item in `_locks` (partitioned by `/id`) | written outside the transactional batch, deleted once it has run or been discarded | deleted on dispose | **the lease expires** `LeaseDuration`, rounded up to whole seconds, and up to a second more after its last renewal, by the server's clock | polled |
+| Cassandra | **lease**: a row in `equantic_locks`, with a TTL | written outside the `LOGGED BATCH`, deleted once it has run or been discarded | deleted on dispose | **the row's TTL runs out** `LeaseDuration`, rounded up to whole seconds, and up to a second more after its last renewal, by the cluster's clock | polled |
 
 How each lease is written, so that of two holders racing for it exactly one wins:
 
@@ -73,7 +73,17 @@ How each lease is written, so that of two holders racing for it exactly one wins
 |---|---|---|---|
 | MongoDB | one `findOneAndUpdate` upsert on `_id`, whose pipeline keeps a live lease's owner and expiry and replaces them only when `expiresAt <= $$NOW` | the same write | updates and deletes filtered on `owner`; a TTL index on `expiresAt` sweeps dead holders' documents |
 | Cosmos DB | create, answered 409 while another owner's item is there | when `_ts` + 1 s + its lease is past `GetCurrentDateTime()`, a replace guarded by the item's ETag | replace and delete guarded by the ETag of the owner's last write |
-| Cassandra | `INSERT … IF NOT EXISTS USING TTL` (Paxos) | the expired row is gone, so the same insert applies | `UPDATE … USING TTL … IF owner = ?` and `DELETE … IF owner = ?` |
+| Cassandra | `INSERT … IF NOT EXISTS USING TTL` (Paxos), the TTL being the lease rounded up to whole seconds plus one | the expired row is gone, so the same insert applies | `UPDATE … USING TTL … IF owner = ?` and `DELETE … IF owner = ?` |
+
+**A lease never expires before `LeaseDuration`.** That is the promise a holder is given, and two of the
+stores count in whole seconds, which would cut into it. Cosmos DB's `_ts` is the second of the last
+write, so the lease is measured from the second after it. Cassandra counts a TTL from the start of the
+second the write lands in (the expiry is the write's time in seconds, truncated, plus the TTL), so a
+row written late in a second goes almost a second before its TTL: the TTL is the lease rounded up to
+whole seconds plus that second. On both, a dead holder may keep the others waiting up to a second and
+a fraction past `LeaseDuration`; MongoDB compares milliseconds on the server's clock and has no such
+margin. Its TTL index sweeps only expired documents and on its own schedule (every 60 s), which never
+expires a lease early; the lease's own `expiresAt <= $$NOW` is what hands it over.
 
 A [custom relational dialect](../architecture/extending.md) declares its mechanism through
 `SqlDialect.NamedLocks` (the statements that take and release a lock, and whether its server waits);
@@ -89,8 +99,8 @@ lock for as long as it is slow.
 A **lease** is a promise with an expiry. MongoDB, Cosmos DB and Cassandra have no lock a session
 holds, so the lock is a record that says who holds it until when, renewed in the background every
 `RenewalInterval` while the handle is held. That buys the property the relational stores get for
-free — **a holder that dies does not keep the lock forever**: the others wait at most
-`LeaseDuration` — and costs its converse: **a live holder that cannot renew in time loses the
+free — **a holder that dies does not keep the lock forever**: the others wait about
+`LeaseDuration` (up to a second and a fraction more on Cosmos DB and Cassandra) — and costs its converse: **a live holder that cannot renew in time loses the
 lock**. A pause longer than the lease (a long garbage collection, a stalled container) or a store it
 cannot reach for that long lets the lease expire, and another holder may take it while the first
 still believes it holds it. The handle's `Lost` token is signalled when a renewal finds the lease
@@ -113,7 +123,7 @@ services.AddSingleton(new NamedLockOptions
 
 | Option | Default | What it bounds |
 |---|---|---|
-| `LeaseDuration` | 30 s | how long a dead holder keeps the others waiting (leases only) |
+| `LeaseDuration` | 30 s | how long a dead holder keeps the others waiting (leases only): never less, and on Cosmos DB and Cassandra up to a second and a fraction more |
 | `RenewalInterval` | a third of the lease | how often a held lease is renewed: two renewals can fail in a row before it runs out |
 | `PollInterval` | 100 ms | the longest pause between two attempts, the slice a server wait is cut into, and how soon a cancellation is noticed |
 

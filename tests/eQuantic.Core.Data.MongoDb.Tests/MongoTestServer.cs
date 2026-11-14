@@ -39,6 +39,11 @@ public sealed class MongoTestServer
             var settings = MongoClientSettings.FromConnectionString(_container.GetConnectionString());
             settings.DirectConnection = true;
             Client = new MongoClient(settings);
+
+            // The container is up before its replica set has elected the node primary: a write sent before then is
+            // refused or retried by the driver once the election is over, which a test that times its first write
+            // (a lease's expiry) reads as the store's own behaviour. The run starts once the node takes writes.
+            await WaitForPrimaryAsync(Client);
         }
         catch (Exception ex)
         {
@@ -53,6 +58,34 @@ public sealed class MongoTestServer
         if (_container is not null)
         {
             await _container.DisposeAsync();
+        }
+    }
+
+    private static async Task WaitForPrimaryAsync(IMongoClient client)
+    {
+        var admin = client.GetDatabase("admin");
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (true)
+        {
+            try
+            {
+                var hello = await admin.RunCommandAsync<MongoDB.Bson.BsonDocument>(new MongoDB.Bson.BsonDocument("hello", 1));
+                if (hello.GetValue("isWritablePrimary", false).ToBoolean())
+                {
+                    return;
+                }
+            }
+            catch (MongoException) when (DateTime.UtcNow < deadline)
+            {
+                // Not answering yet: asked again below.
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException("The MongoDB test container's replica set elected no primary within a minute.");
+            }
+
+            await Task.Delay(100);
         }
     }
 

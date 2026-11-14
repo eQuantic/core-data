@@ -67,6 +67,16 @@ public sealed class CassandraNamedLockTests : CassandraIntegrationTest
     public Task Names_are_compared_exactly() => NamedLockScenarios.NamesAreComparedExactly(Holder);
 
     [Test]
+    public void A_leases_TTL_covers_the_second_Cassandra_may_cut_from_it()
+    {
+        // The expiry is the write's time in whole seconds, truncated, plus the TTL: a row written at 10.9 s with a
+        // TTL of 2 is gone at 12 s, 1.1 s later. One second more keeps a lease from expiring before its duration.
+        Assert.That(CassandraNamedLocks.Ttl(TimeSpan.FromSeconds(2)), Is.EqualTo(3));
+        Assert.That(CassandraNamedLocks.Ttl(TimeSpan.FromMilliseconds(1200)), Is.EqualTo(3), "rounded up first");
+        Assert.That(CassandraNamedLocks.Ttl(TimeSpan.FromMilliseconds(100)), Is.EqualTo(2));
+    }
+
+    [Test]
     public async Task A_dead_holder_loses_the_lock_when_its_lease_expires()
     {
         using var holder = Holder();
