@@ -220,6 +220,120 @@ internal static class ReadShapeScenarios
             Throws.InstanceOf<NotSupportedException>(), "distinct values come in no order, and an order is refused, not ignored");
     }
 
+    /// <summary>
+    ///     A skip with no limit returns every row after it, of an entity read, a filtered read, a mapped read and a read
+    ///     with relation counts; a limit with no skip returns the first rows.
+    /// </summary>
+    public static async Task SkipWithoutTakeAndTakeWithoutSkip(ShapeStore store)
+    {
+        var board = "skip-" + Guid.NewGuid().ToString("N");
+        foreach (var rank in Enumerable.Range(1, 25).OrderBy(rank => (rank * 7) % 25))
+        {
+            await store.Add(new ShapeCard { Board = board, Rank = rank });
+        }
+
+        var packages = Enumerable.Range(1, 3).Select(index => new ShapePackage { Name = "package-" + index }).ToList();
+        await store.Add(packages.ToArray());
+        foreach (var (package, index) in packages.Select((package, index) => (package, index)))
+        {
+            await store.Add(Enumerable.Range(0, index + 1)
+                .Select(version => new ShapeVersion { ShapePackageId = package.Id, Label = $"{index}.{version}" }).ToArray());
+        }
+
+        await store.Commit();
+
+        var cards = store.Repo<ShapeCard>();
+        var skipped = await cards.GetAllAsync(new QueryOptions<ShapeCard>().Where(x => x.Board == board).OrderBy(x => x.Rank).Skip(20));
+        Assert.That(skipped.Select(x => x.Rank), Is.EqualTo(Enumerable.Range(21, 5)), "every row after the skip");
+
+        var filtered = await cards.GetFilteredAsync(x => x.Board == board,
+            new QueryOptions<ShapeCard>().OrderByDescending(x => x.Rank).Skip(22));
+        Assert.That(filtered.Select(x => x.Rank), Is.EqualTo(new[] { 3, 2, 1 }), "a filtered read skips too");
+
+        var mapped = await cards.GetMappedAsync(x => x.Rank,
+            new QueryOptions<ShapeCard>().Where(x => x.Board == board).OrderBy(x => x.Rank).Skip(23));
+        Assert.That(mapped, Is.EqualTo(new[] { 24, 25 }), "a mapped read skips too");
+
+        var unordered = await cards.GetAllAsync(new QueryOptions<ShapeCard>().Where(x => x.Board == board).Skip(24));
+        Assert.That(unordered.Count(), Is.EqualTo(1), "a skip without an order still skips: the store orders by the key");
+
+        var first = await cards.GetAllAsync(new QueryOptions<ShapeCard>().Where(x => x.Board == board).OrderBy(x => x.Rank).Take(3));
+        Assert.That(first.Select(x => x.Rank), Is.EqualTo(new[] { 1, 2, 3 }), "a limit without a skip takes the first rows");
+
+        var firstMapped = await cards.GetMappedAsync(x => x.Rank,
+            new QueryOptions<ShapeCard>().Where(x => x.Board == board).OrderByDescending(x => x.Rank).Take(2));
+        Assert.That(firstMapped, Is.EqualTo(new[] { 25, 24 }));
+
+        var ids = packages.Select(package => package.Id).ToArray();
+        var counted = await store.Repo<ShapePackage>().GetMappedAsync(x => new { x.Name, Versions = x.Versions!.Count() },
+            new QueryOptions<ShapePackage>().Where(x => ids.Contains(x.Id)).OrderBy(x => x.Name).Skip(1));
+        Assert.That(counted.Select(x => (x.Name, x.Versions)), Is.EqualTo(new[] { ("package-2", 2), ("package-3", 3) }),
+            "a read with relation counts skips too");
+
+        var countedFirst = await store.Repo<ShapePackage>().GetMappedAsync(x => new { x.Name, Versions = x.Versions!.Count() },
+            new QueryOptions<ShapePackage>().Where(x => ids.Contains(x.Id)).OrderBy(x => x.Name).Take(1));
+        Assert.That(countedFirst.Select(x => (x.Name, x.Versions)), Is.EqualTo(new[] { ("package-1", 1) }));
+    }
+
+    /// <summary>A limit of zero returns nothing, and the store is not asked.</summary>
+    public static async Task TakeZero(ShapeStore store)
+    {
+        var board = "zero-" + Guid.NewGuid().ToString("N");
+        var run = new ShapeRun { Name = "zero" };
+        await store.Add(new ShapeCard { Board = board, Rank = 1 });
+        await store.Add(run);
+        await store.Add(Step(run, "success", 1));
+        await store.Commit();
+        store.Commands.Clear();
+
+        var cards = store.Repo<ShapeCard>();
+        Assert.That(await cards.GetAllAsync(new QueryOptions<ShapeCard>().Where(x => x.Board == board).OrderBy(x => x.Rank).Take(0)),
+            Is.Empty, "an entity read");
+        Assert.That(await cards.GetFilteredAsync(x => x.Board == board, new QueryOptions<ShapeCard>().Skip(1).Take(0)), Is.Empty,
+            "a filtered read");
+        Assert.That(await cards.GetMappedAsync(x => x.Rank, new QueryOptions<ShapeCard>().Where(x => x.Board == board).Take(0)),
+            Is.Empty, "a mapped read");
+        Assert.That(await cards.GetFirstAsync(new QueryOptions<ShapeCard>().Where(x => x.Board == board).Take(0)), Is.Null,
+            "a first read");
+        Assert.That(await store.Repo<ShapePackage>().GetMappedAsync(x => new { x.Name, Versions = x.Versions!.Count() },
+            new QueryOptions<ShapePackage>().Take(0)), Is.Empty, "a read with relation counts");
+        Assert.That(store.Commands.Statements, Is.Empty, "a limit of zero asks the store nothing");
+
+        var runs = await store.Repo<ShapeRun>().GetAllAsync(new QueryOptions<ShapeRun>()
+            .Where(x => x.Id == run.Id)
+            .Include(x => x.Steps, steps => steps.OrderBy(s => s.StartedAt).Take(0)));
+        Assert.That(runs.Single().Steps, Is.Empty, "an include of no step per run loads none");
+        Assert.That(store.Commands.Statements, Has.Count.EqualTo(1), "the runs are read, and an include of none is not");
+    }
+
+    /// <summary>
+    ///     2,500 runs, more parents than SQL Server binds in one statement: an include loads every run's steps, shaped or
+    ///     not, the parents' keys spread over as many statements as the store's limit needs.
+    /// </summary>
+    public static async Task IncludesPastTheParameterLimit(ShapeStore store)
+    {
+        var marker = "many-" + Guid.NewGuid().ToString("N");
+        foreach (var run in Enumerable.Range(0, 2500).Select(_ => new ShapeRun { Name = marker }))
+        {
+            await store.Add(run);
+            await store.Add(Step(run, "success", 1), Step(run, "failure", 2));
+        }
+
+        await store.Commit();
+
+        var plain = (await store.Repo<ShapeRun>().GetAllAsync(new QueryOptions<ShapeRun>()
+            .Where(x => x.Name == marker)
+            .Include(x => x.Steps))).ToList();
+        Assert.That(plain, Has.Count.EqualTo(2500));
+        Assert.That(plain.Select(x => x.Steps!.Count), Is.All.EqualTo(2), "every run has both its steps");
+
+        var shaped = (await store.Repo<ShapeRun>().GetAllAsync(new QueryOptions<ShapeRun>()
+            .Where(x => x.Name == marker)
+            .Include(x => x.Steps, steps => steps.Where(s => s.Status != "skipped").OrderByDescending(s => s.StartedAt).Take(1)))).ToList();
+        Assert.That(shaped, Has.Count.EqualTo(2500));
+        Assert.That(shaped.Select(x => x.Steps!.Single().StartedAt), Is.All.EqualTo(At(2)), "every run has its newest step");
+    }
+
     private static ShapeStep Step(ShapeRun run, string status, int minute) =>
         new() { ShapeRunId = run.Id, Status = status, StartedAt = At(minute) };
 

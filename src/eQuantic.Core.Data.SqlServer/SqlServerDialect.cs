@@ -70,6 +70,10 @@ public class SqlServerDialect : SqlDialect
         $"OFFSET {offsetParameter ?? "0"} ROWS FETCH NEXT {limitParameter} ROWS ONLY";
 
     /// <inheritdoc />
+    /// <remarks><c>OFFSET … ROWS</c> without <c>FETCH</c>: every row after the offset, under the ORDER BY it requires.</remarks>
+    public override string OffsetClause(string offsetParameter) => $"OFFSET {offsetParameter} ROWS";
+
+    /// <inheritdoc />
     public override string InsertSql(string quotedTable, string columns, string values, string? returningKey) =>
         returningKey is null
             ? $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})"

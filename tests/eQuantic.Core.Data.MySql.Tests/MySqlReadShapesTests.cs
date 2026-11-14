@@ -62,6 +62,36 @@ public sealed class MySqlReadShapesTests : MySqlIntegrationTest
     }
 
     [Test]
+    public async Task A_skip_without_a_take_returns_every_row_after_it()
+    {
+        var (db, store) = await NewStoreAsync();
+        using (db)
+        {
+            await ReadShapeScenarios.SkipWithoutTakeAndTakeWithoutSkip(store);
+        }
+    }
+
+    [Test]
+    public async Task A_take_of_zero_returns_nothing_without_asking_the_store()
+    {
+        var (db, store) = await NewStoreAsync();
+        using (db)
+        {
+            await ReadShapeScenarios.TakeZero(store);
+        }
+    }
+
+    [Test]
+    public async Task Includes_of_more_parents_than_one_statement_binds()
+    {
+        var (db, store) = await NewStoreAsync();
+        using (db)
+        {
+            await ReadShapeScenarios.IncludesPastTheParameterLimit(store);
+        }
+    }
+
+    [Test]
     public async Task Distinct_values_of_two_members()
     {
         var (db, store) = await NewStoreAsync();

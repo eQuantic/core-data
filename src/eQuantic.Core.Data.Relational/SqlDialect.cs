@@ -43,7 +43,18 @@ public abstract class SqlDialect
     public virtual string LimitClause(string limitParameter, string? offsetParameter) =>
         offsetParameter is null ? $"LIMIT {limitParameter}" : $"LIMIT {limitParameter} OFFSET {offsetParameter}";
 
-    /// <summary>Whether a limited query must carry an ORDER BY (SQL Server's <c>OFFSET/FETCH</c>); the key is used when unsorted.</summary>
+    /// <summary>
+    ///     The SQL fragment skipping the bound offset with no limit (appended after ORDER BY): <c>OFFSET n</c> by default.
+    ///     A read that skips without taking returns every row after the offset, so a dialect without a bare offset writes
+    ///     the largest limit it has (MySQL).
+    /// </summary>
+    /// <param name="offsetParameter">The bound offset's marker.</param>
+    public virtual string OffsetClause(string offsetParameter) => $"OFFSET {offsetParameter}";
+
+    /// <summary>
+    ///     Whether a limited or offset query must carry an ORDER BY (SQL Server's <c>OFFSET/FETCH</c>); the key is used when
+    ///     unsorted.
+    /// </summary>
     public virtual bool RequiresOrderByForLimit => false;
 
     /// <summary>

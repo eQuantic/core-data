@@ -46,6 +46,13 @@ public class MySqlDialect : SqlDialect
         """;
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     MySQL and MariaDB take an offset only after a limit, and document the largest unsigned value as the limit that
+    ///     means "every row after it".
+    /// </remarks>
+    public override string OffsetClause(string offsetParameter) => $"LIMIT 18446744073709551615 OFFSET {offsetParameter}";
+
+    /// <inheritdoc />
     public override string TupleComparison(IReadOnlyList<string> columns, ComparisonOperator op, IReadOnlyList<string> parameters) =>
         $"({string.Join(", ", columns)}) {op switch
         {

@@ -274,4 +274,13 @@ public sealed class MariaDbTests
 
     [Test]
     public Task Distinct_values_of_two_members() => ReadShapeScenarios.DistinctOfTwoMembers(Shapes);
+
+    [Test]
+    public Task A_skip_without_a_take_returns_every_row_after_it() => ReadShapeScenarios.SkipWithoutTakeAndTakeWithoutSkip(Shapes);
+
+    [Test]
+    public Task A_take_of_zero_returns_nothing_without_asking_the_store() => ReadShapeScenarios.TakeZero(Shapes);
+
+    [Test]
+    public Task Includes_of_more_parents_than_one_statement_binds() => ReadShapeScenarios.IncludesPastTheParameterLimit(Shapes);
 }
