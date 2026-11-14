@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using eQuantic.Core.Data.Query;
 using eQuantic.Core.Data.Repository.Options;
 
@@ -139,5 +140,43 @@ public sealed class ReadShapesTests
         Assert.That(() => new QueryOptions<Track>().Take(-1), Throws.InstanceOf<ArgumentOutOfRangeException>());
         Assert.That(() => ReadShapes.RefuseForDistinct(new QueryOptions<Track>().OrderBy(x => x.Name)),
             Throws.InstanceOf<NotSupportedException>());
+    }
+
+    /// <summary>A member read that counts how many times an expression compiler reduces it, that is, compiles it.</summary>
+    private sealed class CountingRead(Expression read) : Expression
+    {
+        public static int Compilations;
+
+        public override ExpressionType NodeType => ExpressionType.Extension;
+
+        public override Type Type => read.Type;
+
+        public override bool CanReduce => true;
+
+        public override Expression Reduce()
+        {
+            Interlocked.Increment(ref Compilations);
+            return read;
+        }
+    }
+
+    [Test]
+    public void A_shape_s_sort_compiles_once_however_many_parents_it_pages()
+    {
+        var track = Expression.Parameter(typeof(Track), "track");
+        var key = Expression.Lambda<Func<Track, int?>>(new CountingRead(Expression.Property(track, nameof(Track.Position))), track);
+        var shape = new QueryOptions<Album>().Include(x => x.Tracks, tracks => tracks.OrderByDescending(key).Take(2))
+            .IncludeShapes[nameof(Album.Tracks)];
+
+        ReadShapes.Page([new Track { Position = 1 }, new Track { Position = 3 }, new Track { Position = 2 }], shape);
+        var once = CountingRead.Compilations;
+        for (var parent = 0; parent < 50; parent++)
+        {
+            var page = ReadShapes.Page([new Track { Position = parent }, new Track { Position = parent + 1 }, new Track()], shape);
+            Assert.That(page.Select(row => row.Position), Is.EqualTo(new int?[] { parent + 1, parent }));
+        }
+
+        Assert.That(once, Is.GreaterThan(0), "the key was compiled for the first parent");
+        Assert.That(CountingRead.Compilations, Is.EqualTo(once), "and never again for the next 50");
     }
 }
