@@ -175,6 +175,44 @@ internal sealed class FakeLeaseStore : LeaseStore
 }
 
 /// <summary>
+///     A lock a session holds and counts, as an advisory lock or <c>GET_LOCK</c> does: two acquisitions on one session
+///     both succeed. The attempt's answer can be held back, and its lock's release can be held in flight.
+/// </summary>
+internal sealed class SessionAttempt(Task answer, List<SessionAttempt.SessionLock> taken, TaskCompletionSource? releasing = null,
+    Task? release = null) : NamedLockAttempt
+{
+    public override bool WaitsOnStore => false;
+
+    public override async Task<NativeLock?> TryAsync(TimeSpan wait, CancellationToken cancellationToken)
+    {
+        await answer.WaitAsync(cancellationToken);
+        var native = new SessionLock(releasing, release);
+        lock (taken)
+        {
+            taken.Add(native);
+        }
+
+        return native;
+    }
+
+    internal sealed class SessionLock(TaskCompletionSource? releasing, Task? release) : NativeLock
+    {
+        public bool Released { get; private set; }
+
+        public override async Task ReleaseAsync()
+        {
+            releasing?.TrySetResult();
+            if (release is not null)
+            {
+                await release;
+            }
+
+            Released = true;
+        }
+    }
+}
+
+/// <summary>
 ///     Unit tests for the rules every provider shares around its store's own lock — no store: waiting and its
 ///     timeout, cancellation leaving nothing behind, reentrancy, and the end of a transaction. The providers' live
 ///     suites prove each store's mechanism under the same rules.
@@ -397,6 +435,35 @@ public sealed class NamedLockSetTests
 
         await fresh.DisposeAsync();
         Assert.That(server.IsHeld("item:5"), Is.False);
+    }
+
+    [Test]
+    public async Task Two_flows_that_take_one_name_at_once_share_it_and_the_first_to_let_go_leaves_it_held()
+    {
+        var set = NewSet();
+        var taken = new List<SessionAttempt.SessionLock>();
+        var answer = new TaskCompletionSource();
+        var releasing = new TaskCompletionSource();
+        var release = new TaskCompletionSource();
+
+        // The first flow's store answers only once the second flow holds the name: its own lock is then one too many.
+        var first = set.AcquireAsync("item:7", Timeout.InfiniteTimeSpan, false,
+            () => new SessionAttempt(answer.Task, taken, releasing, release.Task), default);
+        var second = await set.AcquireAsync("item:7", Timeout.InfiniteTimeSpan, false,
+            () => new SessionAttempt(Task.CompletedTask, taken), default);
+        answer.SetResult();
+
+        // While the first flow lets its extra lock go, the second flow lets go of the name.
+        await releasing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await second.DisposeAsync();
+        release.SetResult();
+
+        var held = await first.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.That(held.Lost.IsCancellationRequested, Is.False);
+        Assert.That(taken.Count(native => !native.Released), Is.EqualTo(1), "the first flow holds the name through the lock it shares");
+
+        await held.DisposeAsync();
+        Assert.That(taken.All(native => native.Released), Is.True, "the last handle let the store's lock go");
     }
 
     [Test]

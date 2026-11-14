@@ -126,32 +126,29 @@ public sealed class NamedLockSet
             native = await WaitAsync(name, timeout, attempt, cancellationToken).ConfigureAwait(false);
         }
 
-        Entry? entry = null;
+        // Held in the same step that records it, so no release (a handle let go, a transaction's end, the unit of
+        // work's disposal) ever finds the entry with nothing holding it.
+        INamedLock? shared = null;
         lock (_gate)
         {
-            if (!_closed && !_held.ContainsKey(name))
+            if (!_closed)
             {
-                entry = new Entry(this, name, native);
-                _held.Add(name, entry);
+                if (!_held.TryGetValue(name, out var existing))
+                {
+                    var entry = new Entry(this, name, native);
+                    _held.Add(name, entry);
+                    return entry.Hold(inTransaction);
+                }
+
+                // Another flow on the unit of work took the same name meanwhile (a unit of work serves one flow at a
+                // time): this acquisition holds that one, counted, and the store's second lock goes.
+                shared = existing.Hold(inTransaction);
             }
         }
 
-        if (entry is null)
-        {
-            // The unit of work was disposed while waiting, or another flow on it took the same name meanwhile
-            // (a unit of work serves one flow at a time; this keeps the store's lock from leaking either way).
-            await ReleaseQuietlyAsync(native, name).ConfigureAwait(false);
-            lock (_gate)
-            {
-                ThrowIfClosed();
-                return _held[name].Hold(inTransaction);
-            }
-        }
-
-        lock (_gate)
-        {
-            return entry.Hold(inTransaction);
-        }
+        // The unit of work was disposed while waiting, or the name is already held: the store's lock does not leak.
+        await ReleaseQuietlyAsync(native, name).ConfigureAwait(false);
+        return shared ?? throw new ObjectDisposedException(nameof(NamedLockSet), "The unit of work holding these locks was disposed.");
     }
 
     /// <summary>
