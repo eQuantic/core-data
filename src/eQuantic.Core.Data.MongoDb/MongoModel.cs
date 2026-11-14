@@ -263,7 +263,8 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     /// <summary>
     ///     Declares a member whose value the store assigns on insert, as <see cref="Modeling.StoreGeneratedAttribute" />
     ///     does: the next number of an atomic counter for an integral member (<c>findOneAndUpdate</c> with <c>$inc</c> on
-    ///     the <c>_sequences</c> collection, inside the open transaction), the server's clock for a date (read once per
+    ///     the <c>_sequences</c> collection, outside the open transaction, as a PostgreSQL sequence advances: a rollback
+    ///     leaves a gap), the server's clock for a date (read once per
     ///     commit and given to every insert of it), or the kind given. The value is on the entity when the commit
     ///     returns, and an update (a staged replace) keeps the stored value instead of writing the entity's.
     /// </summary>
