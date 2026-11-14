@@ -158,7 +158,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
 {
     private static IServiceScope NewScope() => CosmosTestServer.Provider.CreateScope();
 
-    private static IAsyncRepository<TEntity, string> Repo<TEntity>(IServiceScope scope) where TEntity : class, IEntity<string> =>
+    private static IAsyncRepository<TEntity, string> RepoOf<TEntity>(IServiceScope scope) where TEntity : class, IEntity<string> =>
         scope.ServiceProvider.GetRequiredService<IAsyncRepository<TEntity, string>>();
 
     private async Task Seed(params object[] entities)
@@ -178,7 +178,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     {
         using var scope = NewScope();
         var partition = Partition;
-        return (await Repo<RelItem>(scope).GetFilteredAsync(filter.AndAlso(x => x.Category == partition)))
+        return (await RepoOf<RelItem>(scope).GetFilteredAsync(filter.AndAlso(x => x.Category == partition)))
             .Select(x => x.Title).OrderBy(x => x).ToArray();
     }
 
@@ -213,10 +213,10 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
             Is.EqualTo(new[] { "A", "B" }), "a relation inside OR and AND");
 
         using var scope = NewScope();
-        Assert.That(await Repo<RelItem>(scope).CountAsync(new QueryOptions<RelItem>()
+        Assert.That(await RepoOf<RelItem>(scope).CountAsync(new QueryOptions<RelItem>()
                 .Where(x => x.Category == partition && x.Mentions!.Any(m => m.UserId == user))),
             Is.EqualTo(2L));
-        Assert.That(((IRepository<RelItem, string>)Repo<RelItem>(scope))
+        Assert.That(((IRepository<RelItem, string>)RepoOf<RelItem>(scope))
             .GetFiltered(x => x.Category == partition && x.Mentions!.Any(m => m.UserId == user && m.DeletedAt == null))
             .Select(x => x.Title), Is.EqualTo(new[] { "A" }), "the synchronous read resolves the keys too");
     }
@@ -238,22 +238,22 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
 
         using (var read = NewScope())
         {
-            Assert.That((await Repo<RelArtifact>(read).GetFilteredAsync(x => x.Repo!.Space!.WorkspaceId == workspace)).Select(x => x.Name),
+            Assert.That((await RepoOf<RelArtifact>(read).GetFilteredAsync(x => x.Repo!.Space!.WorkspaceId == workspace)).Select(x => x.Name),
                 Is.EqualTo(new[] { "a1" }), "a reference of a reference");
-            Assert.That(await Repo<RelArtifact>(read).UpdateManyAsync(x => x.Repo!.WorkspaceId == other, x => new RelArtifact { Downloads = 7 }),
+            Assert.That(await RepoOf<RelArtifact>(read).UpdateManyAsync(x => x.Repo!.WorkspaceId == other, x => new RelArtifact { Downloads = 7 }),
                 Is.EqualTo(2L), "a set-based update across the reference");
-            var returned = await ((IReturningUpdateRepository<RelArtifact, string>)Repo<RelArtifact>(read))
+            var returned = await ((IReturningUpdateRepository<RelArtifact, string>)RepoOf<RelArtifact>(read))
                 .UpdateAndGetAsync(x => x.Repo!.WorkspaceId == other && x.Name == "a3", x => new RelArtifact { Downloads = x.Downloads + 1 });
             Assert.That(returned.Select(x => (x.Name, x.Downloads)), Is.EqualTo(new[] { ("a3", 8) }));
         }
 
         using (var scope = NewScope())
         {
-            Assert.That(await Repo<RelArtifact>(scope).DeleteManyAsync(x => x.Repo!.WorkspaceId == workspace), Is.EqualTo(2L));
+            Assert.That(await RepoOf<RelArtifact>(scope).DeleteManyAsync(x => x.Repo!.WorkspaceId == workspace), Is.EqualTo(2L));
         }
 
         using var check = NewScope();
-        Assert.That((await Repo<RelArtifact>(check).GetFilteredAsync(x => x.Category == partition)).Select(x => x.Name).OrderBy(x => x),
+        Assert.That((await RepoOf<RelArtifact>(check).GetFilteredAsync(x => x.Category == partition)).Select(x => x.Name).OrderBy(x => x),
             Is.EqualTo(new[] { "a3", "a4" }));
     }
 
@@ -269,8 +269,8 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
         Assert.That(await Titles(x => x.Box!.Name == "inbox"), Is.EqualTo(new[] { "A" }));
 
         using var scope = NewScope();
-        Assert.That(await Repo<RelItem>(scope).DeleteManyAsync(x => x.Category == partition && x.Box == null && !x.Runs!.Any()), Is.EqualTo(2L));
-        Assert.That((await Repo<RelItem>(scope).GetFilteredAsync(x => x.Category == partition)).Select(x => x.Title), Is.EqualTo(new[] { "A" }));
+        Assert.That(await RepoOf<RelItem>(scope).DeleteManyAsync(x => x.Category == partition && x.Box == null && !x.Runs!.Any()), Is.EqualTo(2L));
+        Assert.That((await RepoOf<RelItem>(scope).GetFilteredAsync(x => x.Category == partition)).Select(x => x.Title), Is.EqualTo(new[] { "A" }));
     }
 
     [Test]
@@ -278,7 +278,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     {
         using var scope = NewScope();
         var refusal = Assert.ThrowsAsync<NotSupportedException>(() =>
-            Repo<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(m => m.RelItemId == x.Id)));
+            RepoOf<RelItem>(scope).GetFilteredAsync(x => x.Mentions!.Any(m => m.RelItemId == x.Id)));
         Assert.That(refusal!.Message, Does.Contain("entity's own members"));
     }
 
@@ -287,7 +287,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
     {
         using var scope = NewScope();
         var user = Guid.NewGuid().ToString("N");
-        var plan = ((IExplainableRepository<RelItem>)Repo<RelItem>(scope))
+        var plan = ((IExplainableRepository<RelItem>)RepoOf<RelItem>(scope))
             .Explain(new QueryOptions<RelItem>().Where(x => x.Mentions!.Any(m => m.UserId == user) && x.Box == null));
         Assert.That(plan.Notes, Has.Some.Contains("resolves first").And.Some.Contains("'rel_mentions'"));
         Assert.That(plan.Notes, Has.Some.Contains("NOT IN"));
@@ -303,7 +303,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
             new RelCompany { Name = "Acme.Corp", Rank = 4 });
 
         using var scope = NewScope();
-        var repo = Repo<RelCompany>(scope);
+        var repo = RepoOf<RelCompany>(scope);
         var partition = Partition;
         async Task<string[]> Names(System.Linq.Expressions.Expression<Func<RelCompany, bool>> filter) =>
             (await repo.GetFilteredAsync(filter.AndAlso(x => x.Category == partition)))
@@ -343,7 +343,7 @@ public sealed class CosmosQueryPredicateTests : CosmosIntegrationTest
         await Seed(companies.Cast<object>().ToArray());
 
         using var scope = NewScope();
-        var repo = Repo<RelCompany>(scope);
+        var repo = RepoOf<RelCompany>(scope);
         var partition = Partition;
         var array = new[] { companies[0].Id, companies[1].Id };
         var list = new List<string> { companies[1].Id, companies[2].Id };
