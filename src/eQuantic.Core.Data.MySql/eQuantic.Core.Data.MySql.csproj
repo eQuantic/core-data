@@ -26,8 +26,9 @@
 
     <ItemGroup>
         
-        <PackageReference Include="MySqlConnector" Version="2.6.2" />
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+        <PackageReference Include="MySqlConnector" Version="3.0.0" />
+        <!-- The floor MySqlConnector 3 sets: 10.0.0 here would be a downgrade (NU1605). -->
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.15" />
     </ItemGroup>
 
     <ItemGroup>

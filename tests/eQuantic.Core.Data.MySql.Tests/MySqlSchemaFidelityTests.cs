@@ -2,9 +2,28 @@ using System.Data.Common;
 using System.Text.Json.Nodes;
 using eQuantic.Core.Data.Relational;
 using eQuantic.Core.Data.Repository;
+using eQuantic.Core.Data.MySql.Extensions;
 using Microsoft.Extensions.DependencyInjection;
+using MySqlConnector;
 
 namespace eQuantic.Core.Data.MySql.Tests;
+
+/// <summary>A <c>DateTime</c> over a <c>DATE</c> column and <c>TimeSpan</c>s over <c>TIME</c> columns, keyed by a <c>char(36)</c> Guid.</summary>
+[Modeling.Entity("calendar_rows")]
+public sealed class CalendarRow : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+
+    public DateTime Day { get; set; }
+
+    public TimeSpan Starts { get; set; }
+
+    public TimeSpan? Ends { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
 
 /// <summary>
 ///     What mapping a schema another tool created needs, against a real MySQL: a JSON member that leaves the
@@ -91,6 +110,59 @@ public sealed class MySqlSchemaFidelityTests : MySqlIntegrationTest
 
         Assert.That(explained, Does.Contain("required (NOT NULL)"));
         Assert.That(explained, Does.Contain("CreatedAt \"created_at\" (datetime(3)) without zone, UTC, 3 fractional digits"));
+    }
+
+    [Test]
+    public async Task A_DateTime_over_a_DATE_column_and_a_TimeSpan_over_a_TIME_column_read_as_they_did_on_7_0()
+    {
+        var name = "db_" + Guid.NewGuid().ToString("N");
+        await using (var admin = new MySqlConnection(MySqlTestServer.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var create = new MySqlCommand($"CREATE DATABASE {name}", admin);
+            await create.ExecuteNonQueryAsync();
+        }
+
+        var connectionString = new MySqlConnectionStringBuilder(MySqlTestServer.AdminConnectionString) { Database = name }.ConnectionString;
+        var raw = Guid.NewGuid();
+        await using (var connection = new MySqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await using var table = new MySqlCommand(
+                "CREATE TABLE calendar_rows (id char(36) PRIMARY KEY, day date NOT NULL, starts time(3) NOT NULL, ends time(3) NULL)", connection);
+            await table.ExecuteNonQueryAsync();
+            await using var insert = new MySqlCommand(
+                $"INSERT INTO calendar_rows VALUES ('{raw}', '2026-11-15', '09:30:15.250', NULL)", connection);
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        var services = new ServiceCollection();
+        services.AddMySqlDatabase(connectionString, model => model.Entity<CalendarRow>(_ => { }));
+        services.AddMySqlRepositories();
+        await using var provider = services.BuildServiceProvider();
+        var written = new CalendarRow { Id = Guid.NewGuid(), Day = new DateTime(2026, 11, 16), Starts = new TimeSpan(0, 8, 0, 0, 500), Ends = new TimeSpan(17, 45, 0) };
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<IAsyncRepository<CalendarRow, Guid>>().AddAsync(written);
+            await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+        }
+
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IAsyncRepository<CalendarRow, Guid>>();
+            var seeded = (await repo.GetAsync(raw))!;
+            Assert.That(seeded.Id, Is.EqualTo(raw), "a char(36) key reads as the Guid it holds");
+            Assert.That(seeded.Day, Is.EqualTo(new DateTime(2026, 11, 15)));
+            Assert.That(seeded.Starts, Is.EqualTo(new TimeSpan(0, 9, 30, 15, 250)));
+            Assert.That(seeded.Ends, Is.Null);
+
+            var back = (await repo.GetAsync(written.Id))!;
+            Assert.That(back.Day, Is.EqualTo(written.Day));
+            Assert.That(back.Starts, Is.EqualTo(written.Starts));
+            Assert.That(back.Ends, Is.EqualTo(written.Ends));
+            Assert.That(await ((eQuantic.Core.Data.Repository.Read.IAggregateReadRepository<CalendarRow>)repo).MaxAsync(x => x.Day),
+                Is.EqualTo(new DateTime(2026, 11, 16)));
+        }
     }
 
     private static string Nullable(string table, string column) =>
