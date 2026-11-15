@@ -76,3 +76,27 @@ public sealed record CosmosGeneratedMember(System.Reflection.PropertyInfo Proper
         });
     }
 }
+
+/// <summary>
+///     Writes a date declared with <see cref="DateStorageAttribute" /> as UTC, rounded to the declared precision, in the
+///     serializer's own ISO 8601 form, and reads it back as UTC (a <c>DateTimeOffset</c> with offset zero). A member-level
+///     converter, set by the provider's annotation contract.
+/// </summary>
+/// <typeparam name="TMember">The member's type: <c>DateTime</c>, <c>DateTimeOffset</c> or either nullable.</typeparam>
+internal sealed class CosmosDateStorageConverter<TMember>(DateStorageAttribute declaration) : JsonConverter<TMember>
+{
+    public override TMember Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        (TMember)DateStorageRules.FromStored(reader.GetDateTimeOffset(), typeof(TMember))!;
+
+    public override void Write(Utf8JsonWriter writer, TMember value, JsonSerializerOptions options)
+    {
+        if (DateStorageRules.ToUtc(value, declaration.Precision) is { } utc)
+        {
+            writer.WriteStringValue(utc);
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
+    }
+}

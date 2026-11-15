@@ -236,7 +236,7 @@ internal static class CassandraMapper
 
     /// <summary>Reads a column in its stored form and gives it back as the member's value.</summary>
     private static object? Value(Row row, CassandraColumn column, Type memberType, string name) =>
-        CassandraValues.FromStored(memberType, row.GetValue(CassandraValues.StoredType(column, memberType), name));
+        CassandraValues.FromStored(column, memberType, row.GetValue(CassandraValues.StoredType(column, memberType), name));
 
     /// <summary>Reads a member from the entity in the form its column stores.</summary>
     private static object? Stored(object entity, CassandraColumn? column) =>

@@ -223,3 +223,65 @@ internal sealed class MongoStoredValueSerializationProvider : IBsonSerialization
             : null;
     }
 }
+
+/// <summary>
+///     Stores a date declared with <see cref="DateStorageAttribute" /> as the BSON date it is (milliseconds, UTC): the
+///     member's value converted to UTC and rounded to the declared precision before it is written, and read back as
+///     UTC (a <c>DateTimeOffset</c> with offset zero). Filters and set-based updates serialize their constants through
+///     the member's serializer, so they compare and write the same UTC value. <c>null</c> stays <c>null</c>.
+/// </summary>
+/// <typeparam name="TMember">The member's type: <c>DateTime</c>, <c>DateTimeOffset</c> or either nullable.</typeparam>
+internal sealed class MongoDateStorageSerializer<TMember>(DateStorageAttribute declaration) : SerializerBase<TMember>,
+    IMongoStoredValueSerializer
+{
+    public override TMember Deserialize(BsonDeserializationContext context, BsonDeserializationArgs args)
+    {
+        var reader = context.Reader;
+        switch (reader.GetCurrentBsonType())
+        {
+            case BsonType.Null:
+                reader.ReadNull();
+                return default!;
+            case BsonType.DateTime:
+                var stored = BsonUtils.ToDateTimeFromMillisecondsSinceEpoch(reader.ReadDateTime());
+                return (TMember)DateStorageRules.FromStored(stored, typeof(TMember))!;
+            default:
+                throw new FormatException(
+                    $"A date declared with [DateStorage] is stored as a BSON date, and the document holds a BSON {reader.GetCurrentBsonType()}.");
+        }
+    }
+
+    public override void Serialize(BsonSerializationContext context, BsonSerializationArgs args, TMember value)
+    {
+        if (DateStorageRules.ToUtc(value, declaration.Precision) is { } utc)
+        {
+            context.Writer.WriteDateTime(BsonUtils.ToMillisecondsSinceEpoch(utc));
+        }
+        else
+        {
+            context.Writer.WriteNull();
+        }
+    }
+
+    public string Describe() =>
+        (declaration.WithoutZone ? "date without zone, UTC" : "date, UTC") +
+        (declaration.Precision >= 0 ? $", {declaration.Precision} fractional digits" : string.Empty);
+}
+
+/// <summary>The date-storage serializers MongoDB gives the members declared with <see cref="DateStorageAttribute" />.</summary>
+internal static class MongoDateStorage
+{
+    /// <summary>MongoDB's dates keep milliseconds.</summary>
+    public const int MaxPrecision = 3;
+
+    /// <summary>The serializer for a member, after the declaration is checked against what MongoDB keeps.</summary>
+    /// <param name="property">The member.</param>
+    /// <param name="declaration">Its date storage.</param>
+    public static IBsonSerializer For(System.Reflection.PropertyInfo property, DateStorageAttribute declaration)
+    {
+        DateStorageRules.Validate(property.PropertyType, declaration.Precision,
+            $"{property.DeclaringType?.Name}.{property.Name}", "MongoDB", MaxPrecision);
+        return (IBsonSerializer)Activator.CreateInstance(
+            typeof(MongoDateStorageSerializer<>).MakeGenericType(property.PropertyType), declaration)!;
+    }
+}

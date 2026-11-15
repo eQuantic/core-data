@@ -19,6 +19,12 @@ internal static class CassandraValues
             return value;
         }
 
+        if (column.Dates is { } dates)
+        {
+            // A date declared with [DateStorage]: UTC, rounded to the declared precision, as on every engine.
+            return DateStorageRules.ToUtc(value, dates.Precision);
+        }
+
         var type = Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType;
         if (type.IsEnum)
         {
@@ -48,6 +54,10 @@ internal static class CassandraValues
 
         return JsonMembers.Is(type) ? typeof(string) : memberType;
     }
+
+    /// <summary>The member's value from what the column stores, a declared date read back as UTC.</summary>
+    public static object? FromStored(CassandraColumn? column, Type memberType, object? stored) =>
+        column?.Dates is not null ? DateStorageRules.FromStored(stored, memberType) : FromStored(memberType, stored);
 
     /// <summary>The member's value from what the column stores.</summary>
     public static object? FromStored(Type memberType, object? stored)

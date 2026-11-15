@@ -72,7 +72,11 @@ public sealed class MongoModel
                     { Value: Modeling.StoreValue.Clock } => " store-generated (clock: the server's time, read once per commit)",
                     _ => string.Empty,
                 };
-                report.AppendLine($"  member: {member.MemberName} \"{member.ElementName}\"{stored}{store}");
+                var required = member.MemberInfo.GetCustomAttributes(typeof(Modeling.FacetAttribute), inherit: true)
+                    is [Modeling.FacetAttribute { Required: true }, ..]
+                    ? " required (not enforced: a MongoDB document has no column nullability)"
+                    : string.Empty;
+                report.AppendLine($"  member: {member.MemberName} \"{member.ElementName}\"{stored}{required}{store}");
             }
 
             foreach (var note in notes)
@@ -170,6 +174,8 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     internal List<Action<BsonClassMap<TEntity>>> Steps { get; } = [];
     internal List<string> Notes { get; } = [];
     internal List<(string Member, Modeling.StoreValue Value)> GeneratedMembers { get; } = [];
+    private readonly HashSet<string> _dates = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _converted = new(StringComparer.Ordinal);
 
     internal MongoEntityBuilder()
     {
@@ -279,6 +285,35 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     }
 
     /// <summary>
+    ///     Declares how a date member is stored, as <see cref="Modeling.DateStorageAttribute" /> does. MongoDB stores a
+    ///     date as a BSON date in UTC either way; the value is converted to UTC and rounded to
+    ///     <paramref name="precision" /> fractional digits of a second (at most 3: MongoDB keeps milliseconds) before it
+    ///     is written, and read back as UTC.
+    /// </summary>
+    /// <typeparam name="TMember">The member type (<c>DateTime</c> or <c>DateTimeOffset</c>).</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="withoutZone">Whether the date is declared without its zone (MongoDB's dates hold none).</param>
+    /// <param name="precision">The fractional digits of a second kept, 0 to 3; <c>-1</c> keeps milliseconds.</param>
+    public MongoEntityBuilder<TEntity> DateStorage<TMember>(Expression<Func<TEntity, TMember>> selector, bool withoutZone,
+        int precision = -1)
+    {
+        var member = eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector);
+        var property = typeof(TEntity).GetProperty(member)
+                       ?? throw new InvalidOperationException($"'{typeof(TEntity).Name}' has no property '{member}'.");
+        if (_converted.Contains(member))
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(TEntity).Name}.{member}' declares both a date storage and its own converter; declare one of them.");
+        }
+
+        var serializer = MongoDateStorage.For(property,
+            new Modeling.DateStorageAttribute { WithoutZone = withoutZone, Precision = precision });
+        _dates.Add(member);
+        Steps.Add(classMap => classMap.MapMember(selector).SetSerializer(serializer));
+        return this;
+    }
+
+    /// <summary>
     ///     Declares a value conversion for the member: documents store <typeparamref name="TStored" />, the entity
     ///     keeps <typeparamref name="TMember" />. Filters, sorts and set-based updates on the member render against
     ///     the stored representation — the driver serializes constants through the member's serializer.
@@ -291,6 +326,14 @@ public sealed class MongoEntityBuilder<TEntity> where TEntity : class
     public MongoEntityBuilder<TEntity> Converts<TMember, TStored>(Expression<Func<TEntity, TMember>> selector,
         Func<TMember, TStored> toStored, Func<TStored, TMember> fromStored)
     {
+        var member = eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberName(selector);
+        if (_dates.Contains(member) || typeof(TEntity).GetProperty(member) is { } property && Modeling.DateStorageRules.For(property) is not null)
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(TEntity).Name}.{member}' declares both a date storage and its own converter; declare one of them.");
+        }
+
+        _converted.Add(member);
         Steps.Add(classMap => classMap.MapMember(selector)
             .SetSerializer(new MongoValueSerializer<TMember, TStored>(toStored, fromStored)));
         Notes.Add($"converts: {eQuantic.Linq.Expressions.MemberPathExtensions.GetMemberPath(selector)} " +

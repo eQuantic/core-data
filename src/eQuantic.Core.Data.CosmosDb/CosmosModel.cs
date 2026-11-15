@@ -219,6 +219,21 @@ public sealed class CosmosModel
                 report.AppendLine("  concurrency token: _etag (writes replace conditionally with If-Match)");
             }
 
+            foreach (var property in configuration.EntityType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+            {
+                if (property.GetCustomAttributes(typeof(Data.Modeling.FacetAttribute), inherit: true)
+                    is [Data.Modeling.FacetAttribute { Required: true }, ..])
+                {
+                    report.AppendLine($"  required: {property.Name} (not enforced: a Cosmos DB document has no column nullability)");
+                }
+
+                if (Data.Modeling.DateStorageRules.For(property) is { } dates)
+                {
+                    report.AppendLine($"  date: {property.Name} ({(dates.WithoutZone ? "without zone, UTC" : "UTC")}" +
+                                      (dates.Precision >= 0 ? $", {dates.Precision} fractional digits" : string.Empty) + ", an ISO 8601 string)");
+                }
+            }
+
             foreach (var generated in configuration.StoreGenerated)
             {
                 report.AppendLine(generated.Value == Data.Modeling.StoreValue.Sequence
@@ -285,7 +300,25 @@ public sealed class CosmosModelBuilder
     ///     built model feeds <see cref="CosmosClientFactory.Create(string, CosmosModel, Microsoft.Extensions.Logging.ILoggerFactory?)" />
     ///     and <see cref="CosmosModel.Explain" />.
     /// </summary>
-    public CosmosModel Build() => _model;
+    public CosmosModel Build()
+    {
+        // A type-level conversion would serialize a date declared with [DateStorage] its own way; the two cannot both
+        // decide what the document holds.
+        foreach (var property in _model.Configurations.Keys
+                     .SelectMany(type => type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                     .Where(property => Data.Modeling.DateStorageRules.For(property) is not null))
+        {
+            var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+            if (_model.Converters.Any(converter => converter.CanConvert(type) || converter.CanConvert(property.PropertyType)))
+            {
+                throw new InvalidOperationException(
+                    $"'{property.DeclaringType?.Name}.{property.Name}' declares a date storage, and the model converts every " +
+                    $"{type.Name} with Converts(...); declare one of them.");
+            }
+        }
+
+        return _model;
+    }
 
     private sealed class CosmosValueConverter<TMember, TStored>(Func<TMember, TStored> toStored, Func<TStored, TMember> fromStored)
         : System.Text.Json.Serialization.JsonConverter<TMember>
@@ -513,6 +546,17 @@ public sealed class CosmosEntityBuilder<TEntity> where TEntity : class
 
                 return builder.Build();
             };
+
+        // A date declaration Cosmos DB cannot apply is refused here, by name: its documents keep seven digits, so only
+        // the member's type and the shared range bound it.
+        foreach (var property in typeof(TEntity).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+        {
+            if (Data.Modeling.DateStorageRules.For(property) is { } dates)
+            {
+                Data.Modeling.DateStorageRules.Validate(property.PropertyType, dates.Precision,
+                    $"{typeof(TEntity).Name}.{property.Name}", "Cosmos DB");
+            }
+        }
 
         return new CosmosEntityConfiguration<TEntity>(
             _container ?? typeof(TEntity).Name, _partitionKeyPaths.ToList(), partitionKey, _id ?? DefaultId(), _ttlSeconds,
