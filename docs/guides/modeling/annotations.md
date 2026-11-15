@@ -20,6 +20,8 @@ mechanism**; annotations outside a store's vocabulary are ignored, never errors.
 | `[SearchIndex]` (+`Mode`, `CaseInsensitive`) | **GIN trigram** index on PostgreSQL (other dialects: no index, `LIKE` still pushes down) | — ignored (Cosmos indexes every path) | SASI index — `LIKE` pushes down natively, and case-insensitive matching too when `CaseInsensitive` | — ignored |
 | `[TimeToLive(seconds)]` (class) | — ignored | container default TTL | table `default_time_to_live` | TTL index (per document, from the date member) |
 | `[Facet]` (`Length`, `Precision`, `Scale`) | sized DDL: `varchar(n)` / `nvarchar(n)`, `numeric(p,s)` | — ignored | — ignored | — ignored |
+| `[Facet(Required = true)]` | the column is `NOT NULL`, the store refuses a row without it, and the drift check expects it so | — ignored (no column nullability; `Explain()` says it is not enforced) | — ignored (no `NOT NULL` outside the key; `Explain()` says so) | — ignored (no column nullability; `Explain()` says so) |
+| `[DateStorage]` (`WithoutZone`, `Precision`) | the UTC wall time: `timestamp(p) without time zone` (PG), `datetime(p)` (MySQL/MariaDB), `datetime2(p)` (SQL Server); written as UTC whatever the session's time zone, rounded to the precision, read back as UTC | an ISO 8601 string in UTC, rounded | a `timestamp` in UTC, rounded (milliseconds at most) | a BSON date in UTC, rounded (milliseconds at most) |
 | `[EnumType]` (enum; `[StoredAs]` on its members) | stored as its **labels**: a PostgreSQL enum type, a MySQL/MariaDB `ENUM(…)`, SQL Server text held to the labels by a `CHECK` | the label as a JSON string (documents **and** queries) | the label as `text` | the label as a BSON string |
 | `[StoreGenerated]` (+`StoreValue`) | the store assigns it on insert: an identity or a sequence object (`Sequence`), a clock default (`Clock`); read back by `RETURNING` / `OUTPUT INSERTED` / the row by its key (MySQL); never written by an update | an atomic `Increment` patch on a counter item; `GetCurrentDateTime()` read once per commit | a sequence advanced by lightweight transactions; `toTimestamp(now())` | an atomic `$inc` on a counter document, majority-acknowledged and outside the open transaction (a rollback leaves a gap); the server's `hello` clock read once per commit |
 
@@ -69,7 +71,7 @@ message — instead of at model build:
 | `EQD002` / `EQD003` | several `[PartitionKey]` / `[ClusteringKey]` members share an `Order` (ambiguous composition) |
 | `EQD004` | more than one `[EntityKey]` member (composite keys are fluent: `Key(x => new { … })`) |
 | `EQD005` | `[TimeToLive]` with a non-positive lifetime |
-| `EQD006` | an invalid `[Facet]` (negative values, `Scale` > `Precision`, `Length` on a non-string, `Precision` on a non-decimal, or an empty facet) |
+| `EQD006` | an invalid `[Facet]` (negative values, `Scale` > `Precision`, `Length` on a non-string, `Precision` on a non-decimal, or a facet that declares none of `Length`, `Precision`/`Scale` or `Required`) |
 | `EQD007` | an `[Unmapped]` member also carrying mapping annotations |
 | `EQD008` | `[SearchIndex]` on a non-string member |
 | `EQD009` | `[Counter]` on a non-integral member |
@@ -78,6 +80,7 @@ message — instead of at model build:
 | `EQD012` | `[StoreGenerated]` on a member no store generates in that kind (a sequence numbers an `int`, `long` or `short`; the clock stamps a `DateTime` or `DateTimeOffset`) |
 | `EQD013` | `[StoreGenerated]` on the key (declare `[EntityKey(Generated = true)]`) or on the concurrency token |
 | `EQD014` | an `[EnumType]` enum with an empty label, or a label naming two members |
+| `EQD015` | `[DateStorage]` on a member that is not a `DateTime` or `DateTimeOffset`, or with a `Precision` outside 0 to 6 |
 
 Provider-*relative* rules (what one store supports and another does not) deliberately stay at
 runtime, where the provider is known and the message can be exact. Severity is Warning by default;
@@ -123,6 +126,27 @@ build to refuse.
   (`Generated(x => x.Member, "now()")`) for a schema another tool made. The member is one of the
   entity's own: `Generated(x => x.Audit.Serial)` is refused on every engine, rather than read by its
   last segment as the entity's own `Serial`.
+- **`[Facet(Required = true)]` means "the store holds a value here".** The relational migrations create the
+  column `NOT NULL`, the store refuses a row that leaves it null, and the drift check expects `NOT NULL`
+  (a key and a store-generated column are expected so with or without it). Adding a required column to a
+  table that may hold rows needs the value those rows take: without `[DefaultValue]` (or `Default(...)`)
+  the migration is refused before any of its steps runs; with it, the column is added `NOT NULL` with that
+  default, and the rows already there take it. Nullability is never inferred from C# (a non-nullable
+  value type or reference annotation): that would change the columns new migrations create and the drift
+  check's verdict on every database a previous version created.
+- **`[DateStorage]` means "this date is UTC, kept to this precision".** A value is converted to UTC before
+  it is written (a `Local` `DateTime` by its zone, an `Unspecified` one taken as UTC, a `DateTimeOffset`
+  by its offset), rounded half away from zero to `Precision` fractional digits of a second, and read back
+  as UTC: a `DateTime` with `DateTimeKind.Utc`, a `DateTimeOffset` with offset zero. With
+  `WithoutZone = true` the relational column holds the wall time and no zone (PostgreSQL's
+  `timestamp without time zone`, what a schema made by Prisma or by hand often holds), and the value
+  stored never depends on the time zone of the store's session: PostgreSQL binds it as `timestamp`, so the
+  server does not read it in its own zone. On the relational engines the declaration is a column
+  conversion, so inserts, updates (set-based included), upserts, filters, inlined literals and reads all go
+  through it. MongoDB and Cassandra keep milliseconds, so a `Precision` above 3 is refused there; a
+  declaration on a member that is not a date, or on a member that also declares its own converter, is
+  refused on every engine when the model is built. A `DateTime` member without it keeps being stored as it
+  always was.
 - **Composite keys are fluent-only.** An annotation declares one member; a composite key is a
   projection — `Key(x => new { x.OrderId, x.LineNo })` — and lives in the
   [fluent builder](fluent.md).

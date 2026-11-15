@@ -16,6 +16,8 @@ SaleOrder -> table "sale_orders"
   concurrency token: Version "version"
   column: Name "client_name" (varchar(200))
   column: Email "email" (text) (converted from EmailAddress)
+  column: Status "status" (text) required (NOT NULL)
+  column: PlacedAt "placed_at" (timestamp(3) without time zone) without zone, UTC, 3 fractional digits
   clustering: placed_at DESC (multi-column index)
   search index: Description "description" (GIN trigram via pg_trgm; LIKE stops scanning)
   lifecycle: soft delete + live-rows filter (IEntityTimeEnded)
@@ -24,6 +26,12 @@ SaleOrder -> table "sale_orders"
 Every line answers a question you would otherwise answer by reading DDL: what did the column end up
 being called, what type did the facet produce, is the token active, did the dialect materialize the
 search index or ignore it (`no index structure on this dialect; LIKE still pushes down, unindexed`).
+
+`required (NOT NULL)` marks a member declared required: the column is created `NOT NULL`, and the drift
+check expects it so (a key and a store-generated column are expected `NOT NULL` without saying). A
+column without it is expected nullable. The document and wide-column engines name a required member too,
+and say the store does not enforce it: `required (not enforced: a MongoDB document has no column
+nullability)`, and the same for Cosmos DB and for Cassandra outside its primary key.
 
 ## Cosmos DB
 

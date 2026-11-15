@@ -16,6 +16,8 @@ services.AddPostgreSqlDatabase(connectionString, model => model
         .Ignore(x => x.Scratch)
         .Facet(x => x.Name, length: 200)                   // varchar(200)
         .Facet(x => x.Total, precision: 18, scale: 2)      // numeric(18,2)
+        .Required(x => x.Name)                             // NOT NULL, as [Facet(Required = true)]
+        .DateStorage(x => x.PlacedAt, withoutZone: true, precision: 3) // timestamp(3) without time zone, UTC
         .Converts(x => x.Email, email => email.Value, EmailAddress.Create)
         .ConcurrencyToken(x => x.Version)                  // int, long or Guid
         .Reference(x => x.Buyer, x => x.BuyerCode)         // FK the {Nav}Id convention can't guess
@@ -34,6 +36,13 @@ composite-keyed target refuse with guidance (a single FK column cannot address a
 enum-as-string) to a stored scalar. The conversion applies **everywhere**: DDL column type, insert
 and update binding, filter constants, set-based updates and materialization — declared once.
 
+**Required members and dates.** `Required(selector)` makes the column `NOT NULL`, as
+`[Facet(Required = true)]` does, and `DateStorage(selector, withoutZone, precision)` stores a date as
+`[DateStorage]` does: UTC whatever the session's time zone, rounded to `precision` fractional digits
+(0 to 6, `-1` for the store's own), and read back as UTC. A date storage rides the same conversion path
+as `Converts`, so a member cannot declare both; see [Annotations](annotations.md) for what each engine
+stores.
+
 ## MongoDB — `MongoModelBuilder`
 
 ```csharp
@@ -45,6 +54,7 @@ services.AddMongoRepositories(connectionString, "shop", model => model
         .Ignore(x => x.Scratch)
         .Converts(x => x.Grade, g => g.ToString(), s => Enum.Parse<Grade>(s))
         .ConcurrencyToken(x => x.Version)
+        .DateStorage(x => x.SeenAt, withoutZone: true, precision: 3)  // a BSON date in UTC, rounded
         .ClusteringKey(x => x.Category).ClusteringKey(x => x.Score, descending: true)
         .TimeToLive(x => x.CreatedAt, TimeSpan.FromHours(1))));
 ```

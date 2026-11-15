@@ -364,12 +364,18 @@ says that outright when it sees one, because it is a thing to learn from a check
 deployment.
 
 One thing worth knowing about nullability on the relational stores: the engine's `CREATE TABLE`
-writes no `NOT NULL` for ordinary columns — only the primary key is required, and that by the
-store's own rule. So `drift` expects every non-key column to be nullable, and a column that *has* a
-`NOT NULL` is reported as having been tightened by hand. It is the constraint that starts rejecting
-writes your code allows, so it is worth knowing about either way round. A store-generated column is
-the other exception: the store always gives it a value, the engine writes it `NOT NULL`, and that is
-what `drift` expects of it.
+writes `NOT NULL` only where the model says the store must hold a value — the primary key, a
+store-generated column (the store always gives it one), and a member declared required
+(`[Facet(Required = true)]` or `Required(...)`). `drift` expects exactly that: those columns `NOT NULL`,
+every other one nullable. A column that is `NOT NULL` where the model does not say so is reported as
+tightened by hand (the constraint that starts rejecting writes your code allows), and a required member
+over a nullable column as loosened. To check a schema another tool created, such as one made by
+Prisma, declare its `NOT NULL` columns required, and the check is silent on a matching table.
+
+Types are compared the way the store spells them, facets included, so a declared precision is compared
+too: a date declared `[DateStorage(WithoutZone = true, Precision = 3)]` expects
+`timestamp(3) without time zone` on PostgreSQL, `datetime(3)` on MySQL and MariaDB, and `datetime2(3)`
+on SQL Server, whose catalogue now reports the scale of `datetime2`, `datetimeoffset` and `time`.
 
 An enum stored as its labels is compared as the column the dialect gives it — PostgreSQL's enum type,
 MySQL's `ENUM(…)` with its labels, SQL Server's `nvarchar` as wide as the longest label — so a column

@@ -80,6 +80,11 @@ acknowledging a full-table fetch takes two signatures, deliberately.
 
 ## Enums as labels, JSON members, store-generated members
 
+- **Dates** — `[DateStorage]` keeps the `timestamp` column and converts the value: UTC, rounded to the
+  declared precision (at most 3: a `timestamp` keeps milliseconds), read back as UTC, a
+  `DateTimeOffset` with offset zero. `[Facet(Required = true)]` is ignored (Cassandra has no `NOT NULL`
+  outside the primary key), and `Explain()` says so.
+
 - **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, gives the member a
   `text` column holding its `[StoredAs]` label (or its name). Writes, reads, filters (the
   compiler's `(int)x.State == 1` included) and set-based updates bind the label. An ordered comparison
