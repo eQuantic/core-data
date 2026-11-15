@@ -139,7 +139,10 @@ public sealed class EntityAccessorGenerator : IIncrementalGenerator
             source.AppendLine("            {");
             foreach (var member in entity.Members)
             {
-                source.AppendLine($"                \"{member.Name}\" => typed.{member.Name},");
+                // Each arm boxes on its own. Left to itself, C# gives the switch the arms' best common type, and
+                // JsonNode converts implicitly from strings, numbers, booleans, dates and Guids: an entity with a
+                // JsonNode member would read every one of those members as a JsonValue.
+                source.AppendLine($"                \"{member.Name}\" => (object?)typed.{member.Name},");
             }
 
             source.AppendLine("                _ => null,");

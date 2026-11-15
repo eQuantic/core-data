@@ -68,7 +68,7 @@ public sealed class RelationalModelSnapshotSource : IModelSnapshotSource
             Scale = column.Scale,
             // A reference type is nullable unless the model says otherwise; the engine has no non-nullable
             // reference concept, so what matters to a comparison is the value-type case being explicit.
-            Nullable = underlying is not null || !stored.IsValueType,
+            Nullable = (underlying is not null || !stored.IsValueType) && !column.IsRequired,
             PreviousNames = column.PreviousNames,
             DefaultLiteral = CSharpLiteral.Render(column.DefaultValue),
             Generated = GeneratedOf(column),

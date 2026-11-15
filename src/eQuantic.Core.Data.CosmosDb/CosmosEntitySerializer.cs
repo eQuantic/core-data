@@ -129,6 +129,13 @@ public sealed class CosmosEntitySerializer : CosmosLinqSerializer
             {
                 property.Name = stored.Name;
             }
+
+            // A date declared with [DateStorage] goes through its own converter: UTC, rounded, read back as UTC.
+            if (member is PropertyInfo date && DateStorageRules.For(date) is { } declaration && DateStorageRules.IsDate(date.PropertyType))
+            {
+                property.CustomConverter = (System.Text.Json.Serialization.JsonConverter)Activator.CreateInstance(
+                    typeof(CosmosDateStorageConverter<>).MakeGenericType(date.PropertyType), declaration)!;
+            }
         }
     }
 }

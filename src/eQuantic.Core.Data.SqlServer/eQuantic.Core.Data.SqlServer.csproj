@@ -26,10 +26,23 @@
 
     <ItemGroup>
         
-        <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.2" />
-        <!-- SqlClient 6.0.2 brings System.Security.Cryptography.Pkcs 9.0.4 (GHSA-846f-f764-76mx); the patched one wins. -->
+        <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.2" />
+        <!--
+          SqlClient 7 moved Entra ID authentication (Authentication=Active Directory ...) into its own package. A
+          connection string that signed in with Entra ID on core-data 7.0 keeps working only with it referenced, so
+          it comes with this provider; referencing it is all the driver needs.
+        -->
+        <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.2" />
+        <!--
+          SqlClient brings System.Security.Cryptography.Pkcs from its net9.0 line on .NET 10, and an older line once
+          carried GHSA-846f-f764-76mx; the .NET 10 one, with every fix, wins.
+        -->
         <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+        <!--
+          The floor the Entra ID package sets: it brings Azure.Identity, which needs the Microsoft.Extensions
+          abstractions at 10.0.3, so 10.0.0 here would be a downgrade (NU1605).
+        -->
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.3" />
     </ItemGroup>
 
     <ItemGroup>

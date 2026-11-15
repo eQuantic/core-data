@@ -138,6 +138,9 @@ public sealed class PostgreSqlDialect : SqlDialect
     /// </remarks>
     public override string Literal(object? value) => value switch
     {
+        // A zone-less date (bound without a kind) is the wall time its timestamp column holds: no offset to read.
+        ZonelessDate zoneless => $"'{zoneless.Value:yyyy-MM-dd HH:mm:ss.ffffff}'",
+        DateTime { Kind: DateTimeKind.Unspecified } wallTime => $"'{wallTime:yyyy-MM-dd HH:mm:ss.ffffff}'",
         DateTime dateTime => $"'{(dateTime.Kind == DateTimeKind.Local ? dateTime.ToUniversalTime() : dateTime):yyyy-MM-dd HH:mm:ss.ffffff}+00'",
         DateTimeOffset moment => $"'{moment.UtcDateTime:yyyy-MM-dd HH:mm:ss.ffffff}+00'",
         _ => base.Literal(value),
@@ -158,8 +161,36 @@ public sealed class PostgreSqlDialect : SqlDialect
     ///     <c>format_type</c> quotes a type name that needs it (<c>"RunStatus"</c>) and leaves one that does not
     ///     (<c>run_status</c>), while the DDL always quotes it; the quotes are not part of the type.
     /// </remarks>
-    public override string NormalizeStoredType(string storedType) =>
-        base.NormalizeStoredType(storedType.Replace("\"", string.Empty));
+    public override string NormalizeStoredType(string storedType)
+    {
+        var text = storedType.Replace("\"", string.Empty).Trim().ToLowerInvariant();
+
+        // A time type carries its precision inside its name, before the zone: timestamp(3) without time zone. Spelt
+        // whole, in PostgreSQL's own words, however it was written (timestamptz, timestamp(3), time(6) with time zone).
+        var temporal = TemporalType.Match(text);
+        if (!temporal.Success)
+        {
+            return base.NormalizeStoredType(text);
+        }
+
+        var kind = temporal.Groups["kind"].Value;
+        var zoned = kind.EndsWith("tz", StringComparison.Ordinal) || temporal.Groups["zone"].Value == "with";
+        var precision = temporal.Groups["precision"].Success ? $"({temporal.Groups["precision"].Value})" : string.Empty;
+        return $"{(kind.StartsWith("timestamp", StringComparison.Ordinal) ? "timestamp" : "time")}{precision} " +
+               $"{(zoned ? "with" : "without")} time zone{temporal.Groups["array"].Value}";
+    }
+
+    private static readonly global::System.Text.RegularExpressions.Regex TemporalType = new(
+        @"^(?<kind>timestamptz|timestamp|timetz|time)\s*(?:\(\s*(?<precision>\d+)\s*\))?(?:\s+(?<zone>with|without)\s+time\s+zone)?(?<array>(?:\[\])*)$",
+        global::System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>timestamp(p) without time zone</c> holds the UTC wall time with no zone; <c>timestamp(p) with time zone</c>
+    ///     is the type every other date maps to. No precision is the store's own: six digits.
+    /// </remarks>
+    public override string DateSqlType(bool withoutZone, int precision) =>
+        $"timestamp{(precision >= 0 ? $"({precision})" : string.Empty)} {(withoutZone ? "without" : "with")} time zone";
 
     /// <inheritdoc />
     /// <remarks>
@@ -232,6 +263,11 @@ public sealed class PostgreSqlDialect : SqlDialect
         if ((value is IDictionary || JsonMembers.IsValue(value)) && parameter is Npgsql.NpgsqlParameter npgsql)
         {
             npgsql.DataTypeName = "jsonb";
+        }
+        else if (value is DateTime { Kind: DateTimeKind.Unspecified } && parameter is Npgsql.NpgsqlParameter wallTime)
+        {
+            // Only a zone-less date binds without a kind (BindValue gives every other one UTC): a `timestamp`.
+            wallTime.NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp;
         }
     }
 
@@ -392,6 +428,9 @@ public sealed class PostgreSqlDialect : SqlDialect
     /// <inheritdoc />
     public override object? BindValue(object? value) => value switch
     {
+        // A zone-less date goes as the wall time with no kind, which Npgsql sends as `timestamp`: the server writes it
+        // as it is, never through the session's time zone (ConfigureParameter states the type as well).
+        ZonelessDate zoneless => DateTime.SpecifyKind(zoneless.Value, DateTimeKind.Unspecified),
         // timestamptz demands a UTC kind; an Unspecified value is taken as UTC (matching the storage semantics).
         DateTime { Kind: DateTimeKind.Unspecified } dateTime => DateTime.SpecifyKind(dateTime, DateTimeKind.Utc),
         // An enum stored as its labels goes as itself: the data source maps it to its PostgreSQL type and sends

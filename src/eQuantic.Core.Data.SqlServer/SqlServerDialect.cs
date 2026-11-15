@@ -46,6 +46,8 @@ public class SqlServerDialect : SqlDialect
                        THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(11))) + ')'
                    WHEN ty.name IN ('decimal', 'numeric')
                        THEN '(' + CAST(c.precision AS varchar(11)) + ',' + CAST(c.scale AS varchar(11)) + ')'
+                   WHEN ty.name IN ('datetime2', 'datetimeoffset', 'time')
+                       THEN '(' + CAST(c.scale AS varchar(11)) + ')'
                    ELSE '' END,
                c.is_nullable
         FROM sys.columns c
@@ -265,6 +267,25 @@ public class SqlServerDialect : SqlDialect
         return rows.Count;
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>datetime2(p)</c> holds a wall time with no zone, so a date declared with its zone is the same column,
+    ///     holding UTC. No precision is the store's own: seven digits.
+    /// </remarks>
+    public override string DateSqlType(bool withoutZone, int precision) =>
+        precision >= 0 ? $"datetime2({precision})" : "datetime2";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     A time type without its scale is the store's default of seven digits, which the catalogue reports:
+    ///     <c>datetime2</c> and <c>datetime2(7)</c> are one type.
+    /// </remarks>
+    public override string NormalizeStoredType(string storedType)
+    {
+        var normalized = base.NormalizeStoredType(storedType);
+        return normalized is "datetime2" or "datetimeoffset" or "time" ? normalized + "(7)" : normalized;
+    }
+
     public override string SqlType(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;
@@ -310,6 +331,20 @@ public class SqlServerDialect : SqlDialect
 
     /// <inheritdoc />
     public override string TextLiteral(string text) => "N'" + text.Replace("'", "''") + "'";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     SqlClient sends a <c>DateTime</c> as <c>datetime</c> unless told otherwise, and <c>datetime</c> keeps a
+    ///     three-hundredth of a second: <c>.124</c> arrives as <c>.123</c>. Every date this dialect stores is a
+    ///     <c>datetime2</c>, so a date binds as one, and keeps what it holds.
+    /// </remarks>
+    public override void ConfigureParameter(global::System.Data.Common.DbParameter parameter, object? value)
+    {
+        if (value is DateTime)
+        {
+            parameter.DbType = global::System.Data.DbType.DateTime2;
+        }
+    }
 
     /// <inheritdoc />
     /// <remarks>

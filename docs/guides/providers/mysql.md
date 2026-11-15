@@ -19,6 +19,9 @@ truth lives.
   engine releases it right after the commit or rollback, outside one on dispose. Lock names are
   **server-wide**, and MySQL rounds its wait to whole seconds (MariaDB does not) — see
   [Named locks](../writing/locks.md).
+- A date declared `[DateStorage(Precision = p)]` is a `datetime(p)` (`datetime` for 0, `datetime(6)` with
+  no precision, as every other date) holding UTC, rounded to `p` and read back as UTC; MySQL's `datetime`
+  holds no zone either way. A member declared required is `NOT NULL`.
 - Concurrency tokens, composite keys, facets (`varchar(n)`, `decimal(p,s)`), converters,
   navigations/includes, GROUP BY/HAVING, UNION/UNION ALL — the full
   [relational engine surface](../concepts/contracts.md).

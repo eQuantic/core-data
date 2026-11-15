@@ -22,6 +22,15 @@ public sealed record CassandraColumn(string Name, string CqlType)
     ///     number, a JSON member as its JSON text, anything else as itself.
     /// </summary>
     public Type ClrType { get; init; } = typeof(object);
+
+    /// <summary>
+    ///     How the member's date is stored when it declares <c>[DateStorage]</c>: written as UTC, rounded to the declared
+    ///     precision, and read back as UTC. <c>null</c> for any other column.
+    /// </summary>
+    public Data.Modeling.DateStorageAttribute? Dates { get; init; }
+
+    /// <summary>Whether the member declares <c>[Facet(Required = true)]</c>, which Cassandra cannot enforce outside the key.</summary>
+    public bool Required { get; init; }
 }
 
 /// <summary>A column whose value the store assigns on insert.</summary>
@@ -260,7 +269,12 @@ public sealed class CassandraModel
                 var type = Nullable.GetUnderlyingType(column.ClrType) ?? column.ClrType;
                 var stored = type.IsEnum
                     ? column.CqlType == "text" ? " labels" : " the enum's number"
-                    : Data.Modeling.JsonMembers.Is(type) ? " JSON text" : string.Empty;
+                    : Data.Modeling.JsonMembers.Is(type) ? " JSON text"
+                    : column.Dates is { } dates
+                        ? (dates.WithoutZone ? " without zone, UTC" : " UTC") +
+                          (dates.Precision >= 0 ? $", {dates.Precision} fractional digits" : string.Empty)
+                        : string.Empty;
+                stored += column.Required ? ", required (not enforced: Cassandra has no NOT NULL outside the primary key)" : string.Empty;
                 var generated = configuration.StoreGenerated.FirstOrDefault(candidate => CassandraEntityConfiguration.Same(candidate.Column, column.Name)) switch
                 {
                     { Value: Data.Modeling.StoreValue.Sequence } =>
@@ -568,6 +582,19 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
         return this;
     }
 
+    /// <summary>A member's date storage, after the declaration is checked against what Cassandra keeps (milliseconds).</summary>
+    private static Data.Modeling.DateStorageAttribute? Dates(PropertyInfo property)
+    {
+        if (Data.Modeling.DateStorageRules.For(property) is not { } dates)
+        {
+            return null;
+        }
+
+        Data.Modeling.DateStorageRules.Validate(property.PropertyType, dates.Precision,
+            $"{typeof(TEntity).Name}.{property.Name}", "Cassandra", maxPrecision: 3);
+        return dates;
+    }
+
     internal CassandraEntityConfiguration<TEntity> Build()
     {
         if (_partitionKeys.Count == 0)
@@ -588,7 +615,13 @@ public sealed class CassandraEntityBuilder<TEntity> where TEntity : class
             .Select(property => new CassandraColumn(Stored(property.Name),
                 _counterColumns.Any(counter => CassandraEntityConfiguration.Same(counter, property.Name))
                     ? "counter"
-                    : CassandraTypes.Cql(property.PropertyType, IsLabelEnum)) { Member = property.Name, ClrType = property.PropertyType })
+                    : CassandraTypes.Cql(property.PropertyType, IsLabelEnum))
+            {
+                Member = property.Name,
+                ClrType = property.PropertyType,
+                Dates = Dates(property),
+                Required = property.GetCustomAttribute<Data.Modeling.FacetAttribute>() is { Required: true },
+            })
             .ToList();
 
         if (_counterColumns.Count > 0)

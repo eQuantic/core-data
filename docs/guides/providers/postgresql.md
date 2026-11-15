@@ -14,7 +14,8 @@ the shared relational engine exercises all of it.
 | Concurrency | versioned token (`int`/`long`/`Guid`) — see [Concurrency](../writing/concurrency.md) |
 | Named locks | advisory locks on a SHA-256-derived `bigint`: `pg_try_advisory_xact_lock` inside a transaction (the commit or rollback releases it), `pg_try_advisory_lock` on a pinned session outside one; polled, so a wait never aborts the transaction — see [Named locks](../writing/locks.md) |
 | Composite keys | `Key(x => new { … })`, tuple point-lookups, composite `PRIMARY KEY` DDL |
-| Facets | `varchar(n)`, `numeric(p,s)` |
+| Facets | `varchar(n)`, `numeric(p,s)`, `NOT NULL` for a member declared required |
+| Dates | a `DateTime` is `timestamp with time zone`; `[DateStorage(WithoutZone = true, Precision = p)]` is `timestamp(p) without time zone` holding the UTC wall time, bound as `timestamp` so the session's time zone never moves it, rounded to `p`, read back as UTC. A `DateTime` over a `date` column reads as the date at midnight with no kind, and a `TimeSpan` over a `time` column as the time of day, as they did before Npgsql 10 read those types as `DateOnly`/`TimeOnly` |
 | Includes | reference/collection with follow-up `IN` queries, dotted nested paths; a shaped include ranks each parent's rows with `ROW_NUMBER()` |
 | Read shapes | relation counts as correlated `COUNT(*)` subqueries, native `NULLS FIRST`/`NULLS LAST`, `LIMIT`/`OFFSET` pages without a count, `SELECT DISTINCT` — see [Querying](../querying/includes.md) |
 | Filters across relations | `x.Items.Any(…)`, `All`, `x.Repository.WorkspaceId == w`, `x.Container == null` as a correlated `EXISTS` / `NOT EXISTS` in reads, counts and set-based writes — see [Relations and text in filters](../querying/predicates.md) |

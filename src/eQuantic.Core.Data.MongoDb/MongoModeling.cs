@@ -226,7 +226,10 @@ internal static class MongoModeling
 
             _registered = true;
             ConventionRegistry.Register("equantic-modeling",
-                new ConventionPack { new StoredAsConvention(), new UnmappedConvention(), new EntityKeyConvention() }, _ => true);
+                new ConventionPack
+                {
+                    new StoredAsConvention(), new UnmappedConvention(), new EntityKeyConvention(), new DateStorageConvention(),
+                }, _ => true);
             BsonSerializer.RegisterSerializationProvider(new MongoStoredValueSerializationProvider());
         }
     }
@@ -275,6 +278,21 @@ internal static class MongoModeling
                     is [StoredAsAttribute stored, ..])
             {
                 memberMap.SetElementName(stored.Name);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     <c>[DateStorage]</c> gives the member the serializer that writes UTC rounded to the declared precision, after
+    ///     refusing a declaration MongoDB cannot keep, by name.
+    /// </summary>
+    private sealed class DateStorageConvention : ConventionBase, IMemberMapConvention
+    {
+        public void Apply(BsonMemberMap memberMap)
+        {
+            if (memberMap.MemberInfo is System.Reflection.PropertyInfo property && DateStorageRules.For(property) is { } declaration)
+            {
+                memberMap.SetSerializer(MongoDateStorage.For(property, declaration));
             }
         }
     }

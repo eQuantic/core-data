@@ -33,7 +33,8 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
         ModelingDiagnostics.EmptyStorageName,
         ModelingDiagnostics.StoreGeneratedType,
         ModelingDiagnostics.StoreGeneratedRole,
-        ModelingDiagnostics.EnumLabels);
+        ModelingDiagnostics.EnumLabels,
+        ModelingDiagnostics.InvalidDateStorage);
 
     /// <inheritdoc />
     public override void Initialize(AnalysisContext context)
@@ -154,6 +155,11 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
                             Location(attribute, property), property.Name, problem));
                         break;
 
+                    case "DateStorageAttribute" when DateStorageProblem(attribute, property) is { } problem:
+                        context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.InvalidDateStorage,
+                            Location(attribute, property), property.Name, problem));
+                        break;
+
                     case "StoreGeneratedAttribute" when StoreGeneratedProblem(attribute, property) is { } problem:
                         context.ReportDiagnostic(Diagnostic.Create(ModelingDiagnostics.StoreGeneratedType,
                             Location(attribute, property), property.Name, problem, property.Type.ToDisplayString()));
@@ -233,6 +239,21 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
     ///     Why no store can generate the member in the declared kind, or <c>null</c>: a sequence numbers an
     ///     int, long or short, the clock stamps a DateTime or DateTimeOffset, and an inferred kind needs one of them.
     /// </summary>
+    /// <summary>What is wrong with a date storage declaration, or <c>null</c> when nothing is.</summary>
+    private static string? DateStorageProblem(AttributeData attribute, IPropertySymbol property)
+    {
+        var type = Unwrap(property.Type);
+        if (type.SpecialType != SpecialType.System_DateTime && type.ToDisplayString() != "System.DateTimeOffset")
+        {
+            return $"it applies to a DateTime or DateTimeOffset member, and '{property.Type.ToDisplayString()}' is not one";
+        }
+
+        var precision = Named(attribute, "Precision") as int? ?? -1;
+        return precision is < -1 or > 6
+            ? $"a date keeps 0 to 6 fractional digits of a second (or -1 for the store's own), not {precision}"
+            : null;
+    }
+
     private static string? StoreGeneratedProblem(AttributeData attribute, IPropertySymbol property)
     {
         var type = Unwrap(property.Type);
@@ -270,6 +291,7 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
         var length = Named(attribute, "Length") as int? ?? 0;
         var precision = Named(attribute, "Precision") as int? ?? 0;
         var scale = Named(attribute, "Scale") as int? ?? 0;
+        var required = Named(attribute, "Required") is true;
         var memberType = Unwrap(property.Type);
 
         if (length < 0 || precision < 0 || scale < 0)
@@ -297,9 +319,9 @@ public sealed class ModelingAnalyzer : DiagnosticAnalyzer
             return $"Precision/Scale apply to decimal members and '{property.Type.ToDisplayString()}' is not one";
         }
 
-        if (length == 0 && precision == 0)
+        if (length == 0 && precision == 0 && !required)
         {
-            return "it declares nothing (set Length, or Precision/Scale)";
+            return "it declares nothing (set Length, Precision/Scale, or Required)";
         }
 
         return null;

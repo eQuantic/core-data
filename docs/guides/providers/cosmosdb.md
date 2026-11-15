@@ -21,6 +21,12 @@ translation asks the same contract**:
 
 ## Enums as labels, JSON members, store-generated members
 
+- **Dates** — `[DateStorage]` gives the member a converter of its own: the value is written in UTC,
+  rounded to the declared precision, in the serializer's ISO 8601 form, and read back as UTC. A model
+  that also converts every `DateTime` or `DateTimeOffset` with `Converts(...)` is refused when built,
+  since the two would decide the stored form between them. `[Facet(Required = true)]` is ignored (a
+  document has no column nullability), and `Explain()` says so.
+
 - **Enums as labels** — `[EnumType]` on the enum, or `model.Enum<TEnum>()`, stores each member as
   its `[StoredAs]` label (or its name) as a JSON string. The labels are a type-level converter of
   the provider's serializer, which the SDK's LINQ translation asks for every constant, so filters

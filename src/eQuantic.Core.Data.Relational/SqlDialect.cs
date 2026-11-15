@@ -121,10 +121,25 @@ public abstract class SqlDialect
     /// <summary>The DDL type for a CLR type (used by <c>CREATE TABLE</c> migrations).</summary>
     public abstract string SqlType(Type type);
 
-    /// <summary>The DDL type for a column, honouring its declared facets (text length, decimal precision/scale).</summary>
+    /// <summary>
+    ///     The DDL type for a column, honouring its declared facets (text length, decimal precision/scale) and its date
+    ///     storage (<see cref="DateSqlType" />).
+    /// </summary>
     /// <param name="column">The column.</param>
     public string SqlType(RelationalColumn column) =>
-        SizedSqlType(column.StoredType, column.Length, column.Precision, column.Scale);
+        column.DateStorage is { } dates
+            ? DateSqlType(dates.WithoutZone, dates.Precision)
+            : SizedSqlType(column.StoredType, column.Length, column.Precision, column.Scale);
+
+    /// <summary>
+    ///     The DDL type of a date column declared with <c>[DateStorage]</c>: the zone-less type when
+    ///     <paramref name="withoutZone" />, the zoned one otherwise, to <paramref name="precision" /> fractional digits of
+    ///     a second (<c>-1</c> for the store's own). The base keeps the dialect's plain date type; each dialect spells
+    ///     its own.
+    /// </summary>
+    /// <param name="withoutZone">Whether the column holds the UTC wall time with no zone attached.</param>
+    /// <param name="precision">The fractional digits of a second kept, or <c>-1</c>.</param>
+    public virtual string DateSqlType(bool withoutZone, int precision) => SqlType(typeof(DateTime));
 
     /// <summary>
     ///     The DDL type for a type with facets: <c>varchar(n)</c> for sized text, <c>numeric(p,s)</c> for sized
@@ -661,6 +676,8 @@ public abstract class SqlDialect
     /// </summary>
     public virtual object? BindValue(object? value) => value switch
     {
+        // A zone-less date binds as the wall time it holds, with no kind for the driver to read a zone from.
+        ZonelessDate zoneless => DateTime.SpecifyKind(zoneless.Value, DateTimeKind.Unspecified),
         Enum enumValue when NativeEnumOf(enumValue.GetType()) is not null => Modeling.EnumLabels.Label(enumValue),
         _ when Modeling.JsonMembers.IsValue(value) => Modeling.JsonMembers.Text(value),
         _ => value,

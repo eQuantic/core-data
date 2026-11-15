@@ -25,6 +25,12 @@ The shared relational engine over `Microsoft.Data.SqlClient`, with SQL Server's 
   conventional string columns are always indexable. Size explicitly with `[Facet(Length = …)]` /
   `Facet(x => …, length: …)`, which produces `nvarchar(n)`.
 - Decimals with `[Facet(Precision, Scale)]` produce `numeric(p,s)`.
+- A date declared `[DateStorage(Precision = p)]` is a `datetime2(p)` (`datetime2`, seven digits, with no
+  precision) holding UTC, rounded to `p` and read back as UTC. Every date binds as `datetime2`, not as the
+  `datetime` SqlClient picks by default, which keeps a three-hundredth of a second. A member declared
+  required is `NOT NULL`.
+- Entra ID sign-in (`Authentication=Active Directory ...`) comes with the provider: SqlClient 7 keeps it in
+  `Microsoft.Data.SqlClient.Extensions.Azure`, which the provider references.
 - `[SearchIndex]` materializes no index on this dialect (SQL Server's full-text search is a
   different subsystem with different semantics — `CONTAINS` word-matching, not `LIKE` substring
   matching; mapping one onto the other would change meaning). `LIKE` pushes down as always, and

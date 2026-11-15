@@ -247,7 +247,7 @@ public abstract class RelationalReadRepository<TEntity, TKey> :
     /// <summary>A minimum's or a maximum's answer: the member a value stands for when the column holds an enum's labels.</summary>
     private static TResult? Extreme<TResult>(object value, Type? labelEnum) =>
         labelEnum is null
-            ? (TResult?)Convert.ChangeType(value, Nullable.GetUnderlyingType(typeof(TResult)) ?? typeof(TResult))
+            ? (TResult?)RelationalMaterializer.ChangeValue(value, typeof(TResult))
             : EnumOrder.FromValue<TResult>(labelEnum, Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>The enum a column holds the labels of, or <c>null</c>.</summary>

@@ -141,6 +141,8 @@ public sealed class CosmosTestServer
         .Entity<RunRecord>(entity => entity
             .Container(ContainerName)
             .PartitionKey(x => x.Category))
+        .Entity<MixedJsonRow>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<StampRow>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<Receipt>(entity => entity
             .Container(ContainerName)
             .PartitionKey(x => x.Category)

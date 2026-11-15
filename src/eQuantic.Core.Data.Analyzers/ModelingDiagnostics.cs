@@ -99,4 +99,10 @@ public static class ModelingDiagnostics
         "EQD014",
         "Enum labels are empty or repeated",
         "The enum '{0}' is stored as its labels, and {1}");
+
+    /// <summary>EQD015 — a date storage declaration on a member that is not a date, or with a precision no store keeps.</summary>
+    public static readonly DiagnosticDescriptor InvalidDateStorage = Rule(
+        "EQD015",
+        "Invalid [DateStorage]",
+        "The [DateStorage] on '{0}' is invalid: {1}");
 }

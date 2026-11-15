@@ -26,9 +26,9 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="CassandraCSharpDriver" Version="3.22.0" />
+        <PackageReference Include="CassandraCSharpDriver" Version="3.23.0" />
         <!-- Override the driver's vulnerable transitive Newtonsoft.Json 9.0.1 (NU1903). -->
-        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
         <PackageReference Include="eQuantic.Linq.Expressions" Version="3.7.1" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     </ItemGroup>

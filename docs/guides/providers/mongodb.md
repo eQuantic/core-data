@@ -20,6 +20,7 @@ queries so they can never disagree.
 | Concurrency | `[ConcurrencyToken]` → version-filtered conditional replaces/deletes |
 | Named locks | **leases** in `_locks`: one conditional `findOneAndUpdate` upsert on the server's clock (`$$NOW`), acknowledged by a majority of the replica set, renewed while held, swept by a TTL index; a dead holder's lease expires — see [Named locks](../writing/locks.md) |
 | TTL | `[TimeToLive]` → per-document TTL index (from `CreatedAt` or an explicit date member) |
+| Dates | `[DateStorage]` (or `DateStorage(...)`) → a BSON date in UTC, rounded to the declared precision (at most 3: a BSON date keeps milliseconds), read back as UTC; filters serialize their constants through the same member serializer. `[Facet(Required = true)]` is ignored (a document has no column nullability), and `Explain()` says so |
 | Ordered reads | `[ClusteringKey]` → compound index with directions |
 | Migrations | collections, all index kinds (unique, filtered, text, TTL, composite), field ops, `Run` |
 

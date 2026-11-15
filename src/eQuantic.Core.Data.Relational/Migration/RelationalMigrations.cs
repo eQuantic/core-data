@@ -49,6 +49,20 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
     /// <inheritdoc />
     public async Task ApplyAsync(IReadOnlyList<MigrationOperation> operations, CancellationToken cancellationToken = default)
     {
+        // A step that cannot run is refused before any runs, so a migration never stops half applied for a reason
+        // the model already knew.
+        foreach (var add in operations.OfType<AddFieldOperation>())
+        {
+            var configuration = _model.For(add.EntityType);
+            var column = Column(configuration, add.Field.GetMemberName());
+            if (column.IsRequired && !column.IsStoreGenerated && column.DefaultValue is null)
+            {
+                throw new InvalidOperationException(
+                    $"'{configuration.EntityType.Name}.{column.Property.Name}' is required, and adding it to a table that may " +
+                    "already hold rows needs the value those rows take. Declare it with [DefaultValue(...)] or Default(...).");
+            }
+        }
+
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         var context = new RelationalMigrationExecutionContext(connection);
 
@@ -189,6 +203,11 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
         var columns = configuration.Columns.Select(column =>
         {
             var declaration = $"{_dialect.Quote(column.Name)} {_dialect.SqlType(column)}";
+            if (column.IsRequired && !column.IsStoreGenerated && !configuration.Keys.Contains(column))
+            {
+                declaration += " NOT NULL";
+            }
+
             if (!configuration.HasCompositeKey && column == configuration.Key)
             {
                 if (configuration.KeyIsGenerated)
@@ -220,9 +239,14 @@ public sealed class RelationalMigrationExecutor : IMigrationExecutor
         return _dialect.CreateTableSql(_dialect.Quote(configuration.TableName), body);
     }
 
-    /// <summary>What follows a column's type: how the store fills it when it is store-generated, and its CHECK.</summary>
+    /// <summary>
+    ///     What follows an added column's type: how the store fills it when it is store-generated, <c>NOT NULL</c> with
+    ///     the value existing rows take when it is required, and its CHECK.
+    /// </summary>
     private string Constraints(RelationalEntityConfiguration configuration, RelationalColumn column) =>
-        (column.IsStoreGenerated ? _dialect.StoreGeneratedDdl(configuration.TableName, column) : string.Empty)
+        (column.IsStoreGenerated ? _dialect.StoreGeneratedDdl(configuration.TableName, column)
+            : column.IsRequired ? " NOT NULL DEFAULT " + _dialect.Literal(_dialect.BindValue(column.Store(column.DefaultValue)))
+            : string.Empty)
         + (_dialect.CheckConstraintSql(_dialect.Quote(column.Name), column) is { } check ? " " + check : string.Empty);
 
     /// <summary>Creates what the store-generated columns need before their table (a sequence object).</summary>
