@@ -10,6 +10,39 @@ namespace eQuantic.Core.Data.Relational;
 /// <param name="FromStored">Converts the stored value back into the member value.</param>
 public sealed record RelationalConverter(Type StoredType, Func<object?, object?> ToStored, Func<object?, object?> FromStored);
 
+/// <summary>How a date column is stored: without its zone or with it, and to how many fractional digits of a second.</summary>
+/// <param name="WithoutZone">Whether the column holds the UTC wall time with no zone attached.</param>
+/// <param name="Precision">The fractional digits of a second kept, or <c>-1</c> for the store's own.</param>
+public sealed record RelationalDateStorage(bool WithoutZone, int Precision)
+{
+    /// <summary>
+    ///     The conversion every value of the column goes through: the member's date as UTC, rounded to the precision,
+    ///     and marked as the zone-less wall time when the column holds no zone (<see cref="ZonelessDate" />); and the
+    ///     stored date read back as UTC, a <c>DateTimeOffset</c> member with offset zero.
+    /// </summary>
+    /// <param name="memberType">The member's type.</param>
+    public RelationalConverter Converter(Type memberType)
+    {
+        var precision = Precision;
+        return WithoutZone
+            ? new RelationalConverter(typeof(DateTime),
+                value => Modeling.DateStorageRules.ToUtc(value, precision) is { } utc ? new ZonelessDate(utc) : null,
+                stored => Modeling.DateStorageRules.FromStored(stored, memberType))
+            : new RelationalConverter(typeof(DateTime),
+                value => Modeling.DateStorageRules.ToUtc(value, precision),
+                stored => Modeling.DateStorageRules.FromStored(stored, memberType));
+    }
+}
+
+/// <summary>
+///     A date bound for a column that holds the UTC wall time with no zone (<c>[DateStorage(WithoutZone = true)]</c>):
+///     the dialect binds <see cref="Value" /> as its zone-less type, so the store does not read it in the session's time
+///     zone. Part of the provider SPI; application code never sees it.
+/// </summary>
+/// <param name="Value">The UTC wall time, already rounded to the column's precision.</param>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public readonly record struct ZonelessDate(DateTime Value);
+
 /// <summary>A declared navigation: the member, the foreign-key member and which side holds it.</summary>
 /// <param name="Member">The navigation property name.</param>
 /// <param name="ForeignKey">The foreign-key member: on <b>this</b> entity for a reference, on the <b>element</b> for a collection.</param>
@@ -67,6 +100,20 @@ public sealed record RelationalColumn(PropertyInfo Property, string Name, Relati
     ///     <c>null</c> for an identity column. Only the migrations read it.
     /// </summary>
     public string? StoreDefaultSql { get; init; }
+
+    /// <summary>
+    ///     Whether the store must hold a value for the column, from <c>[Facet(Required = true)]</c> /
+    ///     <c>Required(...)</c>: the migrations create it <c>NOT NULL</c> and the drift check expects it so. A key is
+    ///     required with or without it.
+    /// </summary>
+    public bool IsRequired { get; init; }
+
+    /// <summary>
+    ///     How a date column is stored, from <c>[DateStorage]</c> / <c>DateStorage(...)</c>, or <c>null</c>. Such a column
+    ///     carries the conversion that writes UTC and reads UTC back (<see cref="Converter" />), and the dialect spells
+    ///     its type (<see cref="SqlDialect.DateSqlType" />).
+    /// </summary>
+    public RelationalDateStorage? DateStorage { get; init; }
 
     /// <summary>Reads the member from an entity as its <b>stored</b> value.</summary>
     public object? Read(object entity)
@@ -242,15 +289,19 @@ public sealed class RelationalModel
 
             foreach (var column in configuration.Columns.Where(column => !configuration.Keys.Contains(column)))
             {
-                var converted = column.Converter is not null
-                    ? $" (converted from {column.Property.PropertyType.Name})"
-                    : string.Empty;
+                var converted = column.DateStorage is { } dates
+                    ? (dates.WithoutZone ? " without zone, UTC" : " UTC") +
+                      (dates.Precision >= 0 ? $", {dates.Precision} fractional digits" : string.Empty)
+                    : column.Converter is not null
+                        ? $" (converted from {column.Property.PropertyType.Name})"
+                        : string.Empty;
+                var required = column.IsRequired ? " required (NOT NULL)" : string.Empty;
                 var generated = column.IsStoreGenerated
                     ? column.StoreDefaultSql is { } sql
                         ? $" store-generated (default {sql})"
                         : column.StoreValue == Modeling.StoreValue.Sequence ? " store-generated (sequence)" : " store-generated (clock)"
                     : string.Empty;
-                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column)}){converted}{generated}");
+                report.AppendLine($"  column: {column.Property.Name} \"{column.Name}\" ({dialect.SqlType(column)}){converted}{required}{generated}");
             }
 
             if (configuration.ClusteringColumns.Count > 0)
@@ -338,6 +389,8 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
     private readonly Dictionary<string, List<string>> _previousNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, object?> _defaults = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (Modeling.StoreValue Value, string? Sql)> _generated = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _required = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, RelationalDateStorage> _dates = new(StringComparer.OrdinalIgnoreCase);
     private List<string>? _keyMembers;
     private string? _table;
     private string? _keyMember;
@@ -386,6 +439,15 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             if (property.GetCustomAttribute<Modeling.FacetAttribute>() is { } facet)
             {
                 _facets[property.Name] = (facet.Length, facet.Precision, facet.Scale);
+                if (facet.Required)
+                {
+                    _required.Add(property.Name);
+                }
+            }
+
+            if (property.GetCustomAttribute<Modeling.DateStorageAttribute>() is { } dates)
+            {
+                _dates[property.Name] = new RelationalDateStorage(dates.WithoutZone, dates.Precision);
             }
 
             var renames = property.GetCustomAttributes<Modeling.PreviousNameAttribute>().ToList();
@@ -479,6 +541,35 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
         int length = 0, int precision = 0, int scale = 0)
     {
         _facets[selector.GetMemberName()] = (length, precision, scale);
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares a member the store must hold a value for, as <c>[Facet(Required = true)]</c> does: the migrations
+    ///     create its column <c>NOT NULL</c>, the store refuses a row that leaves it null, and the drift check expects it
+    ///     so. Adding a required column to a table with rows needs the value they take (<see cref="Default{TMember}" />).
+    /// </summary>
+    /// <typeparam name="TMember">The member type.</typeparam>
+    /// <param name="selector">The member selector.</param>
+    public RelationalEntityBuilder<TEntity> Required<TMember>(Expression<Func<TEntity, TMember>> selector)
+    {
+        _required.Add(selector.GetMemberName());
+        return this;
+    }
+
+    /// <summary>
+    ///     Declares how a date member is stored, as <see cref="Modeling.DateStorageAttribute" /> does: without its zone
+    ///     (the UTC wall time) or with it, and to <paramref name="precision" /> fractional digits of a second. Values
+    ///     are written as UTC whatever the session's time zone, rounded to the precision, and read back as UTC.
+    /// </summary>
+    /// <typeparam name="TMember">The member type (<c>DateTime</c> or <c>DateTimeOffset</c>).</typeparam>
+    /// <param name="selector">The member selector.</param>
+    /// <param name="withoutZone">Whether the column holds the UTC wall time with no zone attached.</param>
+    /// <param name="precision">The fractional digits of a second kept, 0 to 6; <c>-1</c> keeps the store's own.</param>
+    public RelationalEntityBuilder<TEntity> DateStorage<TMember>(Expression<Func<TEntity, TMember>> selector,
+        bool withoutZone, int precision = -1)
+    {
+        _dates[selector.GetMemberName()] = new RelationalDateStorage(withoutZone, precision);
         return this;
     }
 
@@ -668,6 +759,23 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             }
         }
 
+        // A date declaration is refused here, by name, when it cannot apply: a member that is not a date, a precision
+        // the store cannot keep, or a member that also declares its own converter (the two would fight over the value).
+        foreach (var (member, dates) in _dates)
+        {
+            var property = typeof(TEntity).GetProperty(member, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase)
+                           ?? throw new InvalidOperationException(
+                               $"Entity '{typeof(TEntity).Name}' has no member '{member}' to declare a date storage for.");
+            Modeling.DateStorageRules.Validate(property.PropertyType, dates.Precision, $"{typeof(TEntity).Name}.{property.Name}",
+                _dialect.System);
+            if (_converters.ContainsKey(property.Name))
+            {
+                throw new InvalidOperationException(
+                    $"'{typeof(TEntity).Name}.{property.Name}' declares both a date storage and its own converter; " +
+                    "declare one of them.");
+            }
+        }
+
         // Scalar members (and collections of scalars, for stores with array columns) map to columns; entity
         // references and entity collections are navigations — loaded through Include, never selected.
         var columns = typeof(TEntity)
@@ -679,10 +787,13 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
             .Select(property =>
             {
                 var facet = _facets.TryGetValue(property.Name, out var declared) ? declared : default;
+                var dates = _dates.TryGetValue(property.Name, out var declaredDates) ? declaredDates : null;
                 return new RelationalColumn(property,
                     _columnOverrides.TryGetValue(property.Name, out var explicitName) ? explicitName : _dialect.ColumnName(property.Name),
-                    _converters.TryGetValue(property.Name, out var converter) ? converter : null)
+                    _converters.TryGetValue(property.Name, out var converter) ? converter : dates?.Converter(property.PropertyType))
                 {
+                    IsRequired = _required.Contains(property.Name),
+                    DateStorage = dates,
                     Length = facet.Length,
                     Precision = facet.Precision,
                     Scale = facet.Scale,
@@ -698,6 +809,15 @@ public sealed class RelationalEntityBuilder<TEntity> where TEntity : class
                 };
             })
             .ToList();
+
+        foreach (var member in _required)
+        {
+            if (columns.All(candidate => !string.Equals(candidate.Property.Name, member, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new InvalidOperationException(
+                    $"Entity '{typeof(TEntity).Name}' has no mapped member '{member}' to declare required.");
+            }
+        }
 
         foreach (var member in _generated.Keys)
         {

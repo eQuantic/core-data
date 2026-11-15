@@ -76,8 +76,9 @@ public sealed class RelationalDatabaseSnapshotSource : IDatabaseSnapshotSource
             // healthy database has every other column nullable. Expecting otherwise would report a finding for
             // every non-nullable member of every correct table, which is how a check gets ignored.
             // A store-generated column is the other exception: the store always gives it a value, and the DDL
-            // says so (NOT NULL), as an identity column is by the store's own rule.
-            !configuration.Keys.Any(key => key.Property.Name == column.Property.Name) && !column.IsStoreGenerated);
+            // says so (NOT NULL), as an identity column is by the store's own rule. So is a column declared required.
+            !configuration.Keys.Any(key => key.Property.Name == column.Property.Name) && !column.IsStoreGenerated
+            && !column.IsRequired);
 
     private async Task<Dictionary<string, List<DatabaseField>>> ReadAsync(string sql,
         CancellationToken cancellationToken)

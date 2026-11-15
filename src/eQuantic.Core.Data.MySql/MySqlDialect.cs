@@ -101,6 +101,19 @@ public class MySqlDialect : SqlDialect
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    ///     <c>datetime(p)</c> holds a wall time with no zone either way, so a date declared with its zone is the same
+    ///     column, holding UTC. No precision is the six digits every other date gets; none at all is <c>datetime</c>,
+    ///     which is how the catalogue spells <c>datetime(0)</c>.
+    /// </remarks>
+    public override string DateSqlType(bool withoutZone, int precision) => precision switch
+    {
+        < 0 => "datetime(6)",
+        0 => "datetime",
+        _ => $"datetime({precision})",
+    };
+
+    /// <inheritdoc />
     public override string SqlType(Type type)
     {
         var underlying = Nullable.GetUnderlyingType(type) ?? type;

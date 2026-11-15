@@ -117,8 +117,9 @@ public sealed class ClusteringKeyAttribute : Attribute
 
 /// <summary>
 ///     Declares storage facets for a member — a maximum <see cref="Length" /> for text, a
-///     <see cref="Precision" />/<see cref="Scale" /> for decimals. Relational DDL sizes the column with them
-///     (<c>varchar(n)</c>, <c>numeric(p,s)</c>); stores without sized types ignore them.
+///     <see cref="Precision" />/<see cref="Scale" /> for decimals, and whether the store must hold a value
+///     (<see cref="Required" />). Relational DDL sizes the column with them (<c>varchar(n)</c>, <c>numeric(p,s)</c>,
+///     <c>NOT NULL</c>); stores without sized types or column nullability ignore them, and <c>Explain()</c> says so.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class FacetAttribute : Attribute
@@ -131,6 +132,42 @@ public sealed class FacetAttribute : Attribute
 
     /// <summary>The number of digits after the decimal point.</summary>
     public int Scale { get; set; }
+
+    /// <summary>
+    ///     Whether the store must hold a value for the member: the relational stores create the column
+    ///     <c>NOT NULL</c> and refuse a row that leaves it null, and the drift check expects it so. MongoDB, Cosmos DB
+    ///     and Cassandra have no column nullability and ignore it. A key is required with or without it. Adding a
+    ///     required column to a table that has rows needs the value those rows take (<see cref="DefaultValueAttribute" />).
+    /// </summary>
+    public bool Required { get; set; }
+}
+
+/// <summary>
+///     Declares how a date member (<c>DateTime</c> or <c>DateTimeOffset</c>) is stored: without its time zone, as the
+///     UTC wall time, and to how many fractional digits of a second. A value is converted to UTC before it is written
+///     (a <c>Local</c> <c>DateTime</c> by its zone, an <c>Unspecified</c> one taken as UTC, a <c>DateTimeOffset</c> by
+///     its offset), rounded to the precision, and read back as UTC — whatever the time zone of the store's session.
+///     <para>
+///         The stored form: <c>timestamp(p) without time zone</c> on PostgreSQL, <c>datetime(p)</c> on MySQL and
+///         MariaDB, <c>datetime2(p)</c> on SQL Server, each with the store's default precision when none is
+///         declared; MongoDB, Cosmos DB and Cassandra store the instant as they always do, and round it the same way.
+///     </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class DateStorageAttribute : Attribute
+{
+    /// <summary>
+    ///     Whether the store holds the UTC wall time with no zone attached (PostgreSQL's
+    ///     <c>timestamp without time zone</c>) instead of the store's zoned type. Every store reads it back as UTC.
+    /// </summary>
+    public bool WithoutZone { get; set; }
+
+    /// <summary>
+    ///     The fractional digits of a second kept, from 0 to 6; <c>-1</c> (the default) keeps the store's own. The value
+    ///     is rounded to it, half away from zero, before it is written. MongoDB and Cassandra keep milliseconds, so a
+    ///     precision above 3 is refused there.
+    /// </summary>
+    public int Precision { get; set; } = -1;
 }
 
 /// <summary>

@@ -46,6 +46,8 @@ public class SqlServerDialect : SqlDialect
                        THEN '(' + IIF(c.max_length = -1, 'max', CAST(c.max_length AS varchar(11))) + ')'
                    WHEN ty.name IN ('decimal', 'numeric')
                        THEN '(' + CAST(c.precision AS varchar(11)) + ',' + CAST(c.scale AS varchar(11)) + ')'
+                   WHEN ty.name IN ('datetime2', 'datetimeoffset', 'time')
+                       THEN '(' + CAST(c.scale AS varchar(11)) + ')'
                    ELSE '' END,
                c.is_nullable
         FROM sys.columns c
@@ -263,6 +265,25 @@ public class SqlServerDialect : SqlDialect
 
         await bulk.WriteToServerAsync(table, cancellationToken).ConfigureAwait(false);
         return rows.Count;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     <c>datetime2(p)</c> holds a wall time with no zone, so a date declared with its zone is the same column,
+    ///     holding UTC. No precision is the store's own: seven digits.
+    /// </remarks>
+    public override string DateSqlType(bool withoutZone, int precision) =>
+        precision >= 0 ? $"datetime2({precision})" : "datetime2";
+
+    /// <inheritdoc />
+    /// <remarks>
+    ///     A time type without its scale is the store's default of seven digits, which the catalogue reports:
+    ///     <c>datetime2</c> and <c>datetime2(7)</c> are one type.
+    /// </remarks>
+    public override string NormalizeStoredType(string storedType)
+    {
+        var normalized = base.NormalizeStoredType(storedType);
+        return normalized is "datetime2" or "datetimeoffset" or "time" ? normalized + "(7)" : normalized;
     }
 
     public override string SqlType(Type type)
