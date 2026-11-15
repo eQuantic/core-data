@@ -97,6 +97,19 @@ internal static class RelationalMaterializer
             return Modeling.EnumLabels.Parse(type, label);
         }
 
+        // A driver may read a date or a time of day as DateOnly or TimeOnly (Npgsql from 10 does, for `date` and
+        // `time`). A DateTime or TimeSpan member reads it as it always did: the date at midnight with no kind, and the
+        // time of day as its offset from midnight.
+        switch (value)
+        {
+            case DateOnly date when type == typeof(DateTime):
+                return date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            case DateOnly date when type == typeof(DateTimeOffset):
+                return new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified), TimeSpan.Zero);
+            case TimeOnly time when type == typeof(TimeSpan):
+                return time.ToTimeSpan();
+        }
+
         return type.IsEnum ? Enum.ToObject(type, value) : Convert.ChangeType(value, type);
     }
 

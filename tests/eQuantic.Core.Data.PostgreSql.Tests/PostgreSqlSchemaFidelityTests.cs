@@ -36,6 +36,28 @@ public sealed class ForeignRow : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>
+///     A <c>DateTime</c> member over a <c>date</c> column and <c>TimeSpan</c> members over <c>time</c> columns, as a schema
+///     another tool created holds them: what Npgsql 10 reads as <c>DateOnly</c> and <c>TimeOnly</c>.
+/// </summary>
+[Entity("calendar_rows")]
+public sealed class CalendarRow : IEntity<Guid>
+{
+    public Guid Id { get; set; }
+
+    public DateTime Day { get; set; }
+
+    public TimeSpan Starts { get; set; }
+
+    public TimeSpan? Ends { get; set; }
+
+    public DateTime? Holiday { get; set; }
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>A member declared required, added to a table that already holds a row.</summary>
 [Entity("legacy_stamps")]
 public sealed class LegacyStamp : IEntity<Guid>
@@ -321,6 +343,49 @@ public sealed class PostgreSqlSchemaFidelityTests : PostgreSqlIntegrationTest
             (DriftKind.NullabilityDiffers, "data", "null allowed", "not null"),
             (DriftKind.NullabilityDiffers, "name", "not null", "null allowed"),
         }));
+    }
+
+    [Test]
+    public async Task A_DateTime_over_a_date_column_and_a_TimeSpan_over_a_time_column_read_as_they_did_on_7_0()
+    {
+        using var db = await NewSchemaAsync();
+        await Execute(db, "CREATE TABLE calendar_rows (id uuid PRIMARY KEY, day date NOT NULL, starts time NOT NULL, ends time, holiday date)");
+        var raw = Guid.NewGuid();
+        await Execute(db, $"INSERT INTO calendar_rows VALUES ('{raw}', '2026-11-15', '09:30:15.25', NULL, '2026-12-25')");
+        await using var services = Services(await ConnectionStringAsync(db), model => model.Entity<CalendarRow>(_ => { }));
+        var written = new CalendarRow
+        {
+            Id = Guid.NewGuid(), Day = new DateTime(2026, 11, 16), Starts = new TimeSpan(0, 8, 0, 0, 500), Ends = new TimeSpan(17, 45, 0),
+        };
+
+        await using (var scope = services.CreateAsyncScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<IAsyncRepository<CalendarRow, Guid>>().AddAsync(written);
+            await scope.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+        }
+
+        await using (var scope = services.CreateAsyncScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IAsyncRepository<CalendarRow, Guid>>();
+            var seeded = (await repo.GetAsync(raw))!;
+            Assert.That(seeded.Day, Is.EqualTo(new DateTime(2026, 11, 15)), "a date reads as a DateTime at midnight");
+            Assert.That(seeded.Day.Kind, Is.EqualTo(DateTimeKind.Unspecified), "with no kind, as Npgsql 9 read it");
+            Assert.That(seeded.Starts, Is.EqualTo(new TimeSpan(0, 9, 30, 15, 250)), "a time reads as a TimeSpan");
+            Assert.That(seeded.Ends, Is.Null);
+            Assert.That(seeded.Holiday, Is.EqualTo(new DateTime(2026, 12, 25)));
+
+            var back = (await repo.GetAsync(written.Id))!;
+            Assert.That(back.Day, Is.EqualTo(written.Day));
+            Assert.That(back.Starts, Is.EqualTo(written.Starts));
+            Assert.That(back.Ends, Is.EqualTo(written.Ends));
+            Assert.That(back.Holiday, Is.Null);
+
+            var mapped = await repo.GetMappedAsync(x => new { x.Day, x.Starts }, new eQuantic.Core.Data.Repository.Options.QueryOptions<CalendarRow>().Where(x => x.Id == raw));
+            Assert.That(mapped.Single().Day, Is.EqualTo(new DateTime(2026, 11, 15)), "a projection reads it the same way");
+            Assert.That(mapped.Single().Starts, Is.EqualTo(new TimeSpan(0, 9, 30, 15, 250)));
+            Assert.That(await ((eQuantic.Core.Data.Repository.Read.IAggregateReadRepository<CalendarRow>)repo).MaxAsync(x => x.Day),
+                Is.EqualTo(new DateTime(2026, 11, 16)), "and so does an aggregate");
+        }
     }
 
     [TestCase("timestamp(3) without time zone", "timestamp(3) without time zone")]
