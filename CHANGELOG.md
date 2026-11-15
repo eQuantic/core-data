@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.1.0](https://github.com/eQuantic/core-data/compare/v7.0.0...v7.1.0) (2026-11-15)
+
+### Features
+
+* map a schema another tool created, with every driver at its latest ([#15](https://github.com/eQuantic/core-data/issues/15)) ([86b2854](https://github.com/eQuantic/core-data/commit/86b2854e7d0a6ffdbc75aebe20275f66110aa806)), closes [#14](https://github.com/eQuantic/core-data/issues/14)
+
 ## [7.0.0](https://github.com/eQuantic/core-data/compare/v6.9.0...v7.0.0) (2026-11-14)
 
 ### ⚠ BREAKING CHANGES
