@@ -334,6 +334,20 @@ public class SqlServerDialect : SqlDialect
 
     /// <inheritdoc />
     /// <remarks>
+    ///     SqlClient sends a <c>DateTime</c> as <c>datetime</c> unless told otherwise, and <c>datetime</c> keeps a
+    ///     three-hundredth of a second: <c>.124</c> arrives as <c>.123</c>. Every date this dialect stores is a
+    ///     <c>datetime2</c>, so a date binds as one, and keeps what it holds.
+    /// </remarks>
+    public override void ConfigureParameter(global::System.Data.Common.DbParameter parameter, object? value)
+    {
+        if (value is DateTime)
+        {
+            parameter.DbType = global::System.Data.DbType.DateTime2;
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
     ///     An enum stored as its labels is held to them, and a JSON member's text to being JSON. A JSON member may
     ///     hold a scalar, which <c>ISJSON</c> accepts only with the <c>VALUE</c> type of SQL Server 2022; wrapped in
     ///     brackets, any JSON value is an array that every <c>ISJSON</c> since SQL Server 2016 accepts.
