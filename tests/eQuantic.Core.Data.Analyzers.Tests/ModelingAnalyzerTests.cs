@@ -59,7 +59,10 @@ public sealed class ModelingAnalyzerTests
             public sealed class TimeToLiveAttribute : Attribute { public TimeToLiveAttribute(int seconds) { } }
 
             [AttributeUsage(AttributeTargets.Property)]
-            public sealed class FacetAttribute : Attribute { public int Length { get; set; } public int Precision { get; set; } public int Scale { get; set; } }
+            public sealed class FacetAttribute : Attribute { public int Length { get; set; } public int Precision { get; set; } public int Scale { get; set; } public bool Required { get; set; } }
+
+            [AttributeUsage(AttributeTargets.Property)]
+            public sealed class DateStorageAttribute : Attribute { public bool WithoutZone { get; set; } public int Precision { get; set; } = -1; }
         }
 
         """;
@@ -334,4 +337,36 @@ public sealed class ModelingAnalyzerTests
             "'Waiting' is stored as 'Queued', which already names 'Queued'"),
         new DiagnosticResult(ModelingDiagnostics.EnumLabels).WithLocation(2).WithArguments("RunState", "'Lost' has an empty label"),
         new DiagnosticResult(ModelingDiagnostics.EmptyStorageName).WithLocation(3).WithArguments("Channel", "EnumType"));
+
+    [Test]
+    public Task EQD006_takes_a_facet_that_declares_only_required() => Verify("""
+        using System;
+        using eQuantic.Core.Data.Modeling;
+
+        public sealed class Stamp
+        {
+            [Facet(Required = true)] public string Name { get; set; } = "";
+            [Facet(Required = true), DateStorage(WithoutZone = true, Precision = 3)] public DateTime CreatedAt { get; set; }
+            [{|#0:Facet|}] public string Note { get; set; } = "";
+        }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.InvalidFacet).WithLocation(0)
+            .WithArguments("Note", "it declares nothing (set Length, Precision/Scale, or Required)"));
+
+    [Test]
+    public Task EQD015_reports_a_date_storage_on_a_member_that_is_not_a_date_or_with_a_precision_no_store_keeps() => Verify("""
+        using System;
+        using eQuantic.Core.Data.Modeling;
+
+        public sealed class Stamp
+        {
+            [DateStorage(WithoutZone = true)] public DateTimeOffset? SeenAt { get; set; }
+            [{|#0:DateStorage(WithoutZone = true)|}] public string When { get; set; } = "";
+            [{|#1:DateStorage(Precision = 7)|}] public DateTime At { get; set; }
+        }
+        """,
+        new DiagnosticResult(ModelingDiagnostics.InvalidDateStorage).WithLocation(0)
+            .WithArguments("When", "it applies to a DateTime or DateTimeOffset member, and 'string' is not one"),
+        new DiagnosticResult(ModelingDiagnostics.InvalidDateStorage).WithLocation(1)
+            .WithArguments("At", "a date keeps 0 to 6 fractional digits of a second (or -1 for the store's own), not 7"));
 }

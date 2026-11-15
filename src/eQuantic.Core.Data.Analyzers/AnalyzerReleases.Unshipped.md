@@ -19,3 +19,4 @@ EQD011  | eQuantic.Modeling | Warning | Empty storage name
 EQD012  | eQuantic.Modeling | Warning | Store-generated member of a type the store cannot generate
 EQD013  | eQuantic.Modeling | Warning | Store-generated member is a key or a concurrency token
 EQD014  | eQuantic.Modeling | Warning | Enum labels are empty or repeated
+EQD015  | eQuantic.Modeling | Warning | Invalid [DateStorage]
