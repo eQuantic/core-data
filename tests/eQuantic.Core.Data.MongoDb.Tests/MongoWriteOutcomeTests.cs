@@ -105,6 +105,26 @@ public sealed class Page : IEntity<string>
     public void SetKey(string key) => Id = key;
 }
 
+/// <summary>
+///     A document whose nullable members start with a value, as a generated model carries a column's default: a stored
+///     null must read as null, never as the value the member starts with.
+/// </summary>
+public sealed class Preset : IEntity<string>
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string? Note { get; set; } = "initial";
+
+    public int? Quota { get; set; } = 10;
+
+    public bool? Enabled { get; set; } = true;
+
+    public DateTime? Since { get; set; } = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    public string GetKey() => Id;
+
+    public void SetKey(string key) => Id = key;
+}
+
 /// <summary>An account whose e-mail is unique under the index <c>ix_users_email</c>.</summary>
 public sealed class UserAccount : IEntity<string>
 {
@@ -681,5 +701,29 @@ public sealed class MongoWriteOutcomeTests : MongoIntegrationTest
         Assert.That(stored.Title, Is.EqualTo("final"));
         Assert.That(stored.Locked, Is.True);
         Assert.That(stored.Body, Is.EqualTo("text"));
+    }
+
+    [Test]
+    public async Task A_stored_null_reads_as_null_in_a_member_that_starts_with_a_value()
+    {
+        var preset = new Preset { Note = null, Quota = null, Enabled = null, Since = null };
+        var kept = new Preset();
+        using (var seed = NewScope())
+        {
+            await Repo<Preset>(seed).AddAsync(preset);
+            await Repo<Preset>(seed).AddAsync(kept);
+            await Commit(seed);
+        }
+
+        using var check = NewScope();
+        var stored = (await Repo<Preset>(check).GetAsync(preset.Id))!;
+        Assert.That(new object?[] { stored.Note, stored.Quota, stored.Enabled, stored.Since }, Is.All.Null);
+
+        var listed = (await Repo<Preset>(check).GetAllAsync()).Single(row => row.Id == preset.Id);
+        Assert.That(new object?[] { listed.Note, listed.Quota, listed.Enabled, listed.Since }, Is.All.Null);
+
+        var other = (await Repo<Preset>(check).GetAsync(kept.Id))!;
+        Assert.That((other.Note, other.Quota, other.Enabled, other.Since),
+            Is.EqualTo(("initial", (int?)10, (bool?)true, (DateTime?)new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc))));
     }
 }

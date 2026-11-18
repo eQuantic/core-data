@@ -78,12 +78,10 @@ internal sealed class RelationalRowBinder<TResult> where TResult : new()
 
         foreach (var (ordinal, property) in _bindings)
         {
-            if (reader.IsDBNull(ordinal))
-            {
-                continue;
-            }
-
-            var value = RelationalMaterializer.ChangeValue(reader.GetValue(ordinal), property.PropertyType);
+            // A NULL is written too, so a member the result type initializes reads what the row holds.
+            var value = reader.IsDBNull(ordinal)
+                ? RelationalMaterializer.NullFor(property.PropertyType)
+                : RelationalMaterializer.ChangeValue(reader.GetValue(ordinal), property.PropertyType);
             if (_accessor is not null)
             {
                 _accessor.Set(result!, property.Name, value);

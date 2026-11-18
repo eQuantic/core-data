@@ -157,6 +157,7 @@ public sealed class CosmosTestServer
         .Entity<Job>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<ItemType>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<Page>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
+        .Entity<Preset>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category))
         .Entity<WideRecord>(entity => entity.Container(ContainerName).PartitionKey(x => x.Category).ConcurrencyToken(x => x.ETag))
         .Entity<RelItem>(entity => entity.Container("rel_items").PartitionKey(x => x.Category))
         .Entity<RelMention>(entity => entity.Container("rel_mentions").PartitionKey(x => x.Category))

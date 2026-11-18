@@ -27,13 +27,12 @@ internal static class RelationalMaterializer
         var entity = accessor?.Create() ?? Activator.CreateInstance(entityType)!;
         for (var ordinal = 0; ordinal < selected.Count; ordinal++)
         {
-            if (reader.IsDBNull(ordinal))
-            {
-                continue;
-            }
-
+            // A NULL is written too: skipped, a member the entity initializes would read its initializer, not what
+            // the row holds.
             var column = selected[ordinal];
-            var value = Cell(column, reader.GetValue(ordinal), column.Property.PropertyType);
+            var value = reader.IsDBNull(ordinal)
+                ? NullFor(column.Property.PropertyType)
+                : Cell(column, reader.GetValue(ordinal), column.Property.PropertyType);
             if (accessor is not null)
             {
                 accessor.Set(entity, column.Property.Name, value);
@@ -56,15 +55,19 @@ internal static class RelationalMaterializer
         var entity = Activator.CreateInstance<TEntity>()!;
         for (var ordinal = 0; ordinal < reader.FieldCount; ordinal++)
         {
-            if (reader.IsDBNull(ordinal))
+            var name = reader.GetName(ordinal);
+            var column = configuration.Columns.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (column is null)
             {
                 continue;
             }
 
-            var name = reader.GetName(ordinal);
-            var column = configuration.Columns.FirstOrDefault(candidate =>
-                string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase));
-            if (column is not null)
+            if (reader.IsDBNull(ordinal))
+            {
+                column.Property.SetValue(entity, NullFor(column.Property.PropertyType));
+            }
+            else
             {
                 Assign(entity, column, reader.GetValue(ordinal));
             }
@@ -72,6 +75,13 @@ internal static class RelationalMaterializer
 
         return entity;
     }
+
+    /// <summary>
+    ///     What a NULL cell reads as in a member of <paramref name="memberType" />: <c>null</c>, or the type's default
+    ///     where it cannot hold one, as a projection reads it. Never the value the member was initialized with.
+    /// </summary>
+    internal static object? NullFor(Type memberType) =>
+        memberType.IsValueType && Nullable.GetUnderlyingType(memberType) is null ? Activator.CreateInstance(memberType) : null;
 
     /// <summary>Converts a reader value into a target CLR type (nullable unwrap, enum and numeric coercions).</summary>
     internal static object? ChangeValue(object? value, Type target)

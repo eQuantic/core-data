@@ -223,12 +223,18 @@ internal static class CassandraMapper
             // lower-cased name; the driver's by-name lookup is case-sensitive, so read with that name (the
             // property, matched case-insensitively, still carries the original casing).
             var name = column.Name.ToLowerInvariant();
-            if (property is null || !property.CanWrite || row.IsNull(name))
+            if (property is null || !property.CanWrite)
             {
                 continue;
             }
 
-            property.SetValue(entity, Value(row, column, property.PropertyType, name));
+            // A null is written too: skipped, a member the entity initializes would read its initializer, not what the
+            // row holds. A member that cannot hold null reads its type's default.
+            property.SetValue(entity, row.IsNull(name)
+                ? property.PropertyType.IsValueType && Nullable.GetUnderlyingType(property.PropertyType) is null
+                    ? Activator.CreateInstance(property.PropertyType)
+                    : null
+                : Value(row, column, property.PropertyType, name));
         }
 
         return entity;
