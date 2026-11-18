@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.1.1](https://github.com/eQuantic/core-data/compare/v7.1.0...v7.1.1) (2026-11-18)
+
+### Bug Fixes
+
+* a stored null reads as null, not as the member's initializer ([#18](https://github.com/eQuantic/core-data/issues/18)) ([b9c4d6c](https://github.com/eQuantic/core-data/commit/b9c4d6c20a2051ec441852d57306121ceca2aca5)), closes [#16](https://github.com/eQuantic/core-data/issues/16)
+
 ## [7.1.0](https://github.com/eQuantic/core-data/compare/v7.0.0...v7.1.0) (2026-11-15)
 
 ### Features
