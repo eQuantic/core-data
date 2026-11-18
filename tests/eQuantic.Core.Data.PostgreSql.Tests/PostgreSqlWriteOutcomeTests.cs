@@ -84,6 +84,31 @@ public sealed class PostgreSqlWriteOutcomeTests : PostgreSqlIntegrationTest
     public Task A_member_scoped_modify_leaves_the_other_members() => WriteOutcomeScenarios.PartialModifyKeepsOtherMembers(NewScope);
 
     [Test]
+    public Task A_stored_null_reads_as_null_in_a_member_that_starts_with_a_value() => WriteOutcomeScenarios.StoredNullReadsAsNull(NewScope);
+
+    [Test]
+    public async Task A_stored_null_reads_as_null_through_raw_sql_too()
+    {
+        var preset = new Preset { Note = null, Quota = null, Enabled = null, Since = null };
+        using (var seed = NewScope())
+        {
+            await seed.ServiceProvider.GetRequiredService<IAsyncRepository<Preset, Guid>>().AddAsync(preset);
+            await seed.ServiceProvider.GetRequiredService<IUnitOfWork>().CommitAsync();
+        }
+
+        using var scope = NewScope();
+        const string sql = "SELECT * FROM \"presets\" WHERE \"id\" = @p0";
+        var repository = (RelationalReadRepository<Preset, Guid>)scope.ServiceProvider.GetRequiredService<IAsyncRepository<Preset, Guid>>();
+        var entity = (await repository.FromSqlAsync(sql, [preset.Id])).Single();
+        var bound = (await ((RelationalUnitOfWork)scope.ServiceProvider.GetRequiredService<IUnitOfWork>()).QueryAsync<Preset>(sql, [preset.Id])).Single();
+
+        foreach (var read in new[] { entity, bound })
+        {
+            Assert.That(new object?[] { read.Note, read.Quota, read.Enabled, read.Since }, Is.All.Null);
+        }
+    }
+
+    [Test]
     public Task A_bulk_load_of_a_taken_key_fails() => WriteOutcomeScenarios.BulkInsertOfTakenKeyFails(NewScope);
 
     [Test]

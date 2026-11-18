@@ -161,6 +161,27 @@ public sealed class TickedNote : IEntity<Guid>, IEntityTimeTrack
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     A row whose nullable members start with a value, as a generated model carries a column's default: a stored null
+///     must read as null, never as the value the member starts with.
+/// </summary>
+public sealed class Preset : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string? Note { get; set; } = "initial";
+
+    public int? Quota { get; set; } = 10;
+
+    public bool? Enabled { get; set; } = true;
+
+    public DateTime? Since { get; set; } = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>The write-outcome entities' mapping and migration, shared by every relational suite.</summary>
 internal static class WriteOutcomeSchema
 {
@@ -170,6 +191,7 @@ internal static class WriteOutcomeSchema
         .Entity<Job>(_ => { })
         .Entity<ItemType>(_ => { })
         .Entity<Page>(_ => { })
+        .Entity<Preset>(entity => entity.Table("presets"))
         .Entity<UserAccount>(entity => entity.Table("users"))
         .Entity<Sprint>(entity => entity.Key(x => x.Id, generated: true))
         .Entity<Runner>(_ => { })
@@ -192,6 +214,7 @@ internal static class WriteOutcomeSchema
         .For<Job>(job => job.EnsureCollection())
         .For<ItemType>(itemType => itemType.EnsureCollection())
         .For<Page>(page => page.EnsureCollection())
+        .For<Preset>(preset => preset.EnsureCollection())
         .For<UserAccount>(user => user
             .EnsureCollection()
             .Index(x => x.Email, options => options.Unique().Named("ix_users_email")))
@@ -596,6 +619,36 @@ internal static class WriteOutcomeScenarios
         Assert.That(stored.Title, Is.EqualTo("final"));
         Assert.That(stored.Locked, Is.True);
         Assert.That(stored.Body, Is.EqualTo("text"));
+    }
+
+    /// <summary>
+    ///     A stored null reads as null in a member the entity initializes, by key and in a list: the materializer writes
+    ///     a NULL cell instead of leaving the member as it started.
+    /// </summary>
+    public static async Task StoredNullReadsAsNull(Func<IServiceScope> newScope)
+    {
+        var preset = new Preset { Note = null, Quota = null, Enabled = null, Since = null };
+        var kept = new Preset();
+        using (var seed = newScope())
+        {
+            await Repo<Preset>(seed).AddAsync(preset);
+            await Repo<Preset>(seed).AddAsync(kept);
+            await Commit(seed);
+        }
+
+        using var check = newScope();
+        var stored = (await Repo<Preset>(check).GetAsync(preset.Id))!;
+        Assert.That(stored.Note, Is.Null);
+        Assert.That(stored.Quota, Is.Null);
+        Assert.That(stored.Enabled, Is.Null);
+        Assert.That(stored.Since, Is.Null);
+
+        var listed = (await Repo<Preset>(check).GetAllAsync()).Single(row => row.Id == preset.Id);
+        Assert.That(new object?[] { listed.Note, listed.Quota, listed.Enabled, listed.Since }, Is.All.Null);
+
+        // What was stored as a value still reads as that value.
+        var other = (await Repo<Preset>(check).GetAsync(kept.Id))!;
+        Assert.That((other.Note, other.Quota, other.Enabled), Is.EqualTo(("initial", (int?)10, (bool?)true)));
     }
 
     /// <summary>

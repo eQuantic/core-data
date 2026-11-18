@@ -84,6 +84,27 @@ public sealed class Page : IEntity<Guid>
     public void SetKey(Guid key) => Id = key;
 }
 
+/// <summary>
+///     A row whose nullable members start with a value, as a generated model carries a column's default: a stored null
+///     must read as null, never as the value the member starts with.
+/// </summary>
+public sealed class Preset : IEntity<Guid>
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public string? Note { get; set; } = "initial";
+
+    public int? Quota { get; set; } = 10;
+
+    public bool? Enabled { get; set; } = true;
+
+    public DateTime? Since { get; set; } = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    public Guid GetKey() => Id;
+
+    public void SetKey(Guid key) => Id = key;
+}
+
 /// <summary>A row whose number and stamp the store assigns.</summary>
 public sealed class Voucher : IEntity<Guid>
 {
@@ -117,6 +138,7 @@ public sealed class CassandraWriteOutcomeTests : CassandraIntegrationTest
         .Entity<QueuedJob>(entity => entity.Table("queued_jobs").PartitionKey(x => x.Id))
         .Entity<ItemType>(entity => entity.Table("item_types").PartitionKey(x => x.Id))
         .Entity<Page>(entity => entity.Table("pages").PartitionKey(x => x.Id))
+        .Entity<Preset>(entity => entity.Table("presets").PartitionKey(x => x.Id))
         .Entity<Voucher>(entity => entity
             .Table("vouchers")
             .PartitionKey(x => x.Id)
@@ -135,6 +157,7 @@ public sealed class CassandraWriteOutcomeTests : CassandraIntegrationTest
             .For<QueuedJob>(table => table.EnsureCollection())
             .For<ItemType>(table => table.EnsureCollection())
             .For<Page>(table => table.EnsureCollection())
+            .For<Preset>(table => table.EnsureCollection())
             .For<Voucher>(table => table.EnsureCollection())
             .For<Tally>(table => table.EnsureCollection())
             .Operations);
@@ -545,5 +568,28 @@ public sealed class CassandraWriteOutcomeTests : CassandraIntegrationTest
         Assert.That(stored.Title, Is.EqualTo("final"));
         Assert.That(stored.Locked, Is.True);
         Assert.That(stored.Body, Is.EqualTo("text"));
+    }
+
+    [Test]
+    public async Task A_stored_null_reads_as_null_in_a_member_that_starts_with_a_value()
+    {
+        var preset = new Preset { Note = null, Quota = null, Enabled = null, Since = null };
+        var kept = new Preset();
+        using (var seed = NewScope())
+        {
+            await Repo<Preset, Guid>(seed).AddAsync(preset);
+            await Repo<Preset, Guid>(seed).AddAsync(kept);
+            await Commit(seed);
+        }
+
+        using var check = NewScope();
+        var stored = (await Repo<Preset, Guid>(check).GetAsync(preset.Id))!;
+        Assert.That(new object?[] { stored.Note, stored.Quota, stored.Enabled, stored.Since }, Is.All.Null);
+
+        var listed = (await Repo<Preset, Guid>(check).GetAllAsync()).Single(row => row.Id == preset.Id);
+        Assert.That(new object?[] { listed.Note, listed.Quota, listed.Enabled, listed.Since }, Is.All.Null);
+
+        var other = (await Repo<Preset, Guid>(check).GetAsync(kept.Id))!;
+        Assert.That((other.Note, other.Quota, other.Enabled), Is.EqualTo(("initial", (int?)10, (bool?)true)));
     }
 }

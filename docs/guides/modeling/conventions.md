@@ -15,6 +15,7 @@ for the behaviors that are policy, not mapping.
 | Element names (Cosmos DB) | camelCase (System.Text.Json web defaults) |
 | Columns vs navigations (relational) | scalars (and scalar collections, for stores with array columns) map to columns; entity references and entity collections are navigations |
 | Foreign keys (relational `Include`) | reference `Order` → `OrderId` on this entity; collection of `Item` → `{Entity}Id` on the element (`Reference(…)`/`Collection(…)` override) |
+| A stored null, on read | `null` in the member, or its type's default when the member cannot hold null, on every engine and every read (by key, listings, raw SQL), whatever the member's initializer: `int? Quota { get; set; } = 10` reads a NULL row as `null`, never 10. An initializer is what a new entity starts with, not what a read fills in |
 
 ## `DataConventions` — the write-policy object
 

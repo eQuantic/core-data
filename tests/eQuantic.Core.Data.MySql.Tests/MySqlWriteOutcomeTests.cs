@@ -79,6 +79,9 @@ public sealed class MySqlWriteOutcomeTests : MySqlIntegrationTest
     public Task A_member_scoped_modify_leaves_the_other_members() => WriteOutcomeScenarios.PartialModifyKeepsOtherMembers(NewScope);
 
     [Test]
+    public Task A_stored_null_reads_as_null_in_a_member_that_starts_with_a_value() => WriteOutcomeScenarios.StoredNullReadsAsNull(NewScope);
+
+    [Test]
     public Task A_bulk_load_of_a_taken_key_fails() => WriteOutcomeScenarios.BulkInsertOfTakenKeyFails(NewScope);
 
     [Test]
