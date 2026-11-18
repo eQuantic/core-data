@@ -648,7 +648,8 @@ internal static class WriteOutcomeScenarios
 
         // What was stored as a value still reads as that value.
         var other = (await Repo<Preset>(check).GetAsync(kept.Id))!;
-        Assert.That((other.Note, other.Quota, other.Enabled), Is.EqualTo(("initial", (int?)10, (bool?)true)));
+        Assert.That((other.Note, other.Quota, other.Enabled, other.Since),
+            Is.EqualTo(("initial", (int?)10, (bool?)true, (DateTime?)new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc))));
     }
 
     /// <summary>
