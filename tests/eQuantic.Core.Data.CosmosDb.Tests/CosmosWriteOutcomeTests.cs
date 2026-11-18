@@ -558,8 +558,8 @@ public sealed class CosmosWriteOutcomeTests : CosmosIntegrationTest
     [Test]
     public async Task A_stored_null_reads_as_null_in_a_member_that_starts_with_a_value()
     {
-        var preset = new Preset { Note = null, Quota = null, Enabled = null, Since = null };
-        var kept = new Preset();
+        var preset = new Preset { Category = Partition, Note = null, Quota = null, Enabled = null, Since = null };
+        var kept = new Preset { Category = Partition };
         using (var seed = NewScope())
         {
             await RepoOf<Preset>(seed).AddAsync(preset);
